@@ -426,6 +426,22 @@ impl SettingsWindowView {
                         );
                     }
                 });
+        let save_images_as_files_switch = Switch::new("settings-clipboard-save-images-as-files")
+            .large()
+            .checked(clipboard.save_images_as_files)
+            .accessibility_label(translator.translate("settings.clipboard.save_images_as_files"))
+            .on_click({
+                let view = view.clone();
+                let save_error = save_error.clone();
+                move |checked, _, cx| {
+                    persist_clipboard_change(
+                        view.clone(),
+                        move |clipboard| clipboard.save_images_as_files = *checked,
+                        save_error.clone(),
+                        cx,
+                    );
+                }
+            });
 
         let mut section = v_flex()
             .w_full()
@@ -638,6 +654,18 @@ impl SettingsWindowView {
                             .into(),
                     ),
                     confirm_favorite_removal_switch,
+                ),
+            )
+            .child(
+                self.setting_row(
+                    theme,
+                    translator.translate("settings.clipboard.save_images_as_files"),
+                    Some(
+                        translator
+                            .translate("settings.clipboard.save_images_as_files_description")
+                            .into(),
+                    ),
+                    save_images_as_files_switch,
                 ),
             )
             .child(self.render_search_engines(&translator, &save_error, cx));

@@ -651,6 +651,8 @@
   "settings.clipboard.auto_clear_search_description": "Clear the search box when the window is shown.",
   "settings.clipboard.confirm_favorite_removal": "Confirm before removing favorites",
   "settings.clipboard.confirm_favorite_removal_description": "Show a confirmation dialog before removing one or more favorites.",
+  "settings.clipboard.save_images_as_files": "Save images in original format",
+  "settings.clipboard.save_images_as_files_description": "Newly captured images are stored uncompressed with their original format and extension, so image viewers can open them directly. This uses more disk space and leaves existing data untouched.",
   "settings.clipboard.window_position": "Window display position",
   "settings.clipboard.window_position_description": "Choose how the window is positioned for normal show and hide actions; edge mode takes priority.",
   "settings.clipboard.window_position.mouse_center": "Mouse center",

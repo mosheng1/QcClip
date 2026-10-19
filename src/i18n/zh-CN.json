@@ -651,6 +651,8 @@
   "settings.clipboard.auto_clear_search_description": "窗口显示后自动清空搜索框。",
   "settings.clipboard.confirm_favorite_removal": "取消收藏前确认",
   "settings.clipboard.confirm_favorite_removal_description": "取消单个或多个收藏前显示确认弹窗。",
+  "settings.clipboard.save_images_as_files": "图片以原图格式保存",
+  "settings.clipboard.save_images_as_files_description": "开启后新捕获的图片不再压缩，以PNG等原始格式存放，可直接用图片软件打开。占用空间会增加，已有数据不受影响。",
   "settings.clipboard.window_position": "窗口显示位置",
   "settings.clipboard.window_position_description": "选择普通显示和隐藏时窗口的定位方式；贴边状态优先使用贴边位置。",
   "settings.clipboard.window_position.mouse_center": "鼠标中心",

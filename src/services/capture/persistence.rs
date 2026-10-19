@@ -20,7 +20,10 @@ use super::{
 use crate::services::{
     application_icon::{ApplicationIconStore, upsert_application_icon},
     database::{Database, LIST_ORDER_GAP},
-    storage::{RawBlob, RawBlobStore},
+    storage::{
+        RawBlob, RawBlobStore, image_extension_from_header, image_extension_rank,
+        save_images_as_files,
+    },
 };
 
 const DEFAULT_INLINE_THRESHOLD: usize = 64 * 1024;
@@ -228,6 +231,23 @@ impl CaptureService {
         };
         let mut total_bytes = 0_i64;
         let mut retained_blob_ids = HashSet::new();
+        // 同一张图在剪贴板里往往同时提供 PNG、JPEG、WebP 等多种格式，
+        // 只让优先级最高的一份落成明文图片，避免数据目录里出现同一张图的多个副本；
+        // 其余格式照旧压缩保存，粘贴时各格式仍然齐全。
+        let preferred_image_index = if save_images_as_files() {
+            captured
+                .formats
+                .iter()
+                .enumerate()
+                .filter_map(|(index, format)| {
+                    let extension = image_extension_from_header(format.bytes.as_deref()?)?;
+                    Some((image_extension_rank(extension), index))
+                })
+                .min_by_key(|(rank, index)| (*rank, *index))
+                .map(|(_, index)| index)
+        } else {
+            None
+        };
 
         for (index, format) in captured.formats.iter().enumerate() {
             let is_primary = index == primary_index;
@@ -266,7 +286,13 @@ impl CaptureService {
                     // 已在加载合并候选时校验过原文件，同一事务内直接复用，避免重新压缩和落盘。
                     ("external", None, Some(*blob_id), bytes.len() as i64)
                 } else {
-                    let pending = self.blob_store.write_pending(bytes)?;
+                    // 只让优先级最高的图片格式落成明文，其余内容仍按原有方式压缩存储
+                    let pending = match image_extension_from_header(bytes) {
+                        Some(extension) if Some(index) == preferred_image_index => {
+                            self.blob_store.write_pending_raw(bytes, extension)?
+                        }
+                        _ => self.blob_store.write_pending(bytes)?,
+                    };
                     let blob = self.blob_store.commit_pending(&pending)?;
                     let blob_id = upsert_binary_blob(&transaction, &blob, timestamp)?;
                     ("external", None, Some(blob_id), bytes.len() as i64)

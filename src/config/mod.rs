@@ -715,6 +715,11 @@ pub struct ClipboardConfig {
     pub edge_hide: bool,
     pub edge_hide_show_edge: bool,
     pub search_engines: Vec<SearchEngine>,
+    /// 是否把图片以可直接打开的文件形式保存到数据目录。
+    ///
+    /// 开启后新捕获的图片不再压缩，文件名使用内容哈希加图片扩展名，可由图片软件直接打开。
+    /// 只影响后续捕获，已有记录按原路径继续读取，切换开关不会重写历史文件。
+    pub save_images_as_files: bool,
 }
 
 /// 当前历史范围的时间、条数限制和启动清理设置。
@@ -968,6 +973,7 @@ impl Default for ClipboardConfig {
             edge_hide: false,
             edge_hide_show_edge: true,
             search_engines: Vec::new(),
+            save_images_as_files: false,
         }
     }
 }

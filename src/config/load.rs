@@ -624,6 +624,13 @@ fn read_clipboard(object: &Map<String, Value>, warnings: &mut Vec<String>) -> Cl
             default.edge_hide_show_edge,
             warnings,
         ),
+        save_images_as_files: read_field(
+            object,
+            "saveImagesAsFiles",
+            "clipboard.saveImagesAsFiles",
+            default.save_images_as_files,
+            warnings,
+        ),
         search_engines: read_field(
             object,
             "searchEngines",

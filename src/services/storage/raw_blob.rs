@@ -3,6 +3,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Component, Path, PathBuf},
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 use sha2::{Digest, Sha256};
@@ -13,7 +14,58 @@ use crate::services::data_runtime;
 
 const DATA_DIRECTORY: &str = "data";
 const PENDING_DIRECTORY: &str = ".pending";
+/// 原样保存的图片单独存放，避免在满是哈希文件的数据目录里不好找。
+const IMAGES_DIRECTORY: &str = "images";
 const ZSTD_COMPRESSION_LEVEL: i32 = 3;
+
+/// 是否把图片以可直接打开的文件形式落盘。
+///
+/// 由设置页控制，修改后立即对后续捕获生效，已有文件保持原有存储方式。
+/// 开启时不压缩图片字节，文件名使用内容哈希加图片扩展名，例如 `a1b2....png`。
+static SAVE_IMAGES_AS_FILES: AtomicBool = AtomicBool::new(false);
+
+pub fn save_images_as_files() -> bool {
+    SAVE_IMAGES_AS_FILES.load(Ordering::Relaxed)
+}
+
+pub fn set_save_images_as_files(enabled: bool) {
+    SAVE_IMAGES_AS_FILES.store(enabled, Ordering::Relaxed);
+}
+
+/// 按文件头判断常见图片容器格式，命中时返回落盘使用的扩展名。
+///
+/// 剪贴板里的图片多数直接携带 PNG 等容器字节，少数是 CF_DIB 裸位图；
+/// 裸位图没有可识别的容器，返回 `None` 时继续按原有方式存储。
+pub fn image_extension_from_header(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
+        Some("png")
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some("jpg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("gif")
+    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        Some("webp")
+    } else {
+        None
+    }
+}
+
+/// 判断扩展名是否属于原样保存的图片，用于决定落盘目录。
+fn is_image_extension(extension: &str) -> bool {
+    matches!(extension, "png" | "jpg" | "jpeg" | "gif" | "webp")
+}
+
+/// 同一张图的多个格式里，数字越小越优先落成明文文件。
+///
+/// PNG 无损且通用，优先；WebP 次之；JPEG 有损但兼容性好；GIF 只用于动图。
+pub fn image_extension_rank(extension: &str) -> u8 {
+    match extension {
+        "png" => 0,
+        "webp" => 1,
+        "jpg" | "jpeg" => 2,
+        _ => 3,
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum BlobCompression {
@@ -30,9 +82,10 @@ impl BlobCompression {
         }
     }
 
-    fn file_name(self, sha256: &[u8; 32]) -> String {
+    /// 生成规范文件名。未压缩时使用调用方给出的扩展名，缺省仍是 `bin`。
+    fn file_name(self, sha256: &[u8; 32], raw_extension: Option<&str>) -> String {
         match self {
-            Self::None => format!("{}.bin", encode_hex(sha256)),
+            Self::None => format!("{}.{}", encode_hex(sha256), raw_extension.unwrap_or("bin")),
             Self::Zstd => format!("{}.bin.zst", encode_hex(sha256)),
         }
     }
@@ -81,6 +134,8 @@ pub struct PendingBlob {
     byte_length: u64,
     relative_path: PathBuf,
     compression: BlobCompression,
+    /// 未压缩落盘时使用的扩展名，`None` 表示沿用 `bin`。
+    raw_extension: Option<String>,
 }
 
 impl PendingBlob {
@@ -215,15 +270,40 @@ impl RawBlobStore {
     }
 
     pub fn write_pending(&self, bytes: &[u8]) -> Result<PendingBlob, RawBlobError> {
+        self.write_pending_inner(bytes, None)
+    }
+
+    /// 以原始字节和指定扩展名落盘，不做压缩。
+    ///
+    /// 用于需要保留可直接打开形式的图片；写入内容与数据库记录的哈希、长度保持一致，
+    /// 因此去重、校验和还原链路都不受影响。
+    pub fn write_pending_raw(
+        &self,
+        bytes: &[u8],
+        extension: &str,
+    ) -> Result<PendingBlob, RawBlobError> {
+        self.write_pending_inner(bytes, Some(extension))
+    }
+
+    fn write_pending_inner(
+        &self,
+        bytes: &[u8],
+        raw_extension: Option<&str>,
+    ) -> Result<PendingBlob, RawBlobError> {
         let _operation =
             data_runtime::begin_operation().map_err(|_| RawBlobError::DataSwitching)?;
         let sha256 = hash_bytes(bytes);
-        let compressed =
-            zstd::bulk::compress(bytes, ZSTD_COMPRESSION_LEVEL).map_err(RawBlobError::Compress)?;
-        let (stored_bytes, compression) = if compressed.len() < bytes.len() {
-            (compressed.as_slice(), BlobCompression::Zstd)
-        } else {
-            (bytes, BlobCompression::None)
+        let compressed = match raw_extension {
+            // 明确要求原样落盘时跳过压缩，避免图片变成无法直接识别的压缩块
+            Some(_) => None,
+            None => Some(
+                zstd::bulk::compress(bytes, ZSTD_COMPRESSION_LEVEL)
+                    .map_err(RawBlobError::Compress)?,
+            ),
+        };
+        let (stored_bytes, compression) = match compressed.as_deref() {
+            Some(data) if data.len() < bytes.len() => (data, BlobCompression::Zstd),
+            _ => (bytes, BlobCompression::None),
         };
         let relative_path = PathBuf::from(DATA_DIRECTORY)
             .join(PENDING_DIRECTORY)
@@ -249,6 +329,7 @@ impl RawBlobStore {
             byte_length: bytes.len() as u64,
             relative_path,
             compression,
+            raw_extension: raw_extension.map(str::to_owned),
         };
         self.verify_file(
             &path,
@@ -270,7 +351,14 @@ impl RawBlobStore {
             pending.compression,
         )?;
 
-        let blob = self.canonical_blob(pending.sha256, pending.byte_length, pending.compression);
+        let blob = self.canonical_blob(
+            pending.sha256,
+            pending.byte_length,
+            pending.compression,
+            pending.raw_extension.as_deref(),
+        );
+        // 路径校验会规范化父目录，所以必须先建目录再解析路径
+        self.ensure_parent_directory(&blob.relative_path)?;
         let target_path = self.resolve_relative_path(&blob.relative_path)?;
         if target_path.exists() {
             self.verify_file(
@@ -381,8 +469,17 @@ impl RawBlobStore {
                     report.verified_blobs.push(blob.clone());
                 }
                 Err(error @ (RawBlobError::Missing { .. } | RawBlobError::Corrupt { .. })) => {
-                    let canonical_blob =
-                        self.canonical_blob(blob.sha256, blob.byte_length, blob.compression());
+                    // 数据库里的路径可能沿用旧命名，按原扩展名重建规范文件名后再找一次
+                    let raw_extension = blob
+                        .relative_path
+                        .extension()
+                        .and_then(|value| value.to_str());
+                    let canonical_blob = self.canonical_blob(
+                        blob.sha256,
+                        blob.byte_length,
+                        blob.compression(),
+                        raw_extension,
+                    );
                     if canonical_blob.relative_path != blob.relative_path
                         && self.verify(&canonical_blob).is_ok()
                     {
@@ -400,27 +497,13 @@ impl RawBlobStore {
             }
         }
 
-        let entries = fs::read_dir(&self.data_directory).map_err(|source| RawBlobError::Scan {
-            path: self.data_directory.clone(),
-            source,
-        })?;
-        for entry in entries {
-            let entry = entry.map_err(|source| RawBlobError::Scan {
-                path: self.data_directory.clone(),
-                source,
-            })?;
-            let file_type = entry.file_type().map_err(|source| RawBlobError::Scan {
-                path: entry.path(),
-                source,
-            })?;
-            let file_name = entry.file_name();
-            let file_name = file_name.to_string_lossy();
-            if !file_type.is_file()
-                || !(file_name.ends_with(".bin") || file_name.ends_with(".bin.zst"))
-            {
-                continue;
-            }
-            let relative_path = PathBuf::from(DATA_DIRECTORY).join(entry.file_name());
+        let mut managed = Vec::new();
+        collect_managed_files(
+            &self.data_directory,
+            Path::new(DATA_DIRECTORY),
+            &mut managed,
+        )?;
+        for relative_path in managed {
             if !referenced_paths.contains(&relative_path) {
                 report.orphan_files.push(relative_path);
             }
@@ -451,12 +534,33 @@ impl RawBlobStore {
         sha256: [u8; 32],
         byte_length: u64,
         compression: BlobCompression,
+        raw_extension: Option<&str>,
     ) -> RawBlob {
+        // 原样保存的图片放进 images 子目录，压缩块保持数据库根目录不变
+        let mut relative_path = PathBuf::from(DATA_DIRECTORY);
+        if let Some(extension) = raw_extension {
+            if is_image_extension(extension) && compression == BlobCompression::None {
+                relative_path.push(IMAGES_DIRECTORY);
+            }
+        }
+        relative_path.push(compression.file_name(&sha256, raw_extension));
         RawBlob {
             sha256,
             byte_length,
-            relative_path: PathBuf::from(DATA_DIRECTORY).join(compression.file_name(&sha256)),
+            relative_path,
         }
+    }
+
+    /// 创建数据文件所需的父目录，图片子目录在第一次写入前还不存在。
+    fn ensure_parent_directory(&self, relative_path: &Path) -> Result<(), RawBlobError> {
+        let Some(parent) = relative_path.parent() else {
+            return Ok(());
+        };
+        if parent == Path::new(DATA_DIRECTORY) {
+            return Ok(());
+        }
+        let path = self.root.join(parent);
+        fs::create_dir_all(&path).map_err(|source| RawBlobError::CreateDirectory { path, source })
     }
 
     fn resolve_relative_path(&self, relative_path: &Path) -> Result<PathBuf, RawBlobError> {
@@ -482,12 +586,19 @@ impl RawBlobStore {
                 .ok_or_else(|| RawBlobError::InvalidRelativePath {
                     path: relative_path.to_path_buf(),
                 })?;
-            let canonical_parent =
-                dunce::canonicalize(parent).map_err(|source| RawBlobError::Read {
-                    path: parent.to_path_buf(),
-                    source,
-                })?;
-            canonical_parent.join(path.file_name().unwrap_or_default())
+            // 父目录可能尚未创建（例如首次写入前的 images 子目录），
+            // 此时路径上不可能存在指向外部的符号链接，直接用字面路径做边界判断；
+            // 若直接对不存在的父目录做规范化，整个扫描会因为读错误中断。
+            match dunce::canonicalize(parent) {
+                Ok(canonical_parent) => canonical_parent.join(path.file_name().unwrap_or_default()),
+                Err(source) if source.kind() == std::io::ErrorKind::NotFound => path.clone(),
+                Err(source) => {
+                    return Err(RawBlobError::Read {
+                        path: parent.to_path_buf(),
+                        source,
+                    });
+                }
+            }
         };
         if !boundary_path.starts_with(&self.data_directory) {
             return Err(RawBlobError::InvalidRelativePath {
@@ -698,6 +809,61 @@ fn hash_decompressed_file(
     Ok((byte_length, hasher.finalize().into()))
 }
 
+/// 判断数据目录中的文件名是否由本模块管理。
+///
+/// 除原有的 `.bin` 与 `.bin.zst` 外，还要覆盖图片原样落盘产生的扩展名，
+/// 否则这些文件不会进入孤儿清理，日后调整扫描规则时也容易漏判。
+fn is_managed_data_file(file_name: &str) -> bool {
+    if file_name.ends_with(".bin") || file_name.ends_with(".bin.zst") {
+        return true;
+    }
+    Path::new(file_name)
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(is_image_extension)
+}
+
+/// 递归收集数据目录中由本模块管理的文件，图片子目录下探一层。
+///
+/// 图片改为存放在 `data/images` 之后，只扫根目录会漏掉它们，
+/// 孤儿文件就检测不出来，所以这里要跟着下探。
+fn collect_managed_files(
+    directory: &Path,
+    relative_prefix: &Path,
+    output: &mut Vec<PathBuf>,
+) -> Result<(), RawBlobError> {
+    let entries = fs::read_dir(directory).map_err(|source| RawBlobError::Scan {
+        path: directory.to_path_buf(),
+        source,
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|source| RawBlobError::Scan {
+            path: directory.to_path_buf(),
+            source,
+        })?;
+        let file_type = entry.file_type().map_err(|source| RawBlobError::Scan {
+            path: entry.path(),
+            source,
+        })?;
+        let file_name = entry.file_name();
+        let relative_path = relative_prefix.join(&file_name);
+        if file_type.is_dir() {
+            // 只下探图片子目录，其余目录不属于本模块管理的存储范围
+            if file_name.to_string_lossy().as_ref() == IMAGES_DIRECTORY {
+                collect_managed_files(&entry.path(), &relative_path, output)?;
+            }
+            continue;
+        }
+        if !file_type.is_file() {
+            continue;
+        }
+        if is_managed_data_file(file_name.to_string_lossy().as_ref()) {
+            output.push(relative_path);
+        }
+    }
+    Ok(())
+}
+
 fn encode_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut output = String::with_capacity(bytes.len() * 2);
@@ -842,6 +1008,76 @@ mod tests {
             store.read(&blob),
             Err(RawBlobError::InvalidRelativePath { .. })
         ));
+    }
+
+    #[test]
+    fn raw_image_extension_is_kept_without_compression() {
+        let (_directory, store) = store();
+        // 重复字节压缩率极高，若走压缩路径一定会变成 .bin.zst
+        let bytes = vec![0x5a; 256 * 1024];
+        let pending = store
+            .write_pending_raw(&bytes, "png")
+            .expect("无法写入原样图片");
+        assert_eq!(pending.compression, BlobCompression::None);
+
+        let blob = store.commit_pending(&pending).expect("无法提交原样图片");
+        // 图片落到独立的 images 子目录，避免和哈希命名的压缩块混在一起
+        assert_eq!(
+            blob.relative_path(),
+            Path::new("data/images").join(format!("{}.png", encode_hex(blob.sha256())))
+        );
+        assert_eq!(store.read(&blob).expect("无法读取原样图片"), bytes);
+    }
+
+    #[test]
+    fn reconcile_scans_image_directory() {
+        let (_directory, store) = store();
+        let bytes = vec![0x5a; 256 * 1024];
+        let pending = store
+            .write_pending_raw(&bytes, "png")
+            .expect("无法写入原样图片");
+        let blob = store.commit_pending(&pending).expect("无法提交原样图片");
+
+        // 被引用的图片文件不算孤儿
+        let report = store
+            .reconcile(std::slice::from_ref(&blob))
+            .expect("扫描失败");
+        assert!(report.verified_blobs.contains(&blob));
+        assert!(report.orphan_files.is_empty());
+
+        // 子目录里未被引用的图片仍能被识别为孤儿
+        let orphan = blob.relative_path().with_file_name("ffffffff.png");
+        let orphan_path = store.root.join(&orphan);
+        fs::copy(store.root.join(blob.relative_path()), &orphan_path).expect("无法复制图片");
+        let report = store
+            .reconcile(std::slice::from_ref(&blob))
+            .expect("扫描失败");
+        assert_eq!(report.orphan_files, vec![orphan]);
+    }
+
+    #[test]
+    fn image_extension_is_detected_from_header() {
+        assert_eq!(
+            image_extension_from_header(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0x00]),
+            Some("png")
+        );
+        assert_eq!(
+            image_extension_from_header(&[0xFF, 0xD8, 0xFF, 0xE0]),
+            Some("jpg")
+        );
+        assert_eq!(image_extension_from_header(b"GIF89a......"), Some("gif"));
+        assert_eq!(
+            image_extension_from_header(b"RIFF\x00\x00\x00\x00WEBP"),
+            Some("webp")
+        );
+        assert_eq!(image_extension_from_header(b"plain text"), None);
+    }
+
+    #[test]
+    fn image_extension_rank_prefers_lossless_then_webp() {
+        assert!(image_extension_rank("png") < image_extension_rank("webp"));
+        assert!(image_extension_rank("webp") < image_extension_rank("jpg"));
+        assert_eq!(image_extension_rank("jpg"), image_extension_rank("jpeg"));
     }
 
     #[test]

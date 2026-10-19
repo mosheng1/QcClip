@@ -61,12 +61,15 @@ impl ConfigRuntime {
     pub(crate) fn install(path: impl Into<PathBuf>, cx: &mut App) {
         let path = path.into();
         let config = load_config(&path);
+        // 存储层在应用启动前就已实例化，这里把配置里的图片保存方式同步给存储层
+        crate::services::storage::set_save_images_as_files(config.clipboard.save_images_as_files);
         cx.set_global(Self { config, path });
     }
 
     pub(crate) fn reload(path: impl Into<PathBuf>, cx: &mut App) -> ConfigReload {
         let path = path.into();
         let config = load_config(&path);
+        crate::services::storage::set_save_images_as_files(config.clipboard.save_images_as_files);
         let previous = cx.update_global::<Self, _>(|runtime, _| {
             let previous = runtime.config.clone();
             runtime.config = config.clone();
@@ -656,12 +659,15 @@ pub(crate) fn set_clipboard_config(
     let edge_hide = clipboard.edge_hide;
     let edge_hide_show_edge = clipboard.edge_hide_show_edge;
     let hover_preview_enabled = clipboard.hover_preview_enabled;
+    let save_images_as_files = clipboard.save_images_as_files;
     next.clipboard = clipboard;
     persist_config(&path, &next)?;
 
     cx.update_global::<ConfigRuntime, _>(|runtime, _| {
         runtime.config = next;
     });
+    // 只影响后续捕获，已有文件保持原存储方式，不做批量重写
+    crate::services::storage::set_save_images_as_files(save_images_as_files);
     if current.edge_hide != edge_hide {
         crate::windows::main::MainWindowService::set_edge_hide_enabled(edge_hide, cx);
     }
@@ -688,12 +694,14 @@ pub(crate) fn reset_clipboard_config(cx: &mut App) -> Result<bool, ConfigError> 
         return Ok(false);
     }
 
+    let save_images_as_files = default.save_images_as_files;
     next.clipboard = default;
     persist_config(&path, &next)?;
 
     cx.update_global::<ConfigRuntime, _>(|runtime, _| {
         runtime.config = next;
     });
+    crate::services::storage::set_save_images_as_files(save_images_as_files);
     if current.edge_hide {
         crate::windows::main::MainWindowService::set_edge_hide_enabled(false, cx);
     }
