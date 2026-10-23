@@ -10,7 +10,7 @@ use crate::domain::{
         CapturedClipboard, FormatCaptureState, FormatKind, RawFormat, RestoreState,
         SourceApplication,
     },
-    clipboard::HistoryItemId,
+    clipboard::{ClipboardItemId, HistoryItemId},
 };
 
 use super::{
@@ -506,6 +506,36 @@ impl CustomTextService {
         tag_ids: &[i64],
     ) -> Result<HistoryItemId, CustomTextError> {
         self.create_manual_text_with_favorite_and_tags(text, true, tag_ids)
+    }
+
+    /// 查找与 `text` 字节完全一致的手动文本条目，用于快捷收藏的幂等复用。
+    pub fn find_manual_text_item(
+        &self,
+        text: &str,
+    ) -> Result<Option<ClipboardItemId>, CustomTextError> {
+        let bytes = encode_text(text);
+        let content_hash = hash_format_set([(
+            CUSTOM_TEXT_FORMAT_NAMESPACE,
+            CUSTOM_TEXT_FORMAT_KEY,
+            bytes.as_slice(),
+        )]);
+        let connection = self.database.connect_read()?;
+        connection
+            .query_row(
+                "SELECT id
+                 FROM clipboard_items
+                 WHERE origin_kind = 'manual'
+                   AND hash_version = ?1
+                   AND content_hash = ?2
+                 LIMIT 1",
+                params![
+                    super::capture::CONTENT_HASH_VERSION,
+                    content_hash.as_slice()
+                ],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(CustomTextError::from)
     }
 
     fn create_manual_text_with_favorite_and_tags(
@@ -1065,6 +1095,40 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("无法查询格式数量")
+    }
+
+    #[test]
+    fn find_manual_text_item_matches_exact_encoded_bytes() {
+        let context = TestContext::new();
+
+        assert_eq!(
+            context
+                .service
+                .find_manual_text_item("想法")
+                .expect("无法查询手动文本"),
+            None
+        );
+
+        let history_id = context
+            .service
+            .create_manual_text("想法")
+            .expect("无法创建手动文本");
+        let item_id = context.item_id(history_id);
+
+        assert_eq!(
+            context
+                .service
+                .find_manual_text_item("想法")
+                .expect("无法查询手动文本"),
+            Some(item_id)
+        );
+        assert_eq!(
+            context
+                .service
+                .find_manual_text_item("想法 ")
+                .expect("无法查询手动文本"),
+            None
+        );
     }
 
     #[test]

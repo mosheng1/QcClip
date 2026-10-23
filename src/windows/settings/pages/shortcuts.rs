@@ -2,16 +2,16 @@ use crate::ui::scale::ui_rem;
 
 use super::super::{SettingsPage, notify_settings_error};
 use gpui::prelude::*;
-use gpui::{AnyElement, Context, ScrollAnchor};
+use gpui::{AnyElement, App, Context, ScrollAnchor};
 
 use super::super::{
-    SettingsWindowView, ShortcutCategory,
+    SettingsWindowView, ShortcutCategory, ShortcutRecordingTarget,
     components::{compact_setting_row, settings_error_row, settings_fused_dropdown},
 };
 use crate::{
     config::{
         QuickPasteShortcutConfig, QuickPasteShortcutKey, QuickPasteShortcutModifier,
-        SessionShortcutConfig, SessionShortcutId, ShortcutsConfig,
+        SessionShortcutConfig, SessionShortcutId,
     },
     config_runtime, hotkey, i18n,
     windows::menu::{DropdownItem, DropdownItemId},
@@ -31,6 +31,80 @@ use gpui_component::{
     v_flex,
 };
 
+impl ShortcutRecordingTarget {
+    fn is_main_window(self) -> bool {
+        self == Self::ToggleMainWindow
+    }
+
+    fn default_binding(self) -> Option<crate::config::ShortcutBinding> {
+        use crate::config::{ShortcutBinding, ShortcutsConfig};
+
+        match self {
+            Self::ToggleMainWindow => Some(ShortcutBinding::toggle_main_window_default()),
+            Self::OpenSettings => ShortcutsConfig::default().open_settings,
+            Self::ToggleClipboardMonitor => ShortcutsConfig::default().toggle_clipboard_monitor,
+            Self::PlainTextPaste => ShortcutsConfig::default().plain_text_paste,
+            Self::QuickPaste => ShortcutsConfig::default().quick_paste,
+            Self::AddFavorite => ShortcutsConfig::default().add_favorite,
+            Self::Session(id) => ShortcutsConfig::default().session(id).binding.clone(),
+        }
+    }
+
+    fn code(self) -> &'static str {
+        match self {
+            Self::ToggleMainWindow => "toggleMainWindow",
+            Self::OpenSettings => "openSettings",
+            Self::ToggleClipboardMonitor => "toggleClipboardMonitor",
+            Self::PlainTextPaste => "plainTextPaste",
+            Self::QuickPaste => "quickPaste",
+            Self::AddFavorite => "addFavorite",
+            Self::Session(id) => id.code(),
+        }
+    }
+
+    fn set_binding(
+        self,
+        binding: Option<crate::config::ShortcutBinding>,
+        cx: &mut App,
+    ) -> Result<(), String> {
+        match self {
+            Self::ToggleMainWindow => hotkey::set_toggle_main_window_shortcut(binding, cx),
+            Self::OpenSettings => hotkey::set_open_settings_shortcut(binding, cx),
+            Self::ToggleClipboardMonitor => {
+                hotkey::set_toggle_clipboard_monitor_shortcut(binding, cx)
+            }
+            Self::PlainTextPaste => hotkey::set_plain_text_paste_shortcut(binding, cx),
+            Self::QuickPaste => hotkey::set_quick_paste_shortcut(binding, cx),
+            Self::AddFavorite => hotkey::set_add_favorite_shortcut(binding, cx),
+            Self::Session(id) => hotkey::set_session_shortcut_binding(id, binding, cx),
+        }
+    }
+
+    fn reset(self, cx: &mut App) -> Result<(), String> {
+        match self {
+            Self::ToggleMainWindow => hotkey::reset_toggle_main_window_shortcut(cx),
+            Self::OpenSettings => hotkey::reset_open_settings_shortcut(cx),
+            Self::ToggleClipboardMonitor => hotkey::reset_toggle_clipboard_monitor_shortcut(cx),
+            Self::PlainTextPaste => hotkey::reset_plain_text_paste_shortcut(cx),
+            Self::QuickPaste => hotkey::reset_quick_paste_shortcut(cx),
+            Self::AddFavorite => hotkey::reset_add_favorite_shortcut(cx),
+            Self::Session(id) => hotkey::reset_session_shortcut_binding(id, cx),
+        }
+    }
+
+    fn reject(self, cx: &mut App) {
+        match self {
+            Self::ToggleMainWindow => hotkey::reject_shortcut_recording(true, cx),
+            Self::OpenSettings => hotkey::reject_open_settings_recording(cx),
+            Self::ToggleClipboardMonitor => hotkey::reject_toggle_clipboard_monitor_recording(cx),
+            Self::PlainTextPaste => hotkey::reject_plain_text_paste_recording(cx),
+            Self::QuickPaste => hotkey::reject_quick_paste_recording(cx),
+            Self::AddFavorite => hotkey::reject_add_favorite_recording(cx),
+            Self::Session(_) => hotkey::reject_shortcut_recording(false, cx),
+        }
+    }
+}
+
 impl SettingsWindowView {
     pub(in crate::windows::settings) fn render_shortcuts(
         &self,
@@ -44,13 +118,12 @@ impl SettingsWindowView {
         let clipboard_monitor_binding = shortcuts.toggle_clipboard_monitor.clone();
         let plain_text_paste_binding = shortcuts.plain_text_paste.clone();
         let quick_paste_binding = shortcuts.quick_paste.clone();
+        let add_favorite_binding = shortcuts.add_favorite.clone();
+        let add_favorite_open_editor_on_empty = shortcuts.add_favorite_open_editor_on_empty;
         let quick_paste_1_to_9 = shortcuts.quick_paste_1_to_9;
-        let recording = self.recording_shortcut;
-        let recording_open_settings = self.recording_open_settings;
-        let recording_toggle_clipboard_monitor = self.recording_toggle_clipboard_monitor;
-        let recording_plain_text_paste = self.recording_plain_text_paste;
-        let recording_quick_paste = self.recording_quick_paste;
-        let recording_session_shortcut = self.recording_session_shortcut;
+        let recording_target = self.recording_target;
+        let recording = recording_target.is_some();
+        let is_recording = |target| recording_target == Some(target);
         let selected_category = self.selected_shortcut_category;
         let view = cx.entity().clone();
         let view_for_key = view.clone();
@@ -67,12 +140,7 @@ impl SettingsWindowView {
                 });
                 view_for_page_reset.update(cx, |view, cx| {
                     view.shortcut_error = notify_settings_error(SettingsPage::Shortcuts, error, cx);
-                    view.recording_shortcut = false;
-                    view.recording_open_settings = false;
-                    view.recording_toggle_clipboard_monitor = false;
-                    view.recording_plain_text_paste = false;
-                    view.recording_quick_paste = false;
-                    view.recording_session_shortcut = None;
+                    view.recording_target = None;
                     cx.notify();
                 });
             });
@@ -88,15 +156,13 @@ impl SettingsWindowView {
         );
 
         let status = hotkey::registration_status(cx);
-        let global_recording = recording
-            && !recording_open_settings
-            && !recording_plain_text_paste
-            && !recording_quick_paste
-            && recording_session_shortcut.is_none();
-        let settings_recording = recording && recording_open_settings;
-        let clipboard_monitor_recording = recording && recording_toggle_clipboard_monitor;
-        let plain_text_paste_recording = recording && recording_plain_text_paste;
-        let quick_paste_recording = recording && recording_quick_paste;
+        let global_recording = is_recording(ShortcutRecordingTarget::ToggleMainWindow);
+        let settings_recording = is_recording(ShortcutRecordingTarget::OpenSettings);
+        let clipboard_monitor_recording =
+            is_recording(ShortcutRecordingTarget::ToggleClipboardMonitor);
+        let plain_text_paste_recording = is_recording(ShortcutRecordingTarget::PlainTextPaste);
+        let quick_paste_recording = is_recording(ShortcutRecordingTarget::QuickPaste);
+        let add_favorite_recording = is_recording(ShortcutRecordingTarget::AddFavorite);
         let quick_paste_1_to_9_status = if recording {
             hotkey::RegistrationStatus::Suspended
         } else {
@@ -154,7 +220,10 @@ impl SettingsWindowView {
             .overflow_hidden()
             .gap_4()
             .on_key_down(move |event: &KeyDownEvent, window, cx| {
-                if !shortcut_id.read(cx).recording_shortcut || event.is_held {
+                let Some(target) = shortcut_id.read(cx).recording_target else {
+                    return;
+                };
+                if event.is_held {
                     return;
                 }
                 window.prevent_default();
@@ -165,12 +234,7 @@ impl SettingsWindowView {
                         let _ = notify_settings_error(SettingsPage::Shortcuts, Some(save_error_for_key.clone()), cx);
                     }
                     let _ = shortcut_id.update(cx, |view, cx| {
-                        view.recording_shortcut = false;
-                        view.recording_open_settings = false;
-                        view.recording_toggle_clipboard_monitor = false;
-                        view.recording_plain_text_paste = false;
-                        view.recording_quick_paste = false;
-                        view.recording_session_shortcut = None;
+                        view.recording_target = None;
                         cx.notify();
                     });
                     return;
@@ -179,42 +243,17 @@ impl SettingsWindowView {
                     Ok(binding) => binding,
                     Err(error) => {
                         tracing::error!("保存快捷键失败：{error}");
-                        let target = shortcut_id.read(cx);
-                        if target.recording_open_settings {
-                            hotkey::reject_open_settings_recording(cx);
-                        } else if target.recording_toggle_clipboard_monitor {
-                            hotkey::reject_toggle_clipboard_monitor_recording(cx);
-                        } else if target.recording_plain_text_paste {
-                            hotkey::reject_plain_text_paste_recording(cx);
-                        } else if target.recording_quick_paste {
-                            hotkey::reject_quick_paste_recording(cx);
-                        } else {
-                            hotkey::reject_shortcut_recording(
-                                target.recording_session_shortcut.is_none(),
-                                cx,
-                            );
-                        }
+                        target.reject(cx);
                         let _ = shortcut_id.update(cx, |view, cx| {
                             view.shortcut_error = notify_settings_error(SettingsPage::Shortcuts, Some(save_error_for_key.clone()), cx);
-                            view.recording_shortcut = false;
-                            view.recording_open_settings = false;
-                            view.recording_toggle_clipboard_monitor = false;
-                            view.recording_plain_text_paste = false;
-                            view.recording_quick_paste = false;
-                            view.recording_session_shortcut = None;
+                            view.recording_target = None;
                             cx.notify();
                         });
                         return;
                     }
                 };
-                let recording_session_shortcut =
-                    shortcut_id.read(cx).recording_session_shortcut;
                 #[cfg(target_os = "windows")]
-                if recording_session_shortcut.is_none()
-                    && !shortcut_id.read(cx).recording_open_settings
-                    && !shortcut_id.read(cx).recording_toggle_clipboard_monitor
-                    && !shortcut_id.read(cx).recording_plain_text_paste
-                    && !shortcut_id.read(cx).recording_quick_paste
+                if target.is_main_window()
                     && hotkey::is_win_v_binding(&binding)
                     && !crate::services::system::win_v_hotkey::is_win_v_hotkey_disabled()
                 {
@@ -252,12 +291,7 @@ impl SettingsWindowView {
                                     let _ = notify_settings_error(SettingsPage::Shortcuts, Some(save_error.clone()), cx);
                                 }
                                 let _ = view.update(cx, |view, cx| {
-                                    view.recording_shortcut = false;
-                                    view.recording_open_settings = false;
-                                    view.recording_toggle_clipboard_monitor = false;
-                                    view.recording_plain_text_paste = false;
-                                    view.recording_quick_paste = false;
-                                    view.recording_session_shortcut = None;
+                                    view.recording_target = None;
                                     cx.notify();
                                 });
                             });
@@ -271,30 +305,23 @@ impl SettingsWindowView {
                             .await;
                         cx.update(|cx| {
                             let error = match replacement {
-                                Ok(()) => hotkey::set_toggle_main_window_shortcut(
-                                    Some(binding),
-                                    cx,
-                                )
-                                .err()
-                                .map(|error| {
-                                    tracing::error!("保存快捷键失败：{error}");
-                                    hotkey::reject_shortcut_recording(true, cx);
-                                    save_error.clone()
-                                }),
+                                Ok(()) => target
+                                    .set_binding(Some(binding), cx)
+                                    .err()
+                                    .map(|error| {
+                                        tracing::error!("保存快捷键失败：{error}");
+                                        target.reject(cx);
+                                        save_error.clone()
+                                    }),
                                 Err(error) => {
                                     tracing::error!("替换系统 Win+V 失败：{error}");
-                                    hotkey::reject_shortcut_recording(true, cx);
+                                    target.reject(cx);
                                     Some(replace_error.clone())
                                 }
                             };
                             let _ = view.update(cx, |view, cx| {
                                 view.shortcut_error = notify_settings_error(SettingsPage::Shortcuts, error, cx);
-                                view.recording_shortcut = false;
-                                view.recording_open_settings = false;
-                                view.recording_toggle_clipboard_monitor = false;
-                                view.recording_plain_text_paste = false;
-                                view.recording_quick_paste = false;
-                                view.recording_session_shortcut = None;
+                                view.recording_target = None;
                                 cx.notify();
                             });
                         });
@@ -302,49 +329,15 @@ impl SettingsWindowView {
                     .detach();
                     return;
                 }
-                let result = match recording_session_shortcut {
-                    Some(id) => hotkey::set_session_shortcut_binding(id, Some(binding), cx),
-                    None if shortcut_id.read(cx).recording_open_settings => {
-                        hotkey::set_open_settings_shortcut(Some(binding), cx)
-                    }
-                    None if shortcut_id.read(cx).recording_toggle_clipboard_monitor => {
-                        hotkey::set_toggle_clipboard_monitor_shortcut(Some(binding), cx)
-                    }
-                    None if shortcut_id.read(cx).recording_plain_text_paste => {
-                        hotkey::set_plain_text_paste_shortcut(Some(binding), cx)
-                    }
-                    None if shortcut_id.read(cx).recording_quick_paste => {
-                        hotkey::set_quick_paste_shortcut(Some(binding), cx)
-                    }
-                    None => hotkey::set_toggle_main_window_shortcut(Some(binding), cx),
-                };
+                let result = target.set_binding(Some(binding), cx);
                 let error = result.err().map(|error| {
                     tracing::error!("保存快捷键失败：{error}");
-                    let target = shortcut_id.read(cx);
-                    if target.recording_open_settings {
-                        hotkey::reject_open_settings_recording(cx);
-                    } else if target.recording_toggle_clipboard_monitor {
-                        hotkey::reject_toggle_clipboard_monitor_recording(cx);
-                    } else if target.recording_plain_text_paste {
-                        hotkey::reject_plain_text_paste_recording(cx);
-                    } else if target.recording_quick_paste {
-                        hotkey::reject_quick_paste_recording(cx);
-                    } else {
-                        hotkey::reject_shortcut_recording(
-                            target.recording_session_shortcut.is_none(),
-                            cx,
-                        );
-                    }
+                    target.reject(cx);
                     save_error_for_key.clone()
                 });
                 let _ = shortcut_id.update(cx, |view, cx| {
                     view.shortcut_error = notify_settings_error(SettingsPage::Shortcuts, error, cx);
-                    view.recording_shortcut = false;
-                    view.recording_open_settings = false;
-                    view.recording_toggle_clipboard_monitor = false;
-                    view.recording_plain_text_paste = false;
-                    view.recording_quick_paste = false;
-                    view.recording_session_shortcut = None;
+                    view.recording_target = None;
                     cx.notify();
                 });
             })
@@ -407,11 +400,7 @@ impl SettingsWindowView {
                             save_error.clone(),
                             translator.clone(),
                             theme,
-                            false,
-                            false,
-                            false,
-                            false,
-                            None,
+                            ShortcutRecordingTarget::ToggleMainWindow,
                         ),
                     ))
                     .when(cfg!(target_os = "windows"), |this| this.child(middle_mouse_controls))
@@ -431,11 +420,7 @@ impl SettingsWindowView {
                             save_error.clone(),
                             translator.clone(),
                             theme,
-                            true,
-                            false,
-                            false,
-                            false,
-                            None,
+                            ShortcutRecordingTarget::OpenSettings,
                         ),
                     ))
                     .child(self.compact_setting_row(
@@ -454,11 +439,7 @@ impl SettingsWindowView {
                             save_error.clone(),
                             translator.clone(),
                             theme,
-                            false,
-                            true,
-                            false,
-                            false,
-                            None,
+                            ShortcutRecordingTarget::ToggleClipboardMonitor,
                         ),
                     ))
                     .child(self.compact_setting_row(
@@ -477,11 +458,7 @@ impl SettingsWindowView {
                             save_error.clone(),
                             translator.clone(),
                             theme,
-                            false,
-                            false,
-                            true,
-                            false,
-                            None,
+                            ShortcutRecordingTarget::PlainTextPaste,
                         ),
                     ))
                     .child(self.compact_setting_row(
@@ -500,12 +477,64 @@ impl SettingsWindowView {
                             save_error.clone(),
                             translator.clone(),
                             theme,
-                            false,
-                            false,
-                            false,
-                            true,
-                            None,
+                            ShortcutRecordingTarget::QuickPaste,
                         ),
+                    ))
+                    .child(self.compact_setting_row(
+                        theme,
+                        translator.translate("settings.shortcuts.add_favorite"),
+                        shortcut_recorder(
+                            add_favorite_binding,
+                            if add_favorite_recording {
+                                hotkey::RegistrationStatus::Suspended
+                            } else {
+                                hotkey::add_favorite_registration_status(cx)
+                            },
+                            add_favorite_recording,
+                            view.clone(),
+                            self.recording_focus_handle.clone(),
+                            save_error.clone(),
+                            translator.clone(),
+                            theme,
+                            ShortcutRecordingTarget::AddFavorite,
+                        ),
+                    ))
+                    .child(self.compact_setting_row(
+                        theme,
+                        translator.translate("settings.shortcuts.add_favorite_open_editor_on_empty"),
+                        Checkbox::new("settings-shortcut-add-favorite-open-editor-on-empty")
+                            .checked(add_favorite_open_editor_on_empty)
+                            .accessibility_label(
+                                translator.translate("settings.shortcuts.add_favorite_open_editor_on_empty"),
+                            )
+                            .tooltip(
+                                translator.translate(
+                                    "settings.shortcuts.add_favorite_open_editor_on_empty.tooltip",
+                                ),
+                            )
+                            .on_click({
+                                let view = view.clone();
+                                let save_error = save_error.clone();
+                                move |checked, _, cx| {
+                                    cx.stop_propagation();
+                                    let error = hotkey::set_add_favorite_open_editor_on_empty(*checked, cx)
+                                        .err()
+                                        .map(|error| {
+                                            tracing::error!(
+                                                "更新快捷收藏编辑器开关失败：{error}"
+                                            );
+                                            save_error.clone()
+                                        });
+                                    view.update(cx, |view, cx| {
+                                        view.shortcut_error = notify_settings_error(
+                                            SettingsPage::Shortcuts,
+                                            error,
+                                            cx,
+                                        );
+                                        cx.notify();
+                                    });
+                                }
+                            }),
                     ))
                     .child(self.highlight_element(
                         theme,
@@ -538,7 +567,7 @@ impl SettingsWindowView {
                     .min_w_0()
                     .children(SessionShortcutId::ALL.into_iter().map(|id| {
                         let session_recording =
-                            recording && recording_session_shortcut == Some(id);
+                            recording_target == Some(ShortcutRecordingTarget::Session(id));
                         let session_status = if session_recording {
                             hotkey::RegistrationStatus::Suspended
                         } else {
@@ -1051,26 +1080,11 @@ fn shortcut_recorder(
     save_error: String,
     translator: i18n::Translator,
     theme: gpui_component::ThemeColor,
-    open_settings: bool,
-    toggle_clipboard_monitor: bool,
-    plain_text_paste: bool,
-    quick_paste: bool,
-    id: Option<SessionShortcutId>,
+    target: ShortcutRecordingTarget,
 ) -> AnyElement {
     let registration_failed = status == hotkey::RegistrationStatus::Failed;
     let clear_disabled = recording || binding.is_none();
-    let default_binding = if open_settings {
-        ShortcutsConfig::default().open_settings
-    } else if toggle_clipboard_monitor {
-        ShortcutsConfig::default().toggle_clipboard_monitor
-    } else if plain_text_paste {
-        ShortcutsConfig::default().plain_text_paste
-    } else if quick_paste {
-        ShortcutsConfig::default().quick_paste
-    } else {
-        id.map(|id| ShortcutsConfig::default().session(id).binding.clone())
-            .unwrap_or_else(hotkey::default_toggle_main_window_shortcut)
-    };
+    let default_binding = target.default_binding();
     let reset_disabled = recording || binding == default_binding;
     let view_for_click = view.clone();
     let view_for_clear = view.clone();
@@ -1124,18 +1138,7 @@ fn shortcut_recorder(
 
     let common_presets_label = translator.translate("settings.shortcuts.common_presets");
 
-    let shortcut_code = if open_settings {
-        "openSettings"
-    } else if toggle_clipboard_monitor {
-        "toggleClipboardMonitor"
-    } else if plain_text_paste {
-        "plainTextPaste"
-    } else if quick_paste {
-        "quickPaste"
-    } else {
-        id.map(SessionShortcutId::code)
-            .unwrap_or("toggleMainWindow")
-    };
+    let shortcut_code = target.code();
     let clear_error_text = save_error.clone();
     let clear_button = if binding.is_some() {
         Some(
@@ -1148,16 +1151,7 @@ fn shortcut_recorder(
                 .disabled(clear_disabled)
                 .on_click(move |_, _, cx| {
                     cx.stop_propagation();
-                    let result = match id {
-                        Some(id) => hotkey::set_session_shortcut_binding(id, None, cx),
-                        None if open_settings => hotkey::set_open_settings_shortcut(None, cx),
-                        None if toggle_clipboard_monitor => {
-                            hotkey::set_toggle_clipboard_monitor_shortcut(None, cx)
-                        }
-                        None if plain_text_paste => hotkey::set_plain_text_paste_shortcut(None, cx),
-                        None if quick_paste => hotkey::set_quick_paste_shortcut(None, cx),
-                        None => hotkey::set_toggle_main_window_shortcut(None, cx),
-                    };
+                    let result = target.set_binding(None, cx);
                     let error = result.err().map(|error| {
                         tracing::error!("清空快捷键失败：{error}");
                         clear_error_text.clone()
@@ -1182,28 +1176,14 @@ fn shortcut_recorder(
         .tooltip(translator.translate("settings.shortcuts.action.reset.tooltip"))
         .disabled(reset_disabled)
         .on_click(move |_, _, cx| {
-            let result = match id {
-                Some(id) => hotkey::reset_session_shortcut_binding(id, cx),
-                None if open_settings => hotkey::reset_open_settings_shortcut(cx),
-                None if toggle_clipboard_monitor => {
-                    hotkey::reset_toggle_clipboard_monitor_shortcut(cx)
-                }
-                None if plain_text_paste => hotkey::reset_plain_text_paste_shortcut(cx),
-                None if quick_paste => hotkey::reset_quick_paste_shortcut(cx),
-                None => hotkey::reset_toggle_main_window_shortcut(cx),
-            };
+            let result = target.reset(cx);
             let error = result.err().map(|error| {
                 tracing::error!("恢复快捷键默认值失败：{error}");
                 reset_error_text.clone()
             });
             view_for_reset.update(cx, |view, cx| {
                 view.shortcut_error = notify_settings_error(SettingsPage::Shortcuts, error, cx);
-                view.recording_shortcut = false;
-                view.recording_open_settings = false;
-                view.recording_toggle_clipboard_monitor = false;
-                view.recording_plain_text_paste = false;
-                view.recording_quick_paste = false;
-                view.recording_session_shortcut = None;
+                view.recording_target = None;
                 cx.notify();
             });
         });
@@ -1264,12 +1244,7 @@ fn shortcut_recorder(
                 return;
             }
             let _ = view_for_click.update(cx, |view, cx| {
-                view.recording_shortcut = true;
-                view.recording_open_settings = open_settings;
-                view.recording_toggle_clipboard_monitor = toggle_clipboard_monitor;
-                view.recording_plain_text_paste = plain_text_paste;
-                view.recording_quick_paste = quick_paste;
-                view.recording_session_shortcut = id;
+                view.recording_target = Some(target);
                 view.shortcut_error = None;
                 cx.notify();
             });
@@ -1278,12 +1253,7 @@ fn shortcut_recorder(
 
     let recorder_row = h_flex().gap_2().child(recorder).child(reset_button);
 
-    if id.is_none()
-        && !open_settings
-        && !toggle_clipboard_monitor
-        && !plain_text_paste
-        && !quick_paste
-    {
+    if target.is_main_window() {
         let restore_button = if crate::services::system::win_v_hotkey::is_win_v_hotkey_disabled() {
             Some(restore_system_win_v_button(
                 view.clone(),
@@ -1465,12 +1435,7 @@ fn common_shortcut_presets(
                                 });
                                 let _ = view.update(cx, |view, cx| {
                                     view.shortcut_error = notify_settings_error(SettingsPage::Shortcuts, error, cx);
-                                    view.recording_shortcut = false;
-                                    view.recording_open_settings = false;
-                                    view.recording_toggle_clipboard_monitor = false;
-                                    view.recording_plain_text_paste = false;
-                                    view.recording_quick_paste = false;
-                                    view.recording_session_shortcut = None;
+                                    view.recording_target = None;
                                     cx.notify();
                                 });
                             })
@@ -1544,12 +1509,7 @@ fn restore_system_win_v_button(
                     let _ = view.update(cx, |view, cx| {
                         view.shortcut_error =
                             notify_settings_error(SettingsPage::Shortcuts, error, cx);
-                        view.recording_shortcut = false;
-                        view.recording_open_settings = false;
-                        view.recording_toggle_clipboard_monitor = false;
-                        view.recording_plain_text_paste = false;
-                        view.recording_quick_paste = false;
-                        view.recording_session_shortcut = None;
+                        view.recording_target = None;
                         cx.notify();
                     });
                 });
@@ -1609,11 +1569,7 @@ fn session_shortcut_row(
             save_error,
             translator,
             theme,
-            false,
-            false,
-            false,
-            false,
-            Some(id),
+            ShortcutRecordingTarget::Session(id),
         ))
         .child(checkbox);
     compact_setting_row(theme, label, control)

@@ -235,6 +235,31 @@ fn windows_monitor_for_point(point: Point<f32>) -> Option<DisplayPlacement> {
 }
 
 #[cfg(target_os = "windows")]
+pub(crate) fn display_id_for_foreground_window() -> Option<DisplayId> {
+    use windows::Win32::{
+        Graphics::Gdi::{MONITOR_DEFAULTTONEAREST, MonitorFromWindow},
+        UI::WindowsAndMessaging::GetForegroundWindow,
+    };
+
+    // SAFETY: GetForegroundWindow 只读取系统当前前台窗口句柄，不修改系统状态。
+    let hwnd = unsafe { GetForegroundWindow() };
+    if hwnd.0.is_null() {
+        return None;
+    }
+    // SAFETY: hwnd 是刚读取的前台窗口句柄；MonitorFromWindow 只查询其所在显示器。
+    let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+    if monitor.is_invalid() {
+        return None;
+    }
+    Some(DisplayId::new(monitor.0 as u64))
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn display_id_for_foreground_window() -> Option<DisplayId> {
+    None
+}
+
+#[cfg(target_os = "windows")]
 fn windows_work_area_for_point(point: Point<f32>) -> Option<DisplayPlacement> {
     use raw_input::Display;
     use windows::Win32::{

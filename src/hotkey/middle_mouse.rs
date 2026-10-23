@@ -69,6 +69,16 @@ impl Drop for MiddleMouseRuntime {
     }
 }
 
+#[cfg(test)]
+pub(super) fn runtime_without_subscription() -> MiddleMouseRuntime {
+    MiddleMouseRuntime {
+        state: Arc::new(Mutex::new(HoldState::new(
+            MiddleMouseShortcutConfig::default(),
+        ))),
+        subscription: None,
+    }
+}
+
 struct HoldState {
     config: MiddleMouseShortcutConfig,
     available: bool,

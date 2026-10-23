@@ -840,6 +840,22 @@ fn apply_pending_import_while_paused(data_root: &Path) -> Result<bool, DataManag
             });
         }
     }
+    // 归档不包含 blob 暂存目录；提交导入前重建它，让原有服务句柄继续可写。
+    // 首次启动导入纯内联数据时也可能新建 data，失败回滚须清理这个新目录。
+    let blob_data = data_root.join("data");
+    if matches!(fs::symlink_metadata(&blob_data), Err(error) if error.kind() == io::ErrorKind::NotFound)
+    {
+        copied_staged.push(blob_data);
+    }
+    if let Err(error) = RawBlobStore::new(data_root) {
+        return Err(match rollback_import(&copied_staged, &moved_current) {
+            Ok(()) => error.into(),
+            Err(rollback) => DataManagementError::ImportRollback {
+                operation: io::Error::other(error),
+                rollback,
+            },
+        });
+    }
     if let Err(error) = fs::remove_file(&marker) {
         let error = io_with_path(error, &marker);
         return Err(match rollback_import(&copied_staged, &moved_current) {
@@ -1444,6 +1460,102 @@ fn read_u64(file: &mut File) -> Result<u64, io::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hot_import_keeps_existing_capture_service_writable_for_external_blobs() {
+        use crate::services::{
+            capture::{CaptureService, mock::MockClipboardSource},
+            storage::RawBlob,
+        };
+
+        fn external_blob(database: &Database, item_id: i64) -> RawBlob {
+            let connection = database.connect().expect("无法连接测试数据库");
+            let (sha256, byte_length, relative_path): (Vec<u8>, i64, String) = connection
+                .query_row(
+                    "SELECT b.sha256, b.byte_length, b.relative_path
+                     FROM clipboard_formats f JOIN binary_blobs b ON b.id = f.blob_id
+                     WHERE f.item_id = ?1 AND f.storage_kind = 'external'",
+                    [item_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .expect("捕获内容应存储为外部 blob");
+            RawBlob::from_record(
+                sha256.try_into().expect("blob 哈希长度应为 32 字节"),
+                byte_length.try_into().expect("blob 字节长度不应为负数"),
+                relative_path,
+            )
+        }
+
+        let directory = tempfile::tempdir().expect("无法创建测试目录");
+        let source_root = directory.path().join("source");
+        let target_root = directory.path().join("target");
+        let archive = directory.path().join("export.qcclip-data");
+        let source = DataManagementService::legacy_test_service(&source_root);
+        let target = DataManagementService::legacy_test_service(&target_root);
+        let temporary_root = dunce::canonicalize(directory.path()).unwrap();
+        for root in [&source_root, &target_root] {
+            assert!(
+                dunce::canonicalize(root)
+                    .unwrap()
+                    .starts_with(&temporary_root)
+            );
+        }
+
+        let source_capture =
+            CaptureService::new(source.database.clone(), source.blob_store.clone());
+        let imported_text = "exported content ".repeat(8 * 1024);
+        let imported = source_capture
+            .store_captured_clipboard_with_status(
+                &MockClipboardSource::text(&imported_text).capture(),
+            )
+            .expect("无法保存待导出的外部 blob");
+        let imported_blob = external_blob(&source.database, imported.item_id);
+        source.export_data(&archive).expect("无法导出测试归档");
+
+        // 保留导入前的服务实例，模拟热导入后仍使用原有数据源句柄。
+        let existing_blobs = target.blob_store.clone();
+        let existing_capture = CaptureService::new(target.database.clone(), existing_blobs.clone());
+        existing_capture
+            .store_captured_clipboard(&MockClipboardSource::text("replaced target").capture())
+            .expect("无法保存导入前的目标内容");
+        assert!(target_root.join("data/.pending").is_dir());
+
+        target.stage_import(&archive).expect("无法暂存测试归档");
+        let pending_root = target_root.join(IMPORT_DIRECTORY);
+        let staging_name = fs::read_to_string(pending_root.join(IMPORT_MARKER)).unwrap();
+        let staging = pending_root.join(staging_name.trim());
+        assert!(staging.join(imported_blob.relative_path()).is_file());
+        assert!(!staging.join("data/.pending").exists());
+
+        // 所有查询连接均已在 external_blob 返回时关闭，避免 Windows 文件锁干扰导入。
+        let (applied, switch_guard) =
+            apply_pending_import_for_reload(&target_root).expect("无法热导入测试归档");
+        assert!(applied);
+        drop(switch_guard);
+
+        let new_text = "new content after import ".repeat(8 * 1024);
+        let stored = existing_capture
+            .store_captured_clipboard_with_status(&MockClipboardSource::text(&new_text).capture())
+            .expect("热导入后原有捕获服务应能写入新的外部 blob");
+        let stored_blob = external_blob(&target.database, stored.item_id);
+        assert_eq!(
+            existing_blobs
+                .read(&stored_blob)
+                .expect("无法读取新增 blob"),
+            new_text.as_bytes()
+        );
+        assert_eq!(
+            existing_blobs
+                .read(&imported_blob)
+                .expect("无法读取导入的 blob"),
+            imported_text.as_bytes()
+        );
+        let connection = target.database.connect().unwrap();
+        let item_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM clipboard_items", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(item_count, 2);
+    }
 
     #[test]
     fn bulk_history_cleanup_reclaims_database_space_and_preserves_favorite_content() {

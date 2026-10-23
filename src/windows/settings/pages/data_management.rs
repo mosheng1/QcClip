@@ -1766,6 +1766,7 @@ fn start_data_replacement(
     ) {
         return;
     }
+    crate::services::quick_favorite::QuickFavoriteService::suspend(cx);
     let translator = crate::i18n::translator(cx);
     view.update(cx, |view, cx| {
         view.data_busy = true;
@@ -1823,6 +1824,11 @@ fn start_data_replacement(
                     crate::windows::notification::NotificationService::replace_data_sources(
                         history_repository,
                         image_preview_service,
+                        cx,
+                    );
+                    crate::services::quick_favorite::QuickFavoriteService::replace_data_sources(
+                        database.clone(),
+                        blob_store.clone(),
                         cx,
                     );
                     crate::config_runtime::ConfigRuntime::apply_imported_config(config_reload, cx);
@@ -1903,7 +1909,10 @@ fn start_data_replacement(
                 });
             }
         }
-        cx.update(crate::windows::main::MainWindowService::finish_blocking_operation);
+        cx.update(|cx| {
+            crate::windows::main::MainWindowService::finish_blocking_operation(cx);
+            crate::services::quick_favorite::QuickFavoriteService::resume(cx);
+        });
     })
     .detach();
 }
@@ -2099,7 +2108,7 @@ fn start_import(view: gpui::Entity<SettingsWindowView>, cx: &mut App) {
     });
     cx.spawn(async move |cx| {
         let data_root = service.data_root().to_path_buf();
-        let mut clipboard_listener_stopped = false;
+        let mut data_services_suspended = false;
         let result = match dialog.pick_file().await {
             Some(file) => match cx
                 .background_executor()
@@ -2108,9 +2117,10 @@ fn start_import(view: gpui::Entity<SettingsWindowView>, cx: &mut App) {
             {
                 Ok(()) => {
                     cx.update(|cx| {
-                        crate::windows::main::MainWindowService::stop_clipboard_listener(cx)
+                        crate::services::quick_favorite::QuickFavoriteService::suspend(cx);
+                        crate::windows::main::MainWindowService::stop_clipboard_listener(cx);
                     });
-                    clipboard_listener_stopped = true;
+                    data_services_suspended = true;
                     let import_root = data_root.clone();
                     cx.background_executor()
                         .spawn(async move {
@@ -2147,7 +2157,7 @@ fn start_import(view: gpui::Entity<SettingsWindowView>, cx: &mut App) {
             }
             Ok((false, switch_guard)) => {
                 drop(switch_guard);
-                if clipboard_listener_stopped {
+                if data_services_suspended {
                     cx.update(|cx| {
                         crate::windows::main::MainWindowService::restart_clipboard_listener(cx)
                     });
@@ -2165,7 +2175,7 @@ fn start_import(view: gpui::Entity<SettingsWindowView>, cx: &mut App) {
             }
             Ok((true, None)) => {
                 tracing::error!("数据导入没有取得热重载锁");
-                if clipboard_listener_stopped {
+                if data_services_suspended {
                     cx.update(|cx| {
                         crate::windows::main::MainWindowService::restart_clipboard_listener(cx)
                     });
@@ -2182,7 +2192,7 @@ fn start_import(view: gpui::Entity<SettingsWindowView>, cx: &mut App) {
             }
             Err(error) => {
                 tracing::error!("导入数据失败：{error}");
-                if clipboard_listener_stopped {
+                if data_services_suspended {
                     cx.update(|cx| {
                         crate::windows::main::MainWindowService::restart_clipboard_listener(cx)
                     });
@@ -2198,7 +2208,12 @@ fn start_import(view: gpui::Entity<SettingsWindowView>, cx: &mut App) {
                 });
             }
         }
-        cx.update(crate::windows::main::MainWindowService::finish_blocking_operation);
+        cx.update(|cx| {
+            crate::windows::main::MainWindowService::finish_blocking_operation(cx);
+            if data_services_suspended {
+                crate::services::quick_favorite::QuickFavoriteService::resume(cx);
+            }
+        });
     })
     .detach();
 }

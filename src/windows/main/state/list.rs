@@ -1,5 +1,12 @@
 use super::*;
 
+#[path = "list_refresh.rs"]
+mod list_refresh;
+use list_refresh::{
+    HistoryItemRefresh, HistoryRefreshReason, apply_captured_list_order, load_history_item_refresh,
+    reconcile_snapshot_selection, replace_list_order, retain_list_records_for_order,
+};
+
 impl MainWindow {
     pub(super) fn rebuild_list_order_positions(&mut self) {
         self.list_order_positions.clear();
@@ -853,8 +860,12 @@ impl MainWindow {
         if let Some(index) = self.list_order_positions.get(&record.history_id).copied() {
             self.list_heatmap.update(index, record.paste_count);
         }
-        let mut item = record_to_list_item(record);
+        self.apply_loaded_list_item(record_to_list_item(record));
+    }
+
+    fn apply_loaded_list_item(&mut self, mut item: ClipboardListItem) {
         let history_id = item.history_id;
+        item.is_selected = self.selected_item_id == Some(history_id);
         let old_shortcut = self
             .items
             .iter()
@@ -863,7 +874,6 @@ impl MainWindow {
         if let Some(shortcut) = old_shortcut {
             item.shortcut = shortcut;
         }
-        item.is_selected = self.selected_item_id == Some(history_id);
         for existing in &mut self.items {
             if existing.history_id == history_id {
                 *existing = item.clone();
@@ -874,10 +884,27 @@ impl MainWindow {
         }
     }
 
-    /// 新记录或重复捕获记录只查询单条数据，再增量更新当前顺序。
-    pub(super) fn refresh_new_list_item(
+    /// 无保留策略时增量更新捕获顺序；有限范围使用数据库快照。
+    pub(crate) fn refresh_new_list_item(
         &mut self,
         history_id: HistoryItemId,
+        cx: &mut Context<Self>,
+    ) {
+        self.refresh_history_record(history_id, HistoryRefreshReason::Capture, cx);
+    }
+
+    pub(crate) fn refresh_updated_history_item(
+        &mut self,
+        history_id: HistoryItemId,
+        cx: &mut Context<Self>,
+    ) {
+        self.refresh_history_record(history_id, HistoryRefreshReason::Update, cx);
+    }
+
+    fn refresh_history_record(
+        &mut self,
+        history_id: HistoryItemId,
+        reason: HistoryRefreshReason,
         cx: &mut Context<Self>,
     ) {
         if self.active_tab != TabId::Clipboard
@@ -890,14 +917,13 @@ impl MainWindow {
         let policy = crate::config_runtime::history_config(cx);
         let query = self.page_query(0, 1);
         let repository = self.history_repository.clone();
+        let requested_order = if reason.requires_snapshot(&policy) {
+            self.list_order_ids.clone()
+        } else {
+            Vec::new()
+        };
         let query_task = cx.background_spawn(async move {
-            let record = repository.find_by_id_scoped(history_id, &query, &policy)?;
-            let pinned_count = if record.is_some() {
-                repository.pinned_count(&query)?
-            } else {
-                0
-            };
-            Ok::<_, HistoryQueryError>((record, pinned_count))
+            load_history_item_refresh(&repository, history_id, &query, &policy, reason)
         });
         cx.spawn(async move |this, cx| {
             let result = query_task.await;
@@ -907,7 +933,10 @@ impl MainWindow {
                         return;
                     }
                     match result {
-                        Ok((record, pinned_count)) => {
+                        Ok(HistoryItemRefresh::Captured {
+                            record,
+                            pinned_count,
+                        }) => {
                             let is_new_list_item =
                                 !this.list_order_positions.contains_key(&history_id);
                             if this.apply_history_record_change(history_id, record, pinned_count) {
@@ -922,7 +951,28 @@ impl MainWindow {
                                 cx.notify();
                             }
                         }
-                        Err(error) => tracing::error!("新增列表项查询失败：{error}"),
+                        Ok(HistoryItemRefresh::Snapshot { record, snapshot }) => {
+                            let scroll_to_top = matches!(reason, HistoryRefreshReason::Capture)
+                                && record.is_some()
+                                && !this.list_order_positions.contains_key(&history_id)
+                                && crate::config_runtime::clipboard_config(cx).auto_scroll_to_top;
+                            if !this.apply_list_record(
+                                history_id,
+                                record,
+                                &requested_order,
+                                snapshot,
+                            ) {
+                                this.refresh_history_record(history_id, reason, cx);
+                                return;
+                            }
+                            if scroll_to_top {
+                                this.list_scroll_handle
+                                    .scroll_to_item(0, gpui::ScrollStrategy::Top);
+                                this.list_smooth_scroll.reset();
+                            }
+                            cx.notify();
+                        }
+                        Err(error) => tracing::error!("历史列表项查询失败：{error}"),
                     }
                 });
             }
@@ -1111,7 +1161,6 @@ impl MainWindow {
         };
 
         let item = record_to_list_item(record);
-        let target_position = if item.is_pinned { 0 } else { pinned_count };
         let presentation_changed = self.loaded_items.get(&history_id).is_none_or(|previous| {
             previous.preview_text != item.preview_text
                 || previous.preview_options != item.preview_options
@@ -1122,25 +1171,20 @@ impl MainWindow {
                 || previous.source_app_name != item.source_app_name
                 || previous.source_app_icon != item.source_app_icon
         });
-        let destination_position;
+        let (_, destination_position) = apply_captured_list_order(
+            &mut self.list_order_ids,
+            &mut self.list_heatmap,
+            &mut self.total_item_count,
+            &item,
+            pinned_count,
+        );
         if let Some(source_position) = source_position {
-            self.list_order_ids.remove(source_position);
-            destination_position = target_position.min(self.list_order_ids.len());
-            self.list_order_ids.insert(destination_position, history_id);
-            self.list_heatmap.update(source_position, item.paste_count);
-            self.list_heatmap
-                .move_item(source_position, destination_position);
             self.reindex_list_order_positions(
                 source_position.min(destination_position)
                     ..source_position.max(destination_position) + 1,
             );
         } else {
-            destination_position = target_position.min(self.list_order_ids.len());
-            self.list_order_ids.insert(destination_position, history_id);
-            self.list_heatmap
-                .insert(destination_position, item.paste_count);
             self.reindex_list_order_positions(destination_position..self.list_order_ids.len());
-            self.total_item_count = self.total_item_count.saturating_add(1);
             if self.selected_item_id.is_none() && self.total_item_count == 1 {
                 self.selected_item_id = Some(history_id);
             }
@@ -1194,26 +1238,21 @@ impl MainWindow {
         let active_tab = self.active_tab;
         let repository = self.history_repository.clone();
         let favorite_repository = self.favorite_repository.clone();
+        let requested_order = self.list_order_ids.clone();
         let query_task = cx.background_spawn(async move {
-            let (record, total) = if active_tab == TabId::Favorites {
-                (
-                    favorite_repository.find_by_id(list_item_id, &query)?,
-                    favorite_repository.count(&query)?,
-                )
+            let record = if active_tab == TabId::Favorites {
+                favorite_repository.find_by_id(list_item_id, &query)?
             } else {
-                (
-                    repository.find_by_id_scoped(list_item_id, &query, &policy)?,
-                    repository.count_scoped(&query, &policy)?,
-                )
+                repository.find_by_id_scoped(list_item_id, &query, &policy)?
             };
             let snapshot = if active_tab == TabId::Favorites {
                 favorite_repository.ordered_snapshot(&query)?
             } else {
                 repository.ordered_snapshot_scoped(&query, &policy)?
             };
-            Result::<(Option<HistoryListRecord>, usize, ListOrderSnapshot), HistoryQueryError>::Ok(
-                (record, total, snapshot),
-            )
+            Result::<(Option<HistoryListRecord>, ListOrderSnapshot), HistoryQueryError>::Ok((
+                record, snapshot,
+            ))
         });
         cx.spawn(async move |this, cx| {
             let result = query_task.await;
@@ -1223,8 +1262,16 @@ impl MainWindow {
                         return;
                     }
                     match result {
-                        Ok((record, total, snapshot)) => {
-                            this.apply_list_record(list_item_id, record, total, snapshot)
+                        Ok((record, snapshot)) => {
+                            if !this.apply_list_record(
+                                list_item_id,
+                                record,
+                                &requested_order,
+                                snapshot,
+                            ) {
+                                this.refresh_list_item(list_item_id, cx);
+                                return;
+                            }
                         }
                         Err(error) => tracing::error!("列表增量更新失败：{error}"),
                     }
@@ -1390,111 +1437,110 @@ impl MainWindow {
         &mut self,
         list_item_id: HistoryItemId,
         record: Option<HistoryListRecord>,
-        total: usize,
+        requested_order: &[HistoryItemId],
         snapshot: ListOrderSnapshot,
-    ) {
+    ) -> bool {
         if self.list_drag_source_id.is_some() {
-            return;
+            return true;
         }
         let was_loaded = self.loaded_items.contains_key(&list_item_id);
-        let has_record = record.is_some();
-        self.list_heatmap.replace(snapshot.paste_counts);
-        self.list_order_ids = snapshot.ids;
+        if !replace_list_order(
+            &mut self.list_order_ids,
+            &mut self.list_heatmap,
+            &mut self.total_item_count,
+            requested_order,
+            snapshot,
+        ) {
+            return false;
+        }
         self.rebuild_list_order_positions();
+        // 单条读取和快照之间可能又发生捕获，以快照范围为准。
+        let updated_item = record
+            .filter(|_| self.list_order_positions.contains_key(&list_item_id))
+            .map(record_to_list_item);
+        let has_record = updated_item.is_some();
+        for item_id in retain_list_records_for_order(
+            &mut self.items,
+            &mut self.loaded_items,
+            &self.list_order_positions,
+        ) {
+            self.invalidate_image_cache_item(item_id);
+        }
+        self.adaptive_item_heights
+            .retain(|history_id, _| self.list_order_positions.contains_key(history_id));
+        self.list_item_load_animations
+            .retain(|history_id, _| self.list_order_positions.contains_key(history_id));
         self.invalidate_list_layout_cache();
         // 被更新或删除的内容可能改变预览高度，其他行的缓存可以继续复用。
         self.adaptive_item_heights.remove(&list_item_id);
-        let updated_item = record
-            .as_ref()
-            .map(|record| record_to_list_item(record.clone()));
-        if let Some(updated_item) = updated_item.as_ref()
-            && let Some(existing) = self
+        match updated_item {
+            Some(item)
+                if self
+                    .items
+                    .iter()
+                    .find(|existing| existing.history_id == list_item_id)
+                    .is_some_and(|existing| {
+                        compare_list_items(existing, &item) == Ordering::Equal
+                    }) =>
+            {
+                self.apply_loaded_list_item(item);
+            }
+            None if !self
                 .items
                 .iter()
-                .find(|item| item.history_id == list_item_id)
-            && compare_list_items(existing, updated_item) == Ordering::Equal
-        {
-            let mut updated_item = updated_item.clone();
-            updated_item.shortcut = existing.shortcut.clone();
-            for item in &mut self.items {
-                if item.history_id == list_item_id {
-                    *item = updated_item.clone();
+                .any(|item| item.history_id == list_item_id) =>
+            {
+                // 目标未加载，快照的范围变化已在上方应用。
+            }
+            updated_item => {
+                let previous_item_ids: HashSet<_> =
+                    self.items.iter().map(|item| item.item_id).collect();
+                let loaded_prefix = self.loaded_items.len() == self.items.len()
+                    && self
+                        .items
+                        .iter()
+                        .all(|item| self.loaded_items.contains_key(&item.history_id));
+                let previous_len = self.items.len();
+                self.items.retain(|item| item.history_id != list_item_id);
+                if let Some(item) = updated_item {
+                    insert_sorted_item(&mut self.items, item);
+                    if self.has_more_items && previous_len > 0 && self.items.len() > previous_len {
+                        self.items.pop();
+                    }
+                }
+                let current_item_ids: HashSet<_> =
+                    self.items.iter().map(|item| item.item_id).collect();
+                for item_id in previous_item_ids.difference(&current_item_ids) {
+                    self.invalidate_image_cache_item(*item_id);
+                }
+                refresh_shortcuts_for_order(&mut self.items, &self.list_order_ids);
+                if loaded_prefix {
+                    self.loaded_items = self
+                        .items
+                        .iter()
+                        .cloned()
+                        .map(|item| (item.history_id, item))
+                        .collect();
+                } else {
+                    self.loaded_items.clear();
+                }
+                if has_record && !was_loaded {
+                    self.mark_list_items_loaded([list_item_id]);
                 }
             }
-            for item in self.loaded_items.values_mut() {
-                if item.history_id == list_item_id {
-                    *item = updated_item.clone();
-                }
-            }
-            self.total_item_count = total;
-            self.has_more_items = self.loaded_items.len() < total;
-            self.list_status = if self.items.is_empty() {
-                ListStatus::Empty
-            } else {
-                ListStatus::Ready
-            };
-            self.reconcile_selection();
-            return;
         }
-
-        if record.is_none()
-            && !self
-                .items
-                .iter()
-                .any(|item| item.history_id == list_item_id)
-        {
-            // 当前筛选不包含这条新内容，列表数据没有变化，不要重置非顶部的缓存索引。
-            self.total_item_count = total;
-            self.has_more_items = self.loaded_items.len() < total;
-            return;
-        }
-        let previous_item_ids: HashSet<_> = self.items.iter().map(|item| item.item_id).collect();
-        let loaded_prefix = self.loaded_items.len() == self.items.len()
-            && self
-                .items
-                .iter()
-                .all(|item| self.loaded_items.contains_key(&item.history_id));
-        self.total_item_count = total;
-        let previous_len = self.items.len();
-        self.items.retain(|item| item.history_id != list_item_id);
-        if let Some(record) = record {
-            insert_sorted_item(&mut self.items, record_to_list_item(record));
-            if self.has_more_items && self.items.len() > previous_len {
-                self.items.pop();
-            }
-        }
-        let current_item_ids: HashSet<_> = self.items.iter().map(|item| item.item_id).collect();
-        for item_id in previous_item_ids.difference(&current_item_ids) {
-            self.invalidate_image_cache_item(*item_id);
-        }
-        if self.selected_item_id.is_some()
-            && !self
-                .items
-                .iter()
-                .any(|item| Some(item.history_id) == self.selected_item_id)
-        {
-            self.selected_item_id = self.items.first().map(|item| item.history_id);
-        }
-        refresh_shortcuts_for_order(&mut self.items, &self.list_order_ids);
-        if loaded_prefix {
-            self.loaded_items = self
-                .items
-                .iter()
-                .cloned()
-                .map(|item| (item.history_id, item))
-                .collect();
-        } else {
-            self.loaded_items.clear();
-        }
+        reconcile_snapshot_selection(
+            &mut self.selected_item_id,
+            &mut self.items,
+            &self.list_order_positions,
+        );
         self.has_more_items = self.loaded_items.len() < self.total_item_count;
         self.reconcile_selection();
-        self.list_status = if self.items.is_empty() {
+        self.list_status = if self.total_item_count == 0 {
             ListStatus::Empty
         } else {
             ListStatus::Ready
         };
-        if has_record && !was_loaded {
-            self.mark_list_items_loaded([list_item_id]);
-        }
+        true
     }
 }

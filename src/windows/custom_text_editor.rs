@@ -4,13 +4,13 @@ use gpui::prelude::*;
 use std::collections::HashSet;
 
 use gpui::{
-    AnyElement, App, Context, ElementId, Entity, FontWeight, IntoElement, PromptButton,
-    PromptLevel, Render, Subscription, TitlebarOptions, Window, WindowBackgroundAppearance,
-    WindowBounds, WindowControlArea, WindowDecorations, WindowKind, WindowOptions, div, px,
-    relative, rgb, size,
+    AnyElement, App, Bounds, Context, DisplayId, ElementId, Entity, FontWeight, IntoElement,
+    PromptButton, PromptLevel, Render, Subscription, TitlebarOptions, Window,
+    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowDecorations, WindowHandle,
+    WindowKind, WindowOptions, div, px, relative, rgb, size,
 };
 use gpui_component::{
-    ActiveTheme as _, InteractiveElementExt as _, Sizable as _,
+    ActiveTheme as _, InteractiveElementExt as _, Root, Sizable as _,
     button::ButtonVariants as _,
     collapsible::Collapsible,
     h_flex,
@@ -48,10 +48,13 @@ pub(crate) fn open(
         "main.editor.title",
         tags,
         selected_tag_ids,
+        false,
+        None,
         on_confirm,
         on_restore,
         cx,
     )
+    .map(|_| ())
 }
 
 pub(crate) fn open_new(
@@ -65,23 +68,29 @@ pub(crate) fn open_new(
         "main.editor.new_title",
         tags,
         Vec::new(),
+        false,
+        None,
         on_confirm,
         None,
         cx,
     )
+    .map(|_| ())
 }
 
 pub(crate) fn open_new_favorite(
     text: String,
     tags: Vec<Tag>,
+    display_id: Option<DisplayId>,
     on_confirm: Box<dyn FnOnce(String, Vec<i64>, &mut App)>,
     cx: &mut App,
-) -> Result<(), String> {
+) -> Result<WindowHandle<Root>, String> {
     open_with_title(
         text,
         "main.editor.new_favorite_title",
         tags,
         Vec::new(),
+        true,
+        display_id,
         on_confirm,
         None,
         cx,
@@ -93,18 +102,22 @@ fn open_with_title(
     title_key: &'static str,
     tags: Vec<Tag>,
     selected_tag_ids: Vec<i64>,
+    tags_expanded: bool,
+    display_id: Option<DisplayId>,
     on_confirm: Box<dyn FnOnce(String, Vec<i64>, &mut App)>,
     on_restore: Option<Box<dyn FnOnce(&mut App)>>,
     cx: &mut App,
-) -> Result<(), String> {
+) -> Result<WindowHandle<Root>, String> {
     let title = i18n::translator(cx).translate(title_key);
     let window = cx
         .open_window(
             WindowOptions {
-                window_bounds: Some(WindowBounds::centered(
+                window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+                    display_id,
                     size(px(EDITOR_WINDOW_WIDTH), px(EDITOR_WINDOW_HEIGHT)),
                     cx,
-                )),
+                ))),
+                display_id,
                 titlebar: Some(TitlebarOptions {
                     title: Some(title.clone().into()),
                     appears_transparent: true,
@@ -135,6 +148,7 @@ fn open_with_title(
                         title,
                         tags,
                         selected_tag_ids,
+                        tags_expanded,
                         on_confirm,
                         on_restore,
                     )
@@ -143,9 +157,10 @@ fn open_with_title(
             },
         )
         .map_err(|error| error.to_string())?;
-    window
-        .update(cx, |_, window, _| window.activate_window())
-        .map_err(|error| error.to_string())
+    if let Err(error) = window.update(cx, |_, window, _| window.activate_window()) {
+        tracing::error!("激活文本编辑窗口失败：{error}");
+    }
+    Ok(window)
 }
 
 pub(crate) struct CustomTextEditor {
@@ -168,6 +183,7 @@ impl CustomTextEditor {
         title: String,
         tags: Vec<Tag>,
         selected_tag_ids: Vec<i64>,
+        tags_expanded: bool,
         on_confirm: Box<dyn FnOnce(String, Vec<i64>, &mut App)>,
         on_restore: Option<Box<dyn FnOnce(&mut App)>>,
     ) -> Self {
@@ -198,7 +214,7 @@ impl CustomTextEditor {
             _tag_search_subscription: tag_search_subscription,
             tags,
             selected_tag_ids: selected_tag_ids.into_iter().collect(),
-            tags_expanded: false,
+            tags_expanded,
             title,
             on_confirm: Some(on_confirm),
             on_restore,

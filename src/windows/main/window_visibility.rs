@@ -1675,7 +1675,7 @@ pub(crate) fn handle_global_mouse_down(
                 if let Err(error) =
                     crate::services::focus::restore_captured_focus(foreground_window)
                 {
-                    tracing::error!("恢复托盘点击前窗口焦点失败：{error}");
+                    tracing::debug!("恢复托盘点击前窗口焦点失败：{error}");
                 }
                 return Ok::<OutsideClickAction, String>(OutsideClickAction::Ignore);
             }

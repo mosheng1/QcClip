@@ -759,56 +759,9 @@ impl MainWindow {
         self._window_bounds_subscription = Some(subscription);
     }
 
-    /// 打开新增收藏窗口；确认后在同一事务中创建文本内容和收藏关系。
+    /// 打开新增收藏窗口；已有编辑器时只聚焦，否则打开手动条目编辑器。
     pub fn new_favorite_item(&mut self, cx: &mut Context<Self>) {
-        let tag_repository = self.tag_repository.clone();
-        let task = cx.background_spawn(async move { tag_repository.list() });
-        cx.spawn(async move |this, cx| match task.await {
-            Ok(tags) => {
-                if let Some(this) = this.upgrade() {
-                    this.update(cx, |this, cx| {
-                        this.open_new_favorite_item_with_tags(tags, cx);
-                    });
-                }
-            }
-            Err(error) => tracing::error!("读取新增收藏标签失败：{error}"),
-        })
-        .detach();
-    }
-
-    pub(super) fn open_new_favorite_item_with_tags(
-        &mut self,
-        tags: Vec<Tag>,
-        cx: &mut Context<Self>,
-    ) {
-        let custom_text_service = self.custom_text_service.clone();
-        let main_window = cx.entity();
-        let on_confirm = Box::new(move |text: String, tag_ids: Vec<i64>, cx: &mut gpui::App| {
-            let save_task = cx.background_executor().spawn(async move {
-                custom_text_service.create_manual_text_and_favorite_with_tags(&text, &tag_ids)
-            });
-            cx.spawn(async move |cx| match save_task.await {
-                Ok(history_id) => {
-                    main_window.update(cx, |this, cx| {
-                        if this.active_tab == TabId::Clipboard {
-                            this.refresh_new_list_item(history_id, cx);
-                        } else {
-                            this.refresh_history(cx);
-                        }
-                    });
-                }
-                Err(error) => tracing::error!("新增收藏失败：{error}"),
-            })
-            .detach();
-        });
-        if let Err(error) = crate::windows::custom_text_editor::open_new_favorite(
-            String::new(),
-            tags,
-            on_confirm,
-            cx,
-        ) {
-            tracing::error!("打开新增收藏窗口失败：{error}");
-        }
+        crate::services::quick_favorite::QuickFavoriteService::open(false, cx);
     }
 
     /// 使用系统默认程序打开条目：文件类型直接打开路径，图片类型生成临时文件后打开。

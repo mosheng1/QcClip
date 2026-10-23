@@ -82,7 +82,7 @@ mod windows_input {
 
     static INPUT_STATE: OnceLock<Arc<Mutex<InputState>>> = OnceLock::new();
     static CURRENT_TRIGGER_KEY: Mutex<Option<TriggerKey>> = Mutex::new(None);
-    static PASTE_SIMULATION_LOCK: Mutex<()> = Mutex::new(());
+    static SHORTCUT_SIMULATION_LOCK: Mutex<()> = Mutex::new(());
     const PHYSICAL_KEY_COUNT: usize = raw_input::Key::Unidentified as usize + 1;
     static PHYSICAL_KEY_STATE: OnceLock<Mutex<PhysicalKeySnapshot>> = OnceLock::new();
 
@@ -424,13 +424,21 @@ mod windows_input {
     }
 
     pub(crate) fn simulate_ctrl_v() {
-        let _paste_guard = match PASTE_SIMULATION_LOCK.lock() {
+        simulate_ctrl_key(raw_input::Key::KeyV);
+    }
+
+    pub(crate) fn simulate_ctrl_c() {
+        simulate_ctrl_key(raw_input::Key::KeyC);
+    }
+
+    fn simulate_ctrl_key(key: raw_input::Key) {
+        let _shortcut_guard = match SHORTCUT_SIMULATION_LOCK.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
 
         let modifiers = ModifierState::record();
-        // Ctrl、Shift、Win 不能参与下面的 Ctrl+V；Alt 必须等触发键释放后再释放，
+        // Ctrl、Shift、Win 不能参与下面的组合键；Alt 必须等触发键释放后再释放，
         // 否则前台程序可能把 Alt 解释成菜单导航。
         modifiers.release_conflicting();
         if let Some(trigger_key) = current_trigger_key() {
@@ -439,9 +447,9 @@ mod windows_input {
         modifiers.release_alt();
 
         Simulate::keyboard(raw_input::Key::ControlLeft, true);
-        Simulate::keyboard(raw_input::Key::KeyV, true);
+        Simulate::keyboard(key, true);
         thread::sleep(Duration::from_millis(8));
-        Simulate::keyboard(raw_input::Key::KeyV, false);
+        Simulate::keyboard(key, false);
         Simulate::keyboard(raw_input::Key::ControlLeft, false);
 
         // 不重新按下触发键：触发键若先于 Ctrl 等修饰键恢复，会被前台程序
@@ -793,6 +801,6 @@ pub(crate) use windows_input::{
 
 #[cfg(target_os = "windows")]
 pub(crate) use windows_input::{
-    clear_trigger_key, set_pointer_change_notifier, set_trigger_key_code, simulate_ctrl_v,
-    trigger_shortcut_is_physically_pressed,
+    clear_trigger_key, set_pointer_change_notifier, set_trigger_key_code, simulate_ctrl_c,
+    simulate_ctrl_v, trigger_shortcut_is_physically_pressed,
 };

@@ -8,7 +8,7 @@ use std::{
 };
 
 use crate::config::ClipboardFormatConfig;
-use crate::domain::capture::CapturedClipboard;
+use crate::domain::capture::{CapturedClipboard, FormatKind};
 
 static CAPTURE_FORMAT_CONFIG: OnceLock<RwLock<ClipboardFormatConfig>> = OnceLock::new();
 
@@ -126,6 +126,26 @@ impl ClipboardWriteSuppressor {
     }
 }
 
+pub fn captured_plain_text(captured: &CapturedClipboard) -> Option<String> {
+    let bytes = captured.formats.iter().find_map(|format| {
+        if format.format_kind != FormatKind::Text
+            || !format.format_key.eq_ignore_ascii_case("CF_UNICODETEXT")
+        {
+            return None;
+        }
+        format.bytes.as_deref()
+    })?;
+    let units = bytes
+        .chunks_exact(2)
+        .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+        .collect::<Vec<_>>();
+    let mut text = String::from_utf16_lossy(&units);
+    if text.ends_with('\0') {
+        text.pop();
+    }
+    Some(text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,6 +168,83 @@ mod tests {
         suppressor.cancel_write(ticket);
 
         assert!(!suppressor.suppress_event(11));
+    }
+
+    fn captured_with(formats: Vec<crate::domain::capture::RawFormat>) -> CapturedClipboard {
+        CapturedClipboard {
+            formats,
+            primary_format_identity: None,
+            preview_candidate: None,
+            source_application: Default::default(),
+        }
+    }
+
+    fn unicode_format(bytes: Vec<u8>) -> crate::domain::capture::RawFormat {
+        crate::domain::capture::RawFormat::captured(
+            "windows",
+            "CF_UNICODETEXT",
+            "CF_UNICODETEXT",
+            FormatKind::Text,
+            bytes,
+            0,
+            true,
+        )
+    }
+
+    fn unicode_bytes(text: &str) -> Vec<u8> {
+        text.encode_utf16().flat_map(u16::to_le_bytes).collect()
+    }
+
+    #[test]
+    fn captured_plain_text_decodes_ascii_and_chinese() {
+        let ascii = captured_with(vec![unicode_format(unicode_bytes("hello"))]);
+        assert_eq!(captured_plain_text(&ascii).as_deref(), Some("hello"));
+
+        let chinese = captured_with(vec![unicode_format(unicode_bytes("中文文本"))]);
+        assert_eq!(captured_plain_text(&chinese).as_deref(), Some("中文文本"));
+    }
+
+    #[test]
+    fn captured_plain_text_drops_trailing_nul_but_keeps_spaces() {
+        let mut bytes = unicode_bytes("文本 ");
+        bytes.extend_from_slice(&[0, 0]);
+        let captured = captured_with(vec![unicode_format(bytes)]);
+
+        assert_eq!(captured_plain_text(&captured).as_deref(), Some("文本 "));
+    }
+
+    #[test]
+    fn captured_plain_text_requires_unicode_text() {
+        let file_list = captured_with(vec![crate::domain::capture::RawFormat::captured(
+            "windows",
+            "CF_HDROP",
+            "CF_HDROP",
+            FormatKind::FileList,
+            vec![1, 2, 3],
+            0,
+            true,
+        )]);
+        assert_eq!(captured_plain_text(&file_list), None);
+
+        let ansi = captured_with(vec![crate::domain::capture::RawFormat::captured(
+            "windows",
+            "CF_TEXT",
+            "CF_TEXT",
+            FormatKind::Text,
+            b"hello\0".to_vec(),
+            0,
+            true,
+        )]);
+        assert_eq!(captured_plain_text(&ansi), None);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn selection_capture_reports_unsupported_platform_instead_of_no_selection() {
+        assert!(matches!(
+            capture_selection(&ClipboardWriteSuppressor::default()),
+            Err(SystemClipboardError::UnsupportedPlatform)
+        ));
     }
 }
 
@@ -206,6 +303,8 @@ mod windows_clipboard {
     const READ_ATTEMPTS: usize = 3;
     const READ_RETRY_DELAY: Duration = Duration::from_millis(20);
     const PASTE_DELAY: Duration = Duration::from_millis(60);
+    // 10ms × 50 = 500ms；无选区时尽快回退到编辑器。
+    const SELECTION_CAPTURE_ATTEMPTS: usize = 50;
 
     fn clipboard_sequence_number() -> u32 {
         // SAFETY: GetClipboardSequenceNumber 不需要指针或外部内存，仅读取系统剪贴板序列号。
@@ -278,6 +377,56 @@ mod windows_clipboard {
                 source_application,
             }))
         }
+    }
+
+    pub fn capture_selection(
+        suppressor: &ClipboardWriteSuppressor,
+    ) -> Result<Option<CapturedClipboard>, SystemClipboardError> {
+        let before = clipboard_sequence_number();
+        let source = source_application();
+        capture_selection_with(
+            suppressor,
+            before,
+            source,
+            crate::platform::input::simulate_ctrl_c,
+            || {
+                thread::sleep(Duration::from_millis(10));
+                clipboard_sequence_number()
+            },
+            || WindowsClipboardSource::new().capture_current(),
+        )
+    }
+
+    fn capture_selection_with(
+        suppressor: &ClipboardWriteSuppressor,
+        before: u32,
+        source: SourceApplication,
+        simulate_copy: impl FnOnce(),
+        mut poll_sequence: impl FnMut() -> u32,
+        read_clipboard: impl FnOnce() -> Result<Option<CapturedClipboard>, SystemClipboardError>,
+    ) -> Result<Option<CapturedClipboard>, SystemClipboardError> {
+        let ticket = suppressor.begin_write(before);
+        simulate_copy();
+        for _ in 0..SELECTION_CAPTURE_ATTEMPTS {
+            let after = poll_sequence();
+            if after != before {
+                suppressor.complete_write(ticket, after);
+                return match read_clipboard() {
+                    Ok(captured) => Ok(captured),
+                    Err(error) => {
+                        tracing::warn!(%error, "模拟 Ctrl+C 后读取剪贴板失败");
+                        Err(error)
+                    }
+                };
+            }
+        }
+        suppressor.cancel_write(ticket);
+        tracing::debug!(
+            before,
+            source = ?source,
+            "模拟 Ctrl+C 后 500 毫秒内未检测到剪贴板变化"
+        );
+        Ok(None)
     }
 
     struct ClipboardChangeHandler {
@@ -594,8 +743,13 @@ mod windows_clipboard {
                         is_restorable(native_format.id, kind),
                     ),
                     Err(error) => {
-                        tracing::warn!(format_id = native_format.id, format_key = %key,
-                            %error, "无法读取剪贴板格式");
+                        if key.eq_ignore_ascii_case("registered:FileContents") {
+                            tracing::debug!(format_id = native_format.id, %error,
+                                "云文件剪贴板格式没有可读取的数据，已跳过");
+                        } else {
+                            tracing::warn!(format_id = native_format.id, format_key = %key,
+                                %error, "无法读取剪贴板格式");
+                        }
                         RawFormat::failed(
                             "windows",
                             key,
@@ -965,6 +1119,93 @@ mod windows_clipboard {
     mod tests {
         use super::*;
 
+        #[test]
+        fn selection_capture_preserves_system_read_error_after_clipboard_changes() {
+            let suppressor = ClipboardWriteSuppressor::default();
+            let result = capture_selection_with(
+                &suppressor,
+                40,
+                SourceApplication::default(),
+                || {},
+                || 41,
+                || Err(SystemClipboardError::Enumerate("access denied".to_owned())),
+            );
+
+            assert!(
+                matches!(result, Err(SystemClipboardError::Enumerate(ref message)) if message == "access denied"),
+                "系统读取失败必须保留错误，不能报告无选区：{result:?}"
+            );
+            assert!(suppressor.suppress_event(41));
+            assert!(!suppressor.suppress_event(42));
+        }
+
+        #[test]
+        fn selection_capture_timeout_does_not_read_stale_clipboard_or_suppress_next_copy() {
+            let suppressor = ClipboardWriteSuppressor::default();
+            let result = capture_selection_with(
+                &suppressor,
+                40,
+                SourceApplication::default(),
+                || {},
+                || 40,
+                || panic!("复制未改变剪贴板时不能读取旧内容"),
+            );
+
+            assert!(matches!(result, Ok(None)));
+            assert!(!suppressor.suppress_event(41));
+        }
+
+        #[test]
+        fn selection_capture_waits_for_change_and_preserves_all_formats() {
+            let suppressor = ClipboardWriteSuppressor::default();
+            let captured = CapturedClipboard {
+                formats: vec![
+                    RawFormat::captured(
+                        "windows",
+                        "CF_UNICODETEXT",
+                        "CF_UNICODETEXT",
+                        FormatKind::Text,
+                        vec![104, 0, 105, 0],
+                        0,
+                        true,
+                    ),
+                    RawFormat::captured(
+                        "windows",
+                        "registered:HTML Format",
+                        "HTML Format",
+                        FormatKind::Html,
+                        b"<b>hi</b>".to_vec(),
+                        1,
+                        true,
+                    ),
+                ],
+                primary_format_identity: Some(("windows".into(), "CF_UNICODETEXT".into())),
+                preview_candidate: None,
+                source_application: SourceApplication::default(),
+            };
+            let expected = captured.clone();
+            let sequence = std::cell::Cell::new(40);
+            let result = capture_selection_with(
+                &suppressor,
+                40,
+                SourceApplication::default(),
+                || {},
+                || {
+                    let current = sequence.get();
+                    sequence.set(current + 1);
+                    current
+                },
+                || {
+                    assert_eq!(sequence.get(), 42, "必须等序列号变化后再读取");
+                    Ok(Some(captured))
+                },
+            );
+
+            assert_eq!(result.unwrap(), Some(expected));
+            assert!(suppressor.suppress_event(41));
+            assert!(!suppressor.suppress_event(42));
+        }
+
         fn native_format(name: &str) -> NativeFormat {
             NativeFormat {
                 id: 49_152,
@@ -1313,15 +1554,15 @@ mod windows_clipboard {
 
 #[cfg(target_os = "windows")]
 pub use windows_clipboard::{
-    ClipboardMonitor, SystemClipboardError, WindowsClipboardSource, copy_to_clipboard,
-    paste_into_active_window,
+    ClipboardMonitor, SystemClipboardError, WindowsClipboardSource, capture_selection,
+    copy_to_clipboard, paste_into_active_window,
 };
 
 #[cfg(not(target_os = "windows"))]
 mod unsupported {
     use thiserror::Error;
 
-    use super::ClipboardEventReceiver;
+    use super::{ClipboardEventReceiver, ClipboardWriteSuppressor};
 
     #[derive(Debug, Error)]
     pub enum SystemClipboardError {
@@ -1342,6 +1583,13 @@ mod unsupported {
 
 #[cfg(not(target_os = "windows"))]
 pub use unsupported::{ClipboardMonitor, SystemClipboardError};
+
+#[cfg(not(target_os = "windows"))]
+pub fn capture_selection(
+    _suppressor: &ClipboardWriteSuppressor,
+) -> Result<Option<CapturedClipboard>, SystemClipboardError> {
+    Err(SystemClipboardError::UnsupportedPlatform)
+}
 
 #[cfg(not(target_os = "windows"))]
 pub fn paste_into_active_window(

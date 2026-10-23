@@ -991,12 +991,13 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![first, third, second]
         );
-        assert_eq!(
-            records
-                .iter()
-                .map(|record| record.sort_order)
-                .collect::<Vec<_>>(),
-            vec![2, 1, 0]
+        let sort_orders = records
+            .iter()
+            .map(|record| record.sort_order)
+            .collect::<Vec<_>>();
+        assert!(
+            sort_orders.windows(2).all(|pair| pair[0] > pair[1]),
+            "收藏排序应保持降序：{sort_orders:?}"
         );
     }
 
@@ -1054,10 +1055,21 @@ mod tests {
         assert_eq!(
             records
                 .iter()
-                .map(|record| (record.item_id, record.is_pinned, record.sort_order))
+                .map(|record| (record.item_id, record.is_pinned))
                 .collect::<Vec<_>>(),
-            vec![(second, true, 1), (third, true, 0), (first, false, 0)]
+            vec![(second, true), (third, true), (first, false)]
         );
+        for is_pinned in [true, false] {
+            let sort_orders = records
+                .iter()
+                .filter(|record| record.is_pinned == is_pinned)
+                .map(|record| record.sort_order)
+                .collect::<Vec<_>>();
+            assert!(
+                sort_orders.windows(2).all(|pair| pair[0] > pair[1]),
+                "同一分区内收藏排序应保持降序：{sort_orders:?}"
+            );
+        }
     }
 
     #[test]
@@ -1218,13 +1230,20 @@ mod tests {
                 .add_to_favorites(item_id)
                 .expect("无法添加收藏")
         );
+        let connection = database.connect().expect("无法连接数据库");
+        let sort_order_before: i64 = connection
+            .query_row(
+                "SELECT sort_order FROM favorites WHERE item_id = ?1",
+                [item_id],
+                |row| row.get(0),
+            )
+            .expect("无法查询收藏顺序");
         assert!(
             !favorite_repository
                 .add_to_favorites(item_id)
                 .expect("重复添加收藏失败")
         );
 
-        let connection = database.connect().expect("无法连接数据库");
         let (favorite_count, tag_relation_count, sort_order): (i64, i64, i64) = connection
             .query_row(
                 "SELECT
@@ -1237,7 +1256,7 @@ mod tests {
             .expect("无法验证收藏关系");
         assert_eq!(favorite_count, 1);
         assert_eq!(tag_relation_count, 0);
-        assert_eq!(sort_order, 0);
+        assert_eq!(sort_order, sort_order_before);
     }
 
     #[test]

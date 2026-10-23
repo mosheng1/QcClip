@@ -833,6 +833,20 @@ fn read_shortcuts(object: &Map<String, Value>, warnings: &mut Vec<String>) -> Sh
             default.quick_paste.clone(),
             warnings,
         ),
+        add_favorite: read_field(
+            object,
+            "addFavorite",
+            "shortcuts.addFavorite",
+            default.add_favorite.clone(),
+            warnings,
+        ),
+        add_favorite_open_editor_on_empty: read_field(
+            object,
+            "addFavoriteOpenEditorOnEmpty",
+            "shortcuts.addFavoriteOpenEditorOnEmpty",
+            default.add_favorite_open_editor_on_empty,
+            warnings,
+        ),
         quick_paste_1_to_9: read_field(
             object,
             "quickPaste1To9",
@@ -1542,6 +1556,50 @@ mod tests {
                 key: "h".to_owned(),
             })
         );
+    }
+
+    #[test]
+    fn add_favorite_shortcut_is_loaded_from_shortcuts_config() {
+        let loaded = from_str(
+            r#"{
+                "shortcuts": {
+                    "addFavorite": {
+                        "control": true,
+                        "alt": true,
+                        "shift": false,
+                        "platform": false,
+                        "key": "j"
+                    }
+                }
+            }"#,
+        )
+        .expect("快捷收藏快捷键应当可以加载");
+
+        assert_eq!(
+            loaded.config.shortcuts.add_favorite,
+            Some(ShortcutBinding {
+                control: true,
+                alt: true,
+                shift: false,
+                platform: false,
+                key: "j".to_owned(),
+            })
+        );
+        let saved = serde_json::to_value(&loaded.config).expect("配置应当可以序列化");
+        assert_eq!(saved["shortcuts"]["addFavorite"]["key"], "j");
+    }
+
+    #[test]
+    fn add_favorite_open_editor_on_empty_defaults_true_and_loads_false() {
+        let default = from_str("{}").expect("空配置应当可以加载");
+        assert!(default.config.shortcuts.add_favorite_open_editor_on_empty);
+
+        let loaded = from_str(r#"{"shortcuts":{"addFavoriteOpenEditorOnEmpty":false}}"#)
+            .expect("快捷收藏编辑器开关应当可以加载");
+        assert!(!loaded.config.shortcuts.add_favorite_open_editor_on_empty);
+
+        let saved = serde_json::to_value(&loaded.config).expect("配置应当可以序列化");
+        assert_eq!(saved["shortcuts"]["addFavoriteOpenEditorOnEmpty"], false);
     }
 
     #[test]

@@ -11,6 +11,7 @@ pub mod image_preview;
 pub(crate) mod legacy_migration;
 pub(crate) mod memory_trim;
 pub mod paste;
+pub(crate) mod quick_favorite;
 pub mod recovery;
 pub mod sound;
 pub mod storage;

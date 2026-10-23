@@ -93,7 +93,6 @@ impl MainWindow {
                 match store_result {
                     Ok(store_result) => {
                         let history_id = store_result.history_id;
-                        let policy = cx.update(|cx| crate::config_runtime::history_config(cx));
                         crate::services::sound::play(crate::services::sound::SoundEvent::Copy);
                         cx.update(|cx| {
                             crate::windows::notification::NotificationService::show_clipboard(
@@ -104,11 +103,7 @@ impl MainWindow {
                         if let Some(this) = this.upgrade() {
                             this.update(cx, |this, cx| {
                                 if this.active_tab == TabId::Clipboard {
-                                    if policy.retention_days.is_some() || policy.max_items.is_some() {
-                                        this.refresh_list_item(history_id, cx);
-                                    } else {
-                                        this.refresh_new_list_item(history_id, cx);
-                                    }
+                                    this.refresh_new_list_item(history_id, cx);
                                 } else if this.active_tab == TabId::Favorites
                                     && store_result.formats_changed
                                 {

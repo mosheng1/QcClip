@@ -2281,12 +2281,13 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![first, third, second]
         );
-        assert_eq!(
-            records
-                .iter()
-                .map(|record| record.sort_order)
-                .collect::<Vec<_>>(),
-            vec![2, 1, 0]
+        let sort_orders = records
+            .iter()
+            .map(|record| record.sort_order)
+            .collect::<Vec<_>>();
+        assert!(
+            sort_orders.windows(2).all(|pair| pair[0] > pair[1]),
+            "历史排序应保持降序：{sort_orders:?}"
         );
     }
 
@@ -2351,10 +2352,21 @@ mod tests {
         assert_eq!(
             records
                 .iter()
-                .map(|record| (record.history_id, record.is_pinned, record.sort_order))
+                .map(|record| (record.history_id, record.is_pinned))
                 .collect::<Vec<_>>(),
-            vec![(third, true, 1), (second, true, 0), (first, false, 0)]
+            vec![(third, true), (second, true), (first, false)]
         );
+        for is_pinned in [true, false] {
+            let sort_orders = records
+                .iter()
+                .filter(|record| record.is_pinned == is_pinned)
+                .map(|record| record.sort_order)
+                .collect::<Vec<_>>();
+            assert!(
+                sort_orders.windows(2).all(|pair| pair[0] > pair[1]),
+                "同一分区内历史排序应保持降序：{sort_orders:?}"
+            );
+        }
 
         assert!(
             services

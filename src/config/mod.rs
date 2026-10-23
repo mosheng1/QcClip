@@ -223,6 +223,8 @@ pub struct ShortcutsConfig {
     pub toggle_clipboard_monitor: Option<ShortcutBinding>,
     pub plain_text_paste: Option<ShortcutBinding>,
     pub quick_paste: Option<ShortcutBinding>,
+    pub add_favorite: Option<ShortcutBinding>,
+    pub add_favorite_open_editor_on_empty: bool,
     pub quick_paste_1_to_9: QuickPasteShortcutConfig,
     pub select_previous_item: SessionShortcutConfig,
     pub select_next_item: SessionShortcutConfig,
@@ -248,6 +250,8 @@ impl Default for ShortcutsConfig {
             toggle_clipboard_monitor: None,
             plain_text_paste: None,
             quick_paste: None,
+            add_favorite: None,
+            add_favorite_open_editor_on_empty: true,
             quick_paste_1_to_9: QuickPasteShortcutConfig::default(),
             select_previous_item: SessionShortcutConfig::new(None, "up"),
             select_next_item: SessionShortcutConfig::new(None, "down"),
@@ -1881,6 +1885,8 @@ mod tests {
         );
         assert!(!config.clipboard.edge_hide);
         assert_eq!(config.quick_paste.visible_items, 7);
+        assert_eq!(config.shortcuts.add_favorite, None);
+        assert!(config.shortcuts.add_favorite_open_editor_on_empty);
         assert!(config.sound.enabled);
         assert_eq!(config.sound.paste.preset, SoundPreset::CrispChime);
         assert_eq!(config.sound.copy.preset, SoundPreset::BrightPing);
@@ -1913,6 +1919,8 @@ mod tests {
         assert_eq!(value["clipboard"]["filterHoverDelayMs"], 40);
         assert_eq!(value["clipboard"]["edgeHide"], false);
         assert_eq!(value["quickPaste"]["visibleItems"], 7);
+        assert_eq!(value["shortcuts"]["addFavorite"], serde_json::Value::Null);
+        assert_eq!(value["shortcuts"]["addFavoriteOpenEditorOnEmpty"], true);
         assert_eq!(value["sound"]["enabled"], true);
         assert_eq!(value["sound"]["paste"]["preset"], "crisp-chime");
         assert_eq!(value["sound"]["paste"]["volume"], 70);

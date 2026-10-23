@@ -15,6 +15,7 @@ pub(crate) mod mock;
 pub(crate) use hash::hash_format_set;
 pub use hash::{CONTENT_HASH_VERSION, HashedClipboard, hash_clipboard};
 pub use persistence::CaptureService;
+pub(crate) use persistence::CaptureStoreResult;
 pub(crate) use preview::extract_links;
 pub use preview::{ClipboardPreview, generate_preview, select_default_preview};
 
