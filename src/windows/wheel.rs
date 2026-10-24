@@ -233,6 +233,8 @@ struct WheelSession {
     _click_guard: Option<crate::platform::input::WheelClickSwallowGuard>,
     /// 打开时解析的外观配色快照。
     colors: WheelColors,
+    /// 打开瞬间截取的背景截图（已做 GPU 模糊前的原始像素），用于亚克力效果。
+    backdrop: Option<std::sync::Arc<gpui::RenderImage>>,
 }
 
 impl Default for WheelSession {
@@ -246,6 +248,7 @@ impl Default for WheelSession {
             _page_listener: None,
             _click_guard: None,
             colors: WheelColors::default(),
+            backdrop: None,
         }
     }
 }
@@ -287,6 +290,7 @@ pub(crate) fn open_wheel_window(cx: &mut App) -> bool {
         _page_listener: None,
         _click_guard: None,
         colors: WheelColors::resolve(cx),
+        backdrop: capture_wheel_backdrop(pointer, scale),
     });
     // 轮盘存续期间监听左/右键翻页 + 拦截点击穿透；窗口关闭（Session 清理）后任务自动退出。
     let (page_listener, page_receiver) = crate::platform::input::WheelPageListener::install();
@@ -435,6 +439,7 @@ fn reset_wheel_session(cx: &mut App) {
         session.total = 0;
         session.page = 0;
         session.colors = WheelColors::default();
+        session.backdrop = None;
     });
 }
 
@@ -493,6 +498,29 @@ pub(crate) fn commit_wheel_selection(cx: &mut App) {
 struct WheelPage {
     slots: Vec<WheelEntry>,
     total: usize,
+}
+
+/// 在轮盘窗口出现前截取光标为中心的方形屏幕区域，作为亚克力模糊底图。
+/// 失败时返回 None（轮盘退化为纯色半透明圆盘，不影响功能）。
+fn capture_wheel_backdrop(
+    pointer: Point<f32>,
+    scale: f32,
+) -> Option<std::sync::Arc<gpui::RenderImage>> {
+    let diameter = WHEEL_DIAMETER * scale;
+    let half = diameter / 2.0;
+    let left = (pointer.x - half).round().max(0.0);
+    let top = (pointer.y - half).round().max(0.0);
+    // 截取尺寸按物理像素，最多 1:1，避免超大屏时内存爆炸。
+    let side = diameter.round().clamp(16.0, 1024.0) as u32;
+    let captured = crate::platform::window::capture_screen_region(left, top, side, side).ok()?;
+    let mut rgba = captured;
+    // GPUI 的 RenderImage 期望 RGBA 数据，A 通道在 GDI 截屏里可能是 0，统一补成不透明。
+    for pixel in rgba.pixels_mut() {
+        pixel.0[3] = 255;
+    }
+    Some(std::sync::Arc::new(gpui::RenderImage::new(vec![
+        image::Frame::new(rgba),
+    ])))
 }
 
 fn load_wheel_page(cx: &mut App, page: usize) -> WheelPage {
@@ -645,7 +673,7 @@ impl WheelWindowView {
 
 impl Render for WheelWindowView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (origin, cursor, entries, page, total_pages, colors) = cx
+        let (origin, cursor, entries, page, total_pages, colors, backdrop) = cx
             .update_global::<WheelSession, _>(|session, _| {
                 (
                     session.origin,
@@ -654,6 +682,7 @@ impl Render for WheelWindowView {
                     session.page,
                     session.total_pages(),
                     session.colors.clone(),
+                    session.backdrop.clone(),
                 )
             });
         let hovered = origin
@@ -668,9 +697,8 @@ impl Render for WheelWindowView {
         // 画布回调里要用的悬停/条目/配色快照。
         let canvas_hovered = hovered;
         let canvas_entries = entries.clone();
-        // 系统亚克力已在 HWND 上生效，但扇区/中心盘若接近不透明就会把材质整块盖住
-        // （用户看到的"像贴图"）。材质模式下一律压低 alpha，让亚克力真正透出来：
-        // 扇区 ~55%、空槽 ~45%、悬停 ~80%、中心盘 ~55%。
+        // 材质由内容层实现：截屏 + GPU 高斯模糊，裁成圆形铺底。
+        // 这样模糊是真的、形状是圆的，且不存在 DWM accent 那种比圆大的矩形灰块。
         let uses_system_material = matches!(
             crate::window_material::supported_material(
                 crate::config_runtime::appearance_config(cx)
@@ -688,8 +716,58 @@ impl Render for WheelWindowView {
             canvas_colors.center_border = with_reduced_alpha(canvas_colors.center_border, 0.60);
         }
         let center = point(px(WHEEL_DIAMETER / 2.0), px(WHEEL_DIAMETER / 2.0));
+        // 模糊底图层：截图 + GPU blur + 大圆裁剪 + 明暗 tint。
+        let dark_mode = gpui_component::Theme::global(cx).mode.is_dark();
+        let brightness = crate::config_runtime::appearance_config(cx)
+            .wheel_appearance
+            .material_brightness;
+        let blur_radius = if matches!(
+            crate::window_material::supported_material(
+                crate::config_runtime::appearance_config(cx)
+                    .wheel_appearance
+                    .material
+            ),
+            crate::config::WindowMaterial::Blur
+        ) {
+            28.0
+        } else {
+            18.0
+        };
+        let backdrop_layer = backdrop.filter(|_| uses_system_material).map(|image| {
+            // 明暗：<1 压暗，>1 提亮；1.0 时完全不叠色。
+            let tint = if brightness < 1.0 {
+                let alpha = ((1.0 - brightness).clamp(0.0, 1.0) * 255.0).round() as u32;
+                Some(gpui::rgba((alpha << 24) | 0x000000u32))
+            } else if brightness > 1.0 {
+                let alpha = ((brightness - 1.0).clamp(0.0, 1.0) * 200.0).round() as u32;
+                Some(gpui::rgba((alpha << 24) | 0xFFFFFFu32))
+            } else {
+                None
+            };
+            let mut container = div()
+                .absolute()
+                .left_0()
+                .top_0()
+                .size(px(WHEEL_DIAMETER))
+                .rounded_full()
+                .overflow_hidden()
+                .child(
+                    gpui::img(image)
+                        .size_full()
+                        .object_fit(gpui::ObjectFit::Cover)
+                        .blur(px(blur_radius)),
+                );
+            if let Some(color) = tint {
+                container = container.child(div().absolute().inset_0().bg(color));
+            }
+            let _ = dark_mode;
+            container
+        });
 
         let mut root = div().relative().size_full();
+        if let Some(layer) = backdrop_layer {
+            root = root.child(layer);
+        }
         root = root.child(
             canvas(
                 move |_, _, _| {},

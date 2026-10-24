@@ -545,20 +545,124 @@ pub(crate) fn apply_window_material(
     }
 }
 
-/// 给独立圆窗（收藏轮盘）应用材质，完全照搬主窗口亚克力链路，额外加椭圆区域裁剪：
-/// 1) 先用椭圆 SetWindowRgn 让窗口形状是圆
-/// 2) set_background_appearance(Blurred) → GPUI 下发 ACCENT 亚克力
-/// 3) apply_window_material 再覆盖成带明暗 tint 的亚克力（与主窗口同一函数）
-/// 已实测 SetWindowRgn 会被后续 resize/framechanged 重置，因此这里按客户区矩形
-/// 重新裁剪，并由 open 侧在 resize 后多次重放以保证最终生效。
+/// 截取屏幕上一块物理像素区域，返回 RGBA 图像（用于轮盘的软件模糊背景）。
+/// 参数为物理像素坐标；返回图像按 1:1 采样，模糊交给调用方的 GPU blur。
+#[cfg(target_os = "windows")]
+pub(crate) fn capture_screen_region(
+    x: f32,
+    y: f32,
+    width: u32,
+    height: u32,
+) -> Result<image::RgbaImage, String> {
+    use windows::Win32::{
+        Foundation::HWND,
+        Graphics::Gdi::{
+            BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CreateCompatibleBitmap,
+            CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, ReleaseDC, SRCCOPY,
+            SelectObject,
+        },
+    };
+
+    if width == 0 || height == 0 {
+        return Err("截屏区域尺寸为 0".to_owned());
+    }
+    let x = x.round() as i32;
+    let y = y.round() as i32;
+
+    // SAFETY: 全部句柄在本函数内创建并在返回前释放；失败路径各自清理。
+    unsafe {
+        let screen_dc = GetDC(None);
+        if screen_dc.is_invalid() {
+            return Err("无法获取屏幕设备上下文".to_owned());
+        }
+        let memory_dc = CreateCompatibleDC(Some(screen_dc));
+        if memory_dc.is_invalid() {
+            ReleaseDC(None, screen_dc);
+            return Err("无法创建内存设备上下文".to_owned());
+        }
+        let bitmap = CreateCompatibleBitmap(screen_dc, width as i32, height as i32);
+        if bitmap.is_invalid() {
+            let _ = DeleteDC(memory_dc);
+            ReleaseDC(None, screen_dc);
+            return Err("无法创建兼容位图".to_owned());
+        }
+        let previous = SelectObject(memory_dc, bitmap.into());
+
+        let copied = BitBlt(
+            memory_dc,
+            0,
+            0,
+            width as i32,
+            height as i32,
+            Some(screen_dc),
+            x,
+            y,
+            SRCCOPY,
+        )
+        .is_ok();
+
+        let mut image = None;
+        if copied {
+            let mut info = BITMAPINFO::default();
+            info.bmiHeader = BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: width as i32,
+                // 负高度表示自上而下的行序，和图像内存布局一致。
+                biHeight: -(height as i32),
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            };
+            let mut buffer = vec![0u8; (width as usize) * (height as usize) * 4];
+            let lines = windows::Win32::Graphics::Gdi::GetDIBits(
+                memory_dc,
+                bitmap,
+                0,
+                height,
+                Some(buffer.as_mut_ptr() as *mut _),
+                &mut info,
+                DIB_RGB_COLORS,
+            );
+            if lines > 0 {
+                // GDI 给出 BGRA，转成 RGBA 供 GPUI 使用。
+                for pixel in buffer.chunks_exact_mut(4) {
+                    pixel.swap(0, 2);
+                }
+                image = image::RgbaImage::from_raw(width, height, buffer);
+            }
+        }
+
+        SelectObject(memory_dc, previous);
+        let _ = DeleteObject(bitmap.into());
+        let _ = DeleteDC(memory_dc);
+        ReleaseDC(None, screen_dc);
+        // SAFETY 结束：句柄均已释放。
+
+        image.ok_or_else(|| "截取屏幕区域失败".to_owned())
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn capture_screen_region(
+    _x: f32,
+    _y: f32,
+    _width: u32,
+    _height: u32,
+) -> Result<image::RgbaImage, String> {
+    Err("当前平台不支持屏幕截取".to_owned())
+}
+
+/// 给独立圆窗（收藏轮盘）应用材质：椭圆裁剪窗口区域。
+/// 注意：这里不再下发给系统亚克力（DWM accent 画整个窗口矩形，SetWindowRgn 裁不掉，
+/// 必然出现比圆大的矩形灰块）。模糊背景改由内容层用截屏 + GPU blur 实现。
 #[cfg(target_os = "windows")]
 pub(crate) fn apply_circle_window_material(
     window: &Window,
-    material: crate::config::WindowMaterial,
-    brightness: f32,
+    _material: crate::config::WindowMaterial,
+    _brightness: f32,
     light_mode: bool,
 ) -> Result<(), String> {
-    use crate::config::WindowMaterial;
     use windows::Win32::{
         Foundation::RECT,
         Graphics::Gdi::{CreateEllipticRgn, DeleteObject, SetWindowRgn},
@@ -567,7 +671,7 @@ pub(crate) fn apply_circle_window_material(
 
     let hwnd = window_hwnd(window)?;
 
-    // 1) 按真实客户区裁剪成椭圆（内切圆）。
+    // 按真实客户区裁剪成椭圆（内切圆）。
     let mut rect = RECT::default();
     // SAFETY: hwnd 已校验，rect 由本函数持有。
     unsafe { GetClientRect(hwnd, &mut rect) }
@@ -588,23 +692,10 @@ pub(crate) fn apply_circle_window_material(
         return Err("设置轮盘圆形窗口区域失败".to_owned());
     }
 
-    // 2) 先让 GPUI 进入 Blurred（内部下发一次 ACCENT 亚克力），再用主窗口同款
-    //    apply_window_material 覆盖 tint，保证与主窗口亚克力一致。
-    let effective = crate::window_material::supported_material(material);
-    match effective {
-        WindowMaterial::Acrylic => {
-            window.set_background_appearance(gpui::WindowBackgroundAppearance::Blurred);
-            apply_window_material(window, effective, brightness, light_mode);
-        }
-        WindowMaterial::Blur => {
-            window.set_background_appearance(gpui::WindowBackgroundAppearance::Transparent);
-            apply_window_material(window, effective, brightness, light_mode);
-        }
-        WindowMaterial::Disabled | WindowMaterial::Transparent | WindowMaterial::CustomImage => {
-            window.set_background_appearance(gpui::WindowBackgroundAppearance::Transparent);
-            apply_window_material(window, WindowMaterial::Disabled, 1.0, light_mode);
-        }
-    }
+    // 不挂系统 accent 材质：它画整个窗口矩形，会形成比圆大的灰块。
+    // 窗口保持普通透明，模糊背景由内容层截屏 + GPU blur 呈现。
+    window.set_background_appearance(gpui::WindowBackgroundAppearance::Transparent);
+    let _ = (light_mode,);
     Ok(())
 }
 
