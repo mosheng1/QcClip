@@ -292,7 +292,12 @@ pub(crate) fn open_wheel_window(cx: &mut App) -> bool {
     };
 
     cx.set_global(WheelSession {
-        origin: Some(pointer),
+        // 判定圆心取窗口真实中心，而不是鼠标位置：窗口贴边时会被夹回工作区，
+        // 用鼠标位置做圆心会导致扇区与视觉错位、贴边侧选不中。
+        origin: Some(point(
+            window_x + diameter / 2.0,
+            window_y + diameter / 2.0,
+        )),
         scale,
         entries: page.slots,
         total: page.total,

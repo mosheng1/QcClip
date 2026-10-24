@@ -635,10 +635,10 @@ pub(crate) fn capture_screen_region(
                         buffer.swap(top + offset, bottom + offset);
                     }
                 }
-                // 2) GDI 的 32bpp 是 BGRA，转成 RGBA 供 GPUI 使用。
-                for pixel in buffer.chunks_exact_mut(4) {
-                    pixel.swap(0, 2);
-                }
+                // 2) 不做 R/B 交换：GDI 的 32bpp 本就是 BGRA，而 GPUI 的 RenderImage
+                //    也按 BGRA 解释字节（见 window_material::load_background_image：
+                //    image crate 解出的 RGBA 在交给 RenderImage 前会 swap 一次）。
+                //    这里再 swap 一次就会把红蓝通道互换（红色图标变蓝）。
                 image = image::RgbaImage::from_raw(width, height, buffer);
             }
         }
