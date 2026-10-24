@@ -1,0 +1,44 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "cargo check",
+            "type": "shell",
+            "command": "cmd",
+            "args": ["/c", "C:\\Users\\18074\\build\\vscode_build.bat", "check"],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": "$rustc",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "cargo build release",
+            "type": "shell",
+            "command": "cmd",
+            "args": ["/c", "C:\\Users\\18074\\build\\vscode_build.bat", "build-release"],
+            "group": "build",
+            "problemMatcher": "$rustc",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "cargo run",
+            "type": "shell",
+            "command": "cmd",
+            "args": ["/c", "C:\\Users\\18074\\build\\vscode_build.bat", "run"],
+            "group": "build",
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            }
+        }
+    ]
+}

@@ -1080,6 +1080,7 @@ struct SettingsWindowView {
     recording_focus_handle: FocusHandle,
     adaptive_max_lines_slider: Entity<SliderState>,
     middle_mouse_threshold_slider: Entity<SliderState>,
+    wheel_mouse_threshold_slider: Entity<SliderState>,
     window_material_opacity_slider: Entity<SliderState>,
     background_image_blur_slider: Entity<SliderState>,
     window_material_brightness_slider: Entity<SliderState>,
@@ -1087,6 +1088,16 @@ struct SettingsWindowView {
     quick_paste_scroll_volume_slider: Entity<SliderState>,
     search_engine_name_input: Entity<InputState>,
     clipboard_format_input: Entity<InputState>,
+    /// 收藏轮盘外观：扇区/悬停/中心色输入框。
+    wheel_sector_color_input: Entity<InputState>,
+    wheel_hover_color_input: Entity<InputState>,
+    wheel_center_color_input: Entity<InputState>,
+    wheel_title_color_input: Entity<InputState>,
+    wheel_preview_color_input: Entity<InputState>,
+    wheel_page_color_input: Entity<InputState>,
+    wheel_title_size_slider: Entity<SliderState>,
+    wheel_preview_size_slider: Entity<SliderState>,
+    wheel_brightness_slider: Entity<SliderState>,
     clipboard_formats_expanded: bool,
     search_engine_url_input: Entity<InputState>,
     /// 待添加引擎已选择的图标本地路径；为空则用内置品牌图标或通用图标。
@@ -1098,6 +1109,7 @@ struct SettingsWindowView {
     filter_hover_delay_slider: Entity<SliderState>,
     _adaptive_max_lines_subscription: Subscription,
     _middle_mouse_threshold_subscription: Subscription,
+    _wheel_mouse_threshold_subscription: Subscription,
     _window_material_opacity_subscription: Subscription,
     _background_image_blur_subscription: Subscription,
     _window_material_brightness_subscription: Subscription,
@@ -1108,6 +1120,15 @@ struct SettingsWindowView {
     _filter_hover_delay_subscription: Subscription,
     _history_retention_subscription: Subscription,
     _history_max_items_subscription: Subscription,
+    _wheel_sector_color_subscription: Subscription,
+    _wheel_hover_color_subscription: Subscription,
+    _wheel_center_color_subscription: Subscription,
+    _wheel_title_color_subscription: Subscription,
+    _wheel_preview_color_subscription: Subscription,
+    _wheel_page_color_subscription: Subscription,
+    _wheel_title_size_subscription: Subscription,
+    _wheel_preview_size_subscription: Subscription,
+    _wheel_brightness_subscription: Subscription,
     _shortcut_recording_blur_subscription: Subscription,
     _settings_search_subscription: Subscription,
 }
@@ -1141,6 +1162,39 @@ impl SettingsWindowView {
                     .err()
                     .map(|error| {
                         tracing::error!("保存鼠标中键长按阈值失败：{error}");
+                        i18n::translator(cx).translate("settings.shortcuts.save_error")
+                    });
+                view.shortcut_error = notify_settings_error(SettingsPage::Shortcuts, error, cx);
+                cx.notify();
+            },
+        );
+        let wheel_mouse_threshold = config_runtime::shortcuts_config(cx)
+            .wheel_mouse
+            .hold_threshold_ms;
+        let wheel_mouse_threshold_slider = cx.new(|_| {
+            SliderState::new()
+                .min(10.0)
+                .max(1000.0)
+                .step(1.0)
+                .default_value(f32::from(wheel_mouse_threshold))
+        });
+        let wheel_mouse_threshold_subscription = cx.subscribe_in(
+            &wheel_mouse_threshold_slider,
+            window,
+            |view, _, event: &SliderEvent, _, cx| {
+                let SliderEvent::Change(value) = event else {
+                    return;
+                };
+                let mut config = config_runtime::shortcuts_config(cx).wheel_mouse;
+                let threshold = value.end().round().clamp(10.0, 1000.0) as u16;
+                if !config.enabled || config.hold_threshold_ms == threshold {
+                    return;
+                }
+                config.hold_threshold_ms = threshold;
+                let error = hotkey::set_wheel_mouse_config(config, cx)
+                    .err()
+                    .map(|error| {
+                        tracing::error!("保存侧键轮盘按住阈值失败：{error}");
                         i18n::translator(cx).translate("settings.shortcuts.save_error")
                     });
                 view.shortcut_error = notify_settings_error(SettingsPage::Shortcuts, error, cx);
@@ -1503,6 +1557,242 @@ impl SettingsWindowView {
                 i18n::translator(cx).translate("settings.clipboard.search_engine_url_placeholder"),
             )
         });
+        let wheel_appearance = config_runtime::appearance_config(cx).wheel_appearance;
+        let wheel_sector_color_input = cx.new(|cx| {
+            InputState::new(window, cx).default_value(wheel_appearance.sector_color.clone())
+        });
+        let wheel_hover_color_input = cx.new(|cx| {
+            InputState::new(window, cx).default_value(wheel_appearance.hover_color.clone())
+        });
+        let wheel_center_color_input = cx.new(|cx| {
+            InputState::new(window, cx).default_value(wheel_appearance.center_color.clone())
+        });
+        // 三个颜色输入：回车时写入 appearance.wheelAppearance（避免每敲一个字符就写盘）。
+        let wheel_color_save_error =
+            i18n::translator(cx).translate("settings.personalization.save_error");
+        let wheel_sector_input_for_save = wheel_sector_color_input.clone();
+        let sector_save_error = wheel_color_save_error.clone();
+        let wheel_sector_subscription = cx.subscribe_in(
+            &wheel_sector_input_for_save,
+            window,
+            move |view, input, event: &InputEvent, _window, cx| {
+                if !matches!(event, InputEvent::PressEnter { .. }) {
+                    return;
+                }
+                let raw = input.read(cx).value().to_string();
+                save_wheel_color(
+                    view,
+                    raw,
+                    |wheel| &mut wheel.sector_color,
+                    "轮盘扇区颜色",
+                    sector_save_error.clone(),
+                    cx,
+                );
+            },
+        );
+        let wheel_hover_input_for_save = wheel_hover_color_input.clone();
+        let hover_save_error = wheel_color_save_error.clone();
+        let wheel_hover_subscription = cx.subscribe_in(
+            &wheel_hover_input_for_save,
+            window,
+            move |view, input, event: &InputEvent, _window, cx| {
+                if !matches!(event, InputEvent::PressEnter { .. }) {
+                    return;
+                }
+                let raw = input.read(cx).value().to_string();
+                save_wheel_color(
+                    view,
+                    raw,
+                    |wheel| &mut wheel.hover_color,
+                    "轮盘悬停颜色",
+                    hover_save_error.clone(),
+                    cx,
+                );
+            },
+        );
+        let wheel_center_input_for_save = wheel_center_color_input.clone();
+        let center_save_error = wheel_color_save_error.clone();
+        let wheel_center_subscription = cx.subscribe_in(
+            &wheel_center_input_for_save,
+            window,
+            move |view, input, event: &InputEvent, _window, cx| {
+                if !matches!(event, InputEvent::PressEnter { .. }) {
+                    return;
+                }
+                let raw = input.read(cx).value().to_string();
+                save_wheel_color(
+                    view,
+                    raw,
+                    |wheel| &mut wheel.center_color,
+                    "轮盘中心颜色",
+                    center_save_error.clone(),
+                    cx,
+                );
+            },
+        );
+        // 文字三色输入（标题/预览/页码）。
+        let wheel_title_color_input = cx.new(|cx| {
+            InputState::new(window, cx).default_value(wheel_appearance.title_color.clone())
+        });
+        let wheel_preview_color_input = cx.new(|cx| {
+            InputState::new(window, cx).default_value(wheel_appearance.preview_color.clone())
+        });
+        let wheel_page_color_input = cx.new(|cx| {
+            InputState::new(window, cx).default_value(wheel_appearance.page_color.clone())
+        });
+        let title_input_for_save = wheel_title_color_input.clone();
+        let title_save_error = wheel_color_save_error.clone();
+        let wheel_title_subscription = cx.subscribe_in(
+            &title_input_for_save,
+            window,
+            move |view, input, event: &InputEvent, _window, cx| {
+                if !matches!(event, InputEvent::PressEnter { .. }) {
+                    return;
+                }
+                let raw = input.read(cx).value().to_string();
+                save_wheel_color(
+                    view,
+                    raw,
+                    |wheel| &mut wheel.title_color,
+                    "轮盘标题颜色",
+                    title_save_error.clone(),
+                    cx,
+                );
+            },
+        );
+        let preview_input_for_save = wheel_preview_color_input.clone();
+        let preview_save_error = wheel_color_save_error.clone();
+        let wheel_preview_subscription = cx.subscribe_in(
+            &preview_input_for_save,
+            window,
+            move |view, input, event: &InputEvent, _window, cx| {
+                if !matches!(event, InputEvent::PressEnter { .. }) {
+                    return;
+                }
+                let raw = input.read(cx).value().to_string();
+                save_wheel_color(
+                    view,
+                    raw,
+                    |wheel| &mut wheel.preview_color,
+                    "轮盘预览颜色",
+                    preview_save_error.clone(),
+                    cx,
+                );
+            },
+        );
+        let page_input_for_save = wheel_page_color_input.clone();
+        let page_save_error = wheel_color_save_error.clone();
+        let wheel_page_subscription = cx.subscribe_in(
+            &page_input_for_save,
+            window,
+            move |view, input, event: &InputEvent, _window, cx| {
+                if !matches!(event, InputEvent::PressEnter { .. }) {
+                    return;
+                }
+                let raw = input.read(cx).value().to_string();
+                save_wheel_color(
+                    view,
+                    raw,
+                    |wheel| &mut wheel.page_color,
+                    "轮盘页码颜色",
+                    page_save_error.clone(),
+                    cx,
+                );
+            },
+        );
+        // 字号滑条（标题 10~24 / 预览 8~20，步进 1）。
+        let wheel_title_size_slider = cx.new(|_| {
+            SliderState::new()
+                .min(crate::config::WHEEL_TITLE_FONT_SIZE_MIN)
+                .max(crate::config::WHEEL_TITLE_FONT_SIZE_MAX)
+                .step(1.0)
+                .default_value(wheel_appearance.title_font_size)
+        });
+        let title_size_save_error = wheel_color_save_error.clone();
+        let wheel_title_size_subscription = cx.subscribe_in(
+            &wheel_title_size_slider,
+            window,
+            move |_view, _slider, event: &SliderEvent, _window, cx| {
+                let SliderEvent::Change(value) = event else {
+                    return;
+                };
+                let size = value.end().round().clamp(
+                    crate::config::WHEEL_TITLE_FONT_SIZE_MIN,
+                    crate::config::WHEEL_TITLE_FONT_SIZE_MAX,
+                );
+                let mut appearance = config_runtime::appearance_config(cx);
+                if (appearance.wheel_appearance.title_font_size - size).abs() < 0.05 {
+                    return;
+                }
+                appearance.wheel_appearance.title_font_size = size;
+                if let Err(error) = config_runtime::set_appearance_config(appearance, cx) {
+                    tracing::error!("保存轮盘标题字号失败：{error}");
+                    let _ = &title_size_save_error;
+                }
+                cx.notify();
+            },
+        );
+        let wheel_preview_size_slider = cx.new(|_| {
+            SliderState::new()
+                .min(crate::config::WHEEL_PREVIEW_FONT_SIZE_MIN)
+                .max(crate::config::WHEEL_PREVIEW_FONT_SIZE_MAX)
+                .step(1.0)
+                .default_value(wheel_appearance.preview_font_size)
+        });
+        let preview_size_save_error = wheel_color_save_error.clone();
+        let wheel_preview_size_subscription = cx.subscribe_in(
+            &wheel_preview_size_slider,
+            window,
+            move |_view, _slider, event: &SliderEvent, _window, cx| {
+                let SliderEvent::Change(value) = event else {
+                    return;
+                };
+                let size = value.end().round().clamp(
+                    crate::config::WHEEL_PREVIEW_FONT_SIZE_MIN,
+                    crate::config::WHEEL_PREVIEW_FONT_SIZE_MAX,
+                );
+                let mut appearance = config_runtime::appearance_config(cx);
+                if (appearance.wheel_appearance.preview_font_size - size).abs() < 0.05 {
+                    return;
+                }
+                appearance.wheel_appearance.preview_font_size = size;
+                if let Err(error) = config_runtime::set_appearance_config(appearance, cx) {
+                    tracing::error!("保存轮盘预览字号失败：{error}");
+                    let _ = &preview_size_save_error;
+                }
+                cx.notify();
+            },
+        );
+        // 轮盘材质明暗滑条（0.3~1.7，步进 0.05）。
+        let wheel_brightness_slider = cx.new(|_| {
+            SliderState::new()
+                .min(crate::config::WINDOW_MATERIAL_BRIGHTNESS_MIN)
+                .max(crate::config::WINDOW_MATERIAL_BRIGHTNESS_MAX)
+                .step(0.05)
+                .default_value(wheel_appearance.material_brightness)
+        });
+        let wheel_brightness_subscription = cx.subscribe_in(
+            &wheel_brightness_slider,
+            window,
+            move |_view, _slider, event: &SliderEvent, _window, cx| {
+                let SliderEvent::Change(value) = event else {
+                    return;
+                };
+                let brightness = value.end().clamp(
+                    crate::config::WINDOW_MATERIAL_BRIGHTNESS_MIN,
+                    crate::config::WINDOW_MATERIAL_BRIGHTNESS_MAX,
+                );
+                let mut appearance = config_runtime::appearance_config(cx);
+                if (appearance.wheel_appearance.material_brightness - brightness).abs() < 0.001 {
+                    return;
+                }
+                appearance.wheel_appearance.material_brightness = brightness;
+                if let Err(error) = config_runtime::set_appearance_config(appearance, cx) {
+                    tracing::error!("保存轮盘材质明暗失败：{error}");
+                }
+                cx.notify();
+            },
+        );
         let recording_focus_handle = cx.focus_handle();
         let search_results_scroll_handle = ScrollHandle::new();
         let shortcut_scroll_handle = ScrollHandle::new();
@@ -1590,6 +1880,7 @@ impl SettingsWindowView {
             recording_focus_handle,
             adaptive_max_lines_slider,
             middle_mouse_threshold_slider,
+            wheel_mouse_threshold_slider,
             window_material_opacity_slider,
             background_image_blur_slider,
             window_material_brightness_slider,
@@ -1600,12 +1891,22 @@ impl SettingsWindowView {
             filter_hover_delay_slider,
             search_engine_name_input,
             clipboard_format_input,
+            wheel_sector_color_input,
+            wheel_hover_color_input,
+            wheel_center_color_input,
+            wheel_title_color_input,
+            wheel_preview_color_input,
+            wheel_page_color_input,
+            wheel_title_size_slider,
+            wheel_preview_size_slider,
+            wheel_brightness_slider,
             clipboard_formats_expanded: false,
             search_engine_url_input,
             pending_search_engine_icon: None,
             search_engines_expanded: false,
             _adaptive_max_lines_subscription: adaptive_max_lines_subscription,
             _middle_mouse_threshold_subscription: middle_mouse_threshold_subscription,
+            _wheel_mouse_threshold_subscription: wheel_mouse_threshold_subscription,
             _window_material_opacity_subscription: window_material_opacity_subscription,
             _background_image_blur_subscription: background_image_blur_subscription,
             _window_material_brightness_subscription: window_material_brightness_subscription,
@@ -1616,6 +1917,15 @@ impl SettingsWindowView {
             _filter_hover_delay_subscription: filter_hover_delay_subscription,
             _history_retention_subscription: history_retention_subscription,
             _history_max_items_subscription: history_max_items_subscription,
+            _wheel_sector_color_subscription: wheel_sector_subscription,
+            _wheel_hover_color_subscription: wheel_hover_subscription,
+            _wheel_center_color_subscription: wheel_center_subscription,
+            _wheel_title_color_subscription: wheel_title_subscription,
+            _wheel_preview_color_subscription: wheel_preview_subscription,
+            _wheel_page_color_subscription: wheel_page_subscription,
+            _wheel_title_size_subscription: wheel_title_size_subscription,
+            _wheel_preview_size_subscription: wheel_preview_size_subscription,
+            _wheel_brightness_subscription: wheel_brightness_subscription,
             _shortcut_recording_blur_subscription: shortcut_recording_blur_subscription,
             _settings_search_subscription: settings_search_subscription,
         }
@@ -1732,6 +2042,51 @@ impl SettingsWindowView {
             window,
             cx,
         );
+    }
+
+    /// 轮盘颜色输入框与配置保持同步（重置/外部修改后回填）。
+    fn sync_wheel_color_inputs(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let wheel = config_runtime::appearance_config(cx).wheel_appearance;
+        for (input, value) in [
+            (&self.wheel_sector_color_input, wheel.sector_color),
+            (&self.wheel_hover_color_input, wheel.hover_color),
+            (&self.wheel_center_color_input, wheel.center_color),
+            (&self.wheel_title_color_input, wheel.title_color),
+            (&self.wheel_preview_color_input, wheel.preview_color),
+            (&self.wheel_page_color_input, wheel.page_color),
+        ] {
+            input.update(cx, |state, cx| {
+                if state.value().as_ref() != value.as_str() {
+                    state.set_value(value.clone(), window, cx);
+                }
+            });
+        }
+        // 字号滑条同步。
+        let title_size = wheel_title_size_for_sync(cx);
+        self.wheel_title_size_slider.update(cx, |slider, cx| {
+            if slider.value() != SliderValue::Single(title_size) {
+                slider.set_value(title_size, window, cx);
+            }
+        });
+        let preview_size = wheel_preview_size_for_sync(cx);
+        self.wheel_preview_size_slider.update(cx, |slider, cx| {
+            if slider.value() != SliderValue::Single(preview_size) {
+                slider.set_value(preview_size, window, cx);
+            }
+        });
+        let brightness = config_runtime::appearance_config(cx)
+            .wheel_appearance
+            .material_brightness;
+        let brightness = if brightness.is_finite() {
+            brightness
+        } else {
+            crate::config::WINDOW_MATERIAL_BRIGHTNESS_DEFAULT
+        };
+        self.wheel_brightness_slider.update(cx, |slider, cx| {
+            if slider.value() != SliderValue::Single(brightness) {
+                slider.set_value(brightness, window, cx);
+            }
+        });
     }
 
     pub(crate) fn refresh_application_filter_apps(&mut self, cx: &mut Context<Self>) {
@@ -1865,6 +2220,29 @@ fn optional_limit_text(value: Option<u32>) -> String {
     value.map(|value| value.to_string()).unwrap_or_default()
 }
 
+/// 轮盘字号滑条同步用的当前配置值（异常时回退默认）。
+fn wheel_title_size_for_sync(cx: &gpui::App) -> f32 {
+    let size = config_runtime::appearance_config(cx)
+        .wheel_appearance
+        .title_font_size;
+    if size.is_finite() {
+        size
+    } else {
+        crate::config::WHEEL_TITLE_FONT_SIZE_DEFAULT
+    }
+}
+
+fn wheel_preview_size_for_sync(cx: &gpui::App) -> f32 {
+    let size = config_runtime::appearance_config(cx)
+        .wheel_appearance
+        .preview_font_size;
+    if size.is_finite() {
+        size
+    } else {
+        crate::config::WHEEL_PREVIEW_FONT_SIZE_DEFAULT
+    }
+}
+
 pub(in crate::windows::settings) fn parse_optional_limit(value: &str) -> Option<Option<u32>> {
     let value = value.trim();
     if value.is_empty() || value == "none" {
@@ -1887,6 +2265,37 @@ fn sync_limit_input(
     });
 }
 
+/// 轮盘颜色输入回车保存：把输入框文本归一化后写入 appearance.wheelAppearance 对应字段。
+/// 输入非法（既非空也非合法十六进制）时提示错误不保存。
+fn save_wheel_color(
+    view: &mut SettingsWindowView,
+    raw: String,
+    field: fn(&mut crate::config::WheelAppearanceConfig) -> &mut String,
+    field_name: &'static str,
+    save_error: String,
+    cx: &mut Context<SettingsWindowView>,
+) {
+    let normalized = crate::config::normalize_wheel_color(&raw);
+    if normalized.is_empty() && !raw.trim().trim_start_matches('#').is_empty() {
+        // 输入了内容但格式非法：提示并回退为当前配置值。
+        view.appearance_error =
+            notify_settings_error(SettingsPage::Personalization, Some(save_error), cx);
+        cx.notify();
+        return;
+    }
+    let mut appearance = config_runtime::appearance_config(cx);
+    *field(&mut appearance.wheel_appearance) = normalized;
+    let error_message = match config_runtime::set_appearance_config(appearance, cx) {
+        Ok(_) => None,
+        Err(error) => {
+            tracing::error!("保存{field_name}失败：{error}");
+            Some(i18n::translator(cx).translate("settings.personalization.save_error"))
+        }
+    };
+    view.appearance_error = notify_settings_error(SettingsPage::Personalization, error_message, cx);
+    cx.notify();
+}
+
 impl Focusable for SettingsWindowView {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
@@ -1907,6 +2316,7 @@ impl Render for SettingsWindowView {
             self.refresh_data_stats(cx);
         }
         self.sync_history_inputs(window, cx);
+        self.sync_wheel_color_inputs(window, cx);
         self.sync_adaptive_max_lines_slider(window, cx);
         let threshold = f32::from(
             config_runtime::shortcuts_config(cx)
@@ -1916,6 +2326,16 @@ impl Render for SettingsWindowView {
         self.middle_mouse_threshold_slider.update(cx, |slider, cx| {
             if slider.value() != SliderValue::Single(threshold) {
                 slider.set_value(threshold, window, cx);
+            }
+        });
+        let wheel_threshold = f32::from(
+            config_runtime::shortcuts_config(cx)
+                .wheel_mouse
+                .hold_threshold_ms,
+        );
+        self.wheel_mouse_threshold_slider.update(cx, |slider, cx| {
+            if slider.value() != SliderValue::Single(wheel_threshold) {
+                slider.set_value(wheel_threshold, window, cx);
             }
         });
         self.sync_window_material_opacity_slider(window, cx);

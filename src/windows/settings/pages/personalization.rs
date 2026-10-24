@@ -22,7 +22,7 @@ use crate::{
     ui::{SingleSelectOption, single_select, single_select_grid},
     windows::menu::{DropdownItem, DropdownItemId},
 };
-use gpui::{App, Entity, Window, div, px};
+use gpui::{App, Entity, SharedString, Window, div, px};
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::scroll::ScrollableElement as _;
 use gpui_component::slider::Slider;
@@ -409,6 +409,117 @@ impl SettingsWindowView {
                 )
             });
 
+        // ---- 收藏轮盘外观面板：独立材质 + 明暗 + 颜色（色块按钮 + 输入框） ----
+        // 材质与主窗口同一链路（椭圆裁剪 + 系统亚克力 + 明暗 tint），
+        // 只提供亚克力/模糊两种系统材质，不再提供透明模式。
+        let wheel_material_selector = single_select(
+            "settings-wheel-material-select",
+            crate::window_material::available_materials()
+                .into_iter()
+                .filter(|material| {
+                    matches!(material, WindowMaterial::Acrylic | WindowMaterial::Blur)
+                })
+                .map(|material| {
+                    SingleSelectOption::new(
+                        material,
+                        translator.translate(window_material_label_key(material)),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            match crate::window_material::supported_material(appearance.wheel_appearance.material) {
+                WindowMaterial::Blur => WindowMaterial::Blur,
+                _ => WindowMaterial::Acrylic,
+            },
+            {
+                let view = view.clone();
+                let save_error = save_error.clone();
+                move |material, cx| {
+                    persist_appearance_change(
+                        view.clone(),
+                        "轮盘材质",
+                        move |appearance| appearance.wheel_appearance.material = material,
+                        save_error.clone(),
+                        cx,
+                    );
+                }
+            },
+            theme,
+            single_select_animation,
+        );
+        let wheel_material_row = h_flex()
+            .w_full()
+            .gap_3()
+            .items_center()
+            .child(
+                div()
+                    .w(ui_rem(96.0))
+                    .flex_shrink_0()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(
+                        translator.translate("settings.personalization.wheel_appearance.material"),
+                    ),
+            )
+            .child(div().flex_1().min_w_0().child(wheel_material_selector));
+        // 材质明暗滑条（复用窗口明暗滑条状态渲染，绑定 wheel_appearance.material_brightness）。
+        let wheel_brightness_row = h_flex()
+            .w_full()
+            .gap_3()
+            .items_center()
+            .child(
+                div()
+                    .w(ui_rem(96.0))
+                    .flex_shrink_0()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(
+                        translator
+                            .translate("settings.personalization.wheel_appearance.brightness"),
+                    ),
+            )
+            .child(Slider::new(&self.wheel_brightness_slider).flex_1())
+            .child(
+                div()
+                    .w(ui_rem(40.0))
+                    .flex_shrink_0()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(format!(
+                        "{}%",
+                        (appearance.wheel_appearance.material_brightness * 100.0).round() as i32
+                    )),
+            );
+        // 色块按钮 + 十六进制输入；色块点击弹出取色器，选中即保存。
+        let make_wheel_color_row = {
+            let view = view.clone();
+            let save_error = save_error.clone();
+            let pick_color_tooltip: gpui::SharedString = translator
+                .translate("settings.personalization.wheel_appearance.pick_color")
+                .into();
+            let theme_border = theme.border;
+            move |id: &'static str,
+                  title: String,
+                  description: String,
+                  input: gpui::Entity<gpui_component::input::InputState>,
+                  current_hex: &str,
+                  apply: fn(&mut crate::config::WheelAppearanceConfig) -> &mut String,
+                  field_name: &'static str|
+                  -> gpui::AnyElement {
+                wheel_color_row(
+                    id,
+                    title,
+                    description,
+                    input,
+                    current_hex,
+                    apply,
+                    field_name,
+                    view.clone(),
+                    save_error.clone(),
+                    pick_color_tooltip.clone(),
+                    theme_border,
+                )
+            }
+        };
         let theme_options = available_theme_options(cx);
         let light_selector = settings_dropdown(
             "settings-light-theme-select",
@@ -742,6 +853,257 @@ impl SettingsWindowView {
                     .px_4()
                     .py_3()
                     .child(window_material_panel),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .px_4()
+                    .py_3()
+                    .child(
+                        v_flex()
+                            .w_full()
+                            .gap_3()
+                            // 独立材质下拉（仿窗口材质控件，不与主窗口绑定）。
+                            .child(wheel_material_row)
+                            // 亚克力/模糊时显示明暗滑条。
+                            .when(
+                                matches!(
+                                    crate::window_material::supported_material(
+                                        appearance.wheel_appearance.material
+                                    ),
+                                    WindowMaterial::Acrylic | WindowMaterial::Blur
+                                ),
+                                |this| this.child(wheel_brightness_row),
+                            )
+                            // 颜色行始终显示：材质与调色可自由组合。
+                            .child(make_wheel_color_row(
+                                "wheel-sector-color",
+                                translator.translate(
+                                    "settings.personalization.wheel_appearance.sector_color",
+                                ),
+                                translator.translate(
+                                    "settings.personalization.wheel_appearance.sector_color_description",
+                                ),
+                                self.wheel_sector_color_input.clone(),
+                                appearance.wheel_appearance.sector_color.as_str(),
+                                |wheel| &mut wheel.sector_color,
+                                "轮盘扇区颜色",
+                            ))
+                            .child(make_wheel_color_row(
+                                "wheel-hover-color",
+                                translator.translate(
+                                    "settings.personalization.wheel_appearance.hover_color",
+                                ),
+                                translator.translate(
+                                    "settings.personalization.wheel_appearance.hover_color_description",
+                                ),
+                                self.wheel_hover_color_input.clone(),
+                                appearance.wheel_appearance.hover_color.as_str(),
+                                |wheel| &mut wheel.hover_color,
+                                "轮盘悬停颜色",
+                            ))
+                            .child(make_wheel_color_row(
+                                "wheel-center-color",
+                                translator.translate(
+                                    "settings.personalization.wheel_appearance.center_color",
+                                ),
+                                translator.translate(
+                                    "settings.personalization.wheel_appearance.center_color_description",
+                                ),
+                                self.wheel_center_color_input.clone(),
+                                appearance.wheel_appearance.center_color.as_str(),
+                                |wheel| &mut wheel.center_color,
+                                "轮盘中心颜色",
+                            ))
+                            .child(make_wheel_color_row(
+                                "wheel-title-color",
+                                translator.translate(
+                                    "settings.personalization.wheel_appearance.title_color",
+                                ),
+                                translator.translate(
+                                    "settings.personalization.wheel_appearance.title_color_description",
+                                ),
+                                self.wheel_title_color_input.clone(),
+                                appearance.wheel_appearance.title_color.as_str(),
+                                |wheel| &mut wheel.title_color,
+                                "轮盘标题颜色",
+                            ))
+                            .child(make_wheel_color_row(
+                                "wheel-preview-color",
+                                translator.translate(
+                                    "settings.personalization.wheel_appearance.preview_color",
+                                ),
+                                translator.translate(
+                                    "settings.personalization.wheel_appearance.preview_color_description",
+                                ),
+                                self.wheel_preview_color_input.clone(),
+                                appearance.wheel_appearance.preview_color.as_str(),
+                                |wheel| &mut wheel.preview_color,
+                                "轮盘预览颜色",
+                            ))
+                            .child(make_wheel_color_row(
+                                "wheel-page-color",
+                                translator.translate(
+                                    "settings.personalization.wheel_appearance.page_color",
+                                ),
+                                translator.translate(
+                                    "settings.personalization.wheel_appearance.page_color_description",
+                                ),
+                                self.wheel_page_color_input.clone(),
+                                appearance.wheel_appearance.page_color.as_str(),
+                                |wheel| &mut wheel.page_color,
+                                "轮盘页码颜色",
+                            ))
+                            // 轮盘字体：套用「应用字体」同款下拉控件。
+                            .child({
+                                let current_wheel_font = appearance
+                                    .wheel_appearance
+                                    .font_family
+                                    .clone()
+                                    .unwrap_or_default();
+                                let mut wheel_font_items = vec![DropdownItem::option(
+                                    DropdownItemId::new(""),
+                                    translator.translate(
+                                        "settings.personalization.wheel_appearance.font_default",
+                                    ),
+                                )
+                                .selected(current_wheel_font.is_empty())];
+                                wheel_font_items.extend(
+                                    crate::ui::fonts::system_font_names(cx).iter().map(|family| {
+                                        DropdownItem::option(
+                                            DropdownItemId::new(family.clone()),
+                                            family.clone(),
+                                        )
+                                        .selected(*family == current_wheel_font)
+                                    }),
+                                );
+                                let font_row = settings_dropdown_with_font(
+                                    "settings-wheel-font-select",
+                                    current_wheel_font,
+                                    wheel_font_items,
+                                    Some(".SystemUIFont".into()),
+                                    {
+                                        let view = view.clone();
+                                        let save_error = save_error.clone();
+                                        move |id, cx| {
+                                            let family =
+                                                (!id.as_str().is_empty()).then(|| id.as_str().to_owned());
+                                            persist_appearance_change(
+                                                view.clone(),
+                                                "轮盘字体",
+                                                move |appearance| {
+                                                    appearance.wheel_appearance.font_family = family
+                                                },
+                                                save_error.clone(),
+                                                cx,
+                                            );
+                                        }
+                                    },
+                                    cx,
+                                );
+                                h_flex().w_full().gap_3().items_center()
+                                    .child(
+                                        div()
+                                            .w(ui_rem(96.0))
+                                            .flex_shrink_0()
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground)
+                                            .child(
+                                                translator.translate(
+                                                    "settings.personalization.wheel_appearance.font_family",
+                                                ),
+                                            ),
+                                    )
+                                    .child(div().flex_1().min_w_0().child(font_row))
+                            })
+                            // 字号滑条：标题 / 预览。
+                            .child(
+                                h_flex().w_full().gap_3().items_center()
+                                    .child(
+                                        div()
+                                            .w(ui_rem(96.0))
+                                            .flex_shrink_0()
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground)
+                                            .child(translator.translate(
+                                                "settings.personalization.wheel_appearance.title_font_size",
+                                            )),
+                                    )
+                                    .child(Slider::new(&self.wheel_title_size_slider).flex_1())
+                                    .child(
+                                        div()
+                                            .w(ui_rem(40.0))
+                                            .flex_shrink_0()
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground)
+                                            .child(format!(
+                                                "{}px",
+                                                appearance.wheel_appearance.title_font_size.round() as i32
+                                            )),
+                                    ),
+                            )
+                            .child(
+                                h_flex().w_full().gap_3().items_center()
+                                    .child(
+                                        div()
+                                            .w(ui_rem(96.0))
+                                            .flex_shrink_0()
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground)
+                                            .child(translator.translate(
+                                                "settings.personalization.wheel_appearance.preview_font_size",
+                                            )),
+                                    )
+                                    .child(Slider::new(&self.wheel_preview_size_slider).flex_1())
+                                    .child(
+                                        div()
+                                            .w(ui_rem(40.0))
+                                            .flex_shrink_0()
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground)
+                                            .child(format!(
+                                                "{}px",
+                                                appearance.wheel_appearance.preview_font_size.round() as i32
+                                            )),
+                                    ),
+                            )
+                            // 一键重置轮盘外观为默认值。
+                            .child({
+                                let view = view.clone();
+                                let save_error = save_error.clone();
+                                h_flex().w_full().justify_end().child(
+                                    Button::new("settings-wheel-appearance-reset")
+                                        .warning()
+                                        .small()
+                                        .label(translator.translate(
+                                            "settings.personalization.wheel_appearance.reset",
+                                        ))
+                                        .on_click(move |_, _, cx| {
+                                            let mut config = config_runtime::appearance_config(cx);
+                                            config.wheel_appearance =
+                                                crate::config::WheelAppearanceConfig::default();
+                                            let error_message =
+                                                match config_runtime::set_appearance_config(config, cx) {
+                                                    Ok(_) => None,
+                                                    Err(error) => {
+                                                        tracing::error!("重置轮盘外观失败：{error}");
+                                                        Some(save_error.clone())
+                                                    }
+                                                };
+                                            view.update(cx, |view, cx| {
+                                                view.appearance_error = notify_settings_error(
+                                                    SettingsPage::Personalization,
+                                                    error_message,
+                                                    cx,
+                                                );
+                                                cx.notify();
+                                            });
+                                        }),
+                                )
+                            }),
+                    ),
             )
             .child(
                 self.setting_row(
@@ -1151,4 +1513,114 @@ const fn window_material_label_key(material: WindowMaterial) -> &'static str {
         WindowMaterial::Blur => "settings.personalization.window_material.blur",
         WindowMaterial::CustomImage => "settings.personalization.window_material.custom_image",
     }
+}
+
+/// 读取颜色输入框当前值作为取色器初始色（非法/为空回退中性灰）。
+fn current_color_u32(
+    input: &gpui::Entity<gpui_component::input::InputState>,
+    cx: &gpui::App,
+) -> u32 {
+    let binding = input.read(cx).value();
+    let raw = binding.trim().trim_start_matches('#');
+    let parsed = raw
+        .get(0..6)
+        .and_then(|hex| u32::from_str_radix(hex, 16).ok());
+    parsed.unwrap_or(0x808088)
+}
+
+/// 轮盘颜色行：标签 + 十六进制输入框 + 色块按钮（弹出取色器，选中即保存）。
+#[allow(clippy::too_many_arguments)]
+fn wheel_color_row(
+    id: &'static str,
+    title: String,
+    description: String,
+    input: gpui::Entity<gpui_component::input::InputState>,
+    current_hex: &str,
+    apply: fn(&mut crate::config::WheelAppearanceConfig) -> &mut String,
+    field_name: &'static str,
+    view: Entity<SettingsWindowView>,
+    save_error: String,
+    pick_color_tooltip: gpui::SharedString,
+    border_color: gpui::Hsla,
+) -> gpui::AnyElement {
+    let label = title.clone();
+    let description: gpui::SharedString = description.into();
+    let hex_digits: String = current_hex
+        .trim()
+        .trim_start_matches('#')
+        .chars()
+        .filter(|c| c.is_ascii_hexdigit())
+        .take(6)
+        .collect();
+    let sample_color = if hex_digits.len() == 6 {
+        u32::from_str_radix(&hex_digits, 16)
+            .map(|rgb| gpui::rgba((rgb << 8) | 0xFF))
+            .unwrap_or_else(|_| gpui::rgba(0x808088FF))
+    } else {
+        gpui::rgba(0x808088FF)
+    };
+    let picker_view = view.clone();
+    let picker_input = input.clone();
+    let picker_save_error = save_error.clone();
+    let picker = div()
+        .id(SharedString::from(format!("{id}-picker")))
+        .w(ui_rem(22.0))
+        .h(ui_rem(22.0))
+        .flex_shrink_0()
+        .rounded(px(4.0))
+        .border_1()
+        .border_color(border_color)
+        .bg(sample_color)
+        .cursor_pointer()
+        .tooltip(move |window, cx| {
+            gpui_component::tooltip::Tooltip::new(pick_color_tooltip.clone()).build(window, cx)
+        })
+        .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
+            let initial = current_color_u32(&picker_input, cx);
+            let input_for_done = picker_input.clone();
+            let view_done = picker_view.clone();
+            let done_save_error = picker_save_error.clone();
+            let result = crate::windows::color_picker::open_color_picker_window(
+                Some(window),
+                initial,
+                move |color, cx| {
+                    let hex = format!("{color:06x}");
+                    let _ = input_for_done;
+                    persist_appearance_change(
+                        view_done.clone(),
+                        field_name,
+                        move |appearance| *apply(&mut appearance.wheel_appearance) = hex.clone(),
+                        done_save_error.clone(),
+                        cx,
+                    );
+                },
+                cx,
+            );
+            if let Err(error) = result {
+                tracing::error!("打开轮盘颜色选择器失败：{error}");
+            }
+        });
+    h_flex()
+        .w_full()
+        .gap_3()
+        .items_center()
+        .child(
+            div()
+                .id(SharedString::from(format!("{id}-label")))
+                .w(ui_rem(96.0))
+                .flex_shrink_0()
+                .text_xs()
+                .child(label)
+                .tooltip(move |window, cx| {
+                    gpui_component::tooltip::Tooltip::new(description.clone()).build(window, cx)
+                }),
+        )
+        .child(
+            div()
+                .w(ui_rem(120.0))
+                .flex_shrink_0()
+                .child(gpui_component::input::Input::new(&input).small().w_full()),
+        )
+        .child(picker)
+        .into_any_element()
 }

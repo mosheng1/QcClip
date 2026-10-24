@@ -492,6 +492,13 @@ fn read_appearance(object: &Map<String, Value>, warnings: &mut Vec<String>) -> A
                 ),
             }
         }),
+        wheel_appearance: read_field(
+            object,
+            "wheelAppearance",
+            "appearance.wheelAppearance",
+            default.wheel_appearance,
+            warnings,
+        ),
     }
 }
 
@@ -803,6 +810,13 @@ fn read_shortcuts(object: &Map<String, Value>, warnings: &mut Vec<String>) -> Sh
             "middleMouse",
             "shortcuts.middleMouse",
             default.middle_mouse,
+            warnings,
+        ),
+        wheel_mouse: read_field(
+            object,
+            "wheelMouse",
+            "shortcuts.wheelMouse",
+            default.wheel_mouse,
             warnings,
         ),
         open_settings: read_field(

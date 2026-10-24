@@ -215,6 +215,11 @@ pub fn run() {
                 crate::services::image_preview::ImagePreviewService::new(_raw_blob_store.clone()),
                 cx,
             );
+            crate::windows::wheel::WheelWindowService::install(
+                favorite_repository.clone(),
+                paste_service.clone(),
+                cx,
+            );
             crate::hotkey::HotkeyRuntime::install(cx);
             #[cfg(target_os = "windows")]
             crate::services::tray::TrayService::install(cx);

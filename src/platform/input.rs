@@ -61,21 +61,112 @@ pub(crate) enum GlobalMouseEvent {
     },
 }
 
+/// 轮盘打开期间监听左/右键点击用于翻页的句柄；丢弃即取消监听。
+pub(crate) struct WheelPageListener {
+    _subscription: Option<raw_input::SubscriptionHandle>,
+}
+
+/// 轮盘打开期间吞掉左/右键点击的底层拦截；丢弃即解除拦截。
+pub(crate) struct WheelClickSwallowGuard {
+    _active: bool,
+}
+
+static WHEEL_SWALLOW_CLICKS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+impl WheelClickSwallowGuard {
+    /// 安装 WH_MOUSE_LL 钩子：轮盘存续期间左/右键按下不 reaching 前台窗口。
+    /// 返回 None 表示钩子安装失败（功能降级为只翻页不拦截）。
+    pub(crate) fn install() -> Option<Self> {
+        #[cfg(target_os = "windows")]
+        {
+            if !WHEEL_SWALLOW_CLICKS.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                windows_input::install_wheel_click_hook();
+            }
+            Some(Self { _active: true })
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            None
+        }
+    }
+}
+
+impl Drop for WheelClickSwallowGuard {
+    fn drop(&mut self) {
+        #[cfg(target_os = "windows")]
+        {
+            if WHEEL_SWALLOW_CLICKS.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                windows_input::remove_wheel_click_hook();
+            }
+        }
+    }
+}
+
+impl WheelPageListener {
+    /// 订阅原始输入的左/右键按下事件（true=下一页/右键，false=上一页/左键）。
+    /// 只负责转发事件，消费逻辑由调用方决定。
+    pub(crate) fn install() -> (Self, async_channel::Receiver<bool>) {
+        #[cfg(target_os = "windows")]
+        {
+            let (sender, receiver) = async_channel::unbounded::<bool>();
+            let subscription = raw_input::Listen::subscribe(move |event| match event {
+                raw_input::Event::MouseDown { button } => match button {
+                    raw_input::MouseButton::Right => {
+                        let _ = sender.try_send(true);
+                    }
+                    raw_input::MouseButton::Left => {
+                        let _ = sender.try_send(false);
+                    }
+                    _ => {}
+                },
+                _ => {}
+            });
+            (
+                Self {
+                    _subscription: Some(subscription),
+                },
+                receiver,
+            )
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let (_sender, receiver) = async_channel::unbounded::<bool>();
+            (
+                Self {
+                    _subscription: None,
+                },
+                receiver,
+            )
+        }
+    }
+}
+
 #[cfg(target_os = "windows")]
 mod windows_input {
     use std::{
-        sync::{Arc, Mutex, OnceLock},
+        sync::{
+            Arc, Mutex, OnceLock,
+            atomic::{AtomicIsize, Ordering},
+        },
         thread,
         time::Duration,
     };
 
     use raw_input::{Display, Event, Listen, MouseButton, Simulate, SubscriptionHandle};
-    use windows::Win32::UI::{
-        Input::KeyboardAndMouse::{
-            GetAsyncKeyState, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_RCONTROL, VK_RMENU,
-            VK_RSHIFT, VK_RWIN,
+    use windows::Win32::{
+        Foundation::{LPARAM, LRESULT, WPARAM},
+        UI::{
+            Input::KeyboardAndMouse::{
+                GetAsyncKeyState, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_RCONTROL, VK_RMENU,
+                VK_RSHIFT, VK_RWIN,
+            },
+            WindowsAndMessaging::{
+                CallNextHookEx, GetForegroundWindow, GetMessageW, HHOOK, LLMHF_INJECTED,
+                MSLLHOOKSTRUCT, PostThreadMessageW, SetWindowsHookExW, UnhookWindowsHookEx,
+                WH_MOUSE_LL, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP,
+            },
         },
-        WindowsAndMessaging::GetForegroundWindow,
     };
 
     use super::{GlobalMouseEvent, PointerButtons, PointerRegionWatch, PointerSnapshot};
@@ -85,6 +176,91 @@ mod windows_input {
     static PASTE_SIMULATION_LOCK: Mutex<()> = Mutex::new(());
     const PHYSICAL_KEY_COUNT: usize = raw_input::Key::Unidentified as usize + 1;
     static PHYSICAL_KEY_STATE: OnceLock<Mutex<PhysicalKeySnapshot>> = OnceLock::new();
+
+    // ---- 轮盘打开期间的左/右键点击拦截（WH_MOUSE_LL）----
+    static WHEEL_SWALLOW_ACTIVE: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    static WHEEL_MOUSE_HOOK: AtomicIsize = AtomicIsize::new(0);
+    static WHEEL_HOOK_THREAD_ID: AtomicIsize = AtomicIsize::new(0);
+
+    /// 轮盘存续期间吞掉左/右键（含 X 键）的真实点击；注入输入放行以防自锁。
+    unsafe extern "system" fn wheel_mouse_hook_proc(
+        code: i32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        if code >= 0
+            && WHEEL_SWALLOW_ACTIVE.load(Ordering::Acquire)
+            && matches!(
+                wparam.0 as u32,
+                WM_LBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONDOWN | WM_RBUTTONUP
+            )
+        {
+            // SAFETY: 低级鼠标钩子的 lparam 指向系统提供的 MSLLHOOKSTRUCT，仅在本回调内读取。
+            let info = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
+            // LLMHF_INJECTED 标记来自 SendInput 的合成输入，放行避免吞掉自己模拟的点击。
+            if info.flags & LLMHF_INJECTED == 0 {
+                return LRESULT(1);
+            }
+        }
+        // SAFETY: 标准钩子链转发；句柄为 None 表示当前钩子。
+        unsafe { CallNextHookEx(None, code, wparam, lparam) }
+    }
+
+    pub(crate) fn install_wheel_click_hook() {
+        // 低级钩子必须安装在带消息循环的线程上；复用独立线程运行隐藏消息循环。
+        if WHEEL_MOUSE_HOOK.load(Ordering::Acquire) != 0 {
+            return;
+        }
+        let _ = thread::Builder::new()
+            .name("qcclip-wheel-hook".to_owned())
+            .spawn(|| {
+                WHEEL_HOOK_THREAD_ID.store(
+                    unsafe { windows::Win32::System::Threading::GetCurrentThreadId() } as isize,
+                    Ordering::Release,
+                );
+                unsafe {
+                    // SAFETY: 钩子过程为静态函数，生命周期覆盖整个进程。
+                    match SetWindowsHookExW(WH_MOUSE_LL, Some(wheel_mouse_hook_proc), None, 0) {
+                        Ok(hook) => {
+                            WHEEL_MOUSE_HOOK.store(hook.0 as isize, Ordering::Release);
+                            // 钩子线程需要消息循环才能接收回调。
+                            let mut msg = windows::Win32::UI::WindowsAndMessaging::MSG::default();
+                            while GetMessageW(&mut msg, None, 0, 0).as_bool() {}
+                        }
+                        Err(error) => {
+                            tracing::error!("安装轮盘鼠标钩子失败：{error}");
+                        }
+                    }
+                }
+            });
+        // 等钩子线程装好再返回，避免第一下点击漏掉。
+        for _ in 0..50 {
+            if WHEEL_MOUSE_HOOK.load(Ordering::Acquire) != 0 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+        WHEEL_SWALLOW_ACTIVE.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn remove_wheel_click_hook() {
+        WHEEL_SWALLOW_ACTIVE.store(false, Ordering::Release);
+        let hook = WHEEL_MOUSE_HOOK.swap(0, Ordering::Acquire);
+        if hook != 0 {
+            unsafe {
+                // SAFETY: 钩子句柄来自成功的 SetWindowsHookExW。
+                let _ = UnhookWindowsHookEx(HHOOK(hook as *mut core::ffi::c_void));
+            }
+            // 唤醒钩子线程的消息循环让它退出：向自身线程投递 WM_QUIT。
+            let thread_id = WHEEL_HOOK_THREAD_ID.swap(0, Ordering::Acquire);
+            if thread_id != 0 {
+                unsafe {
+                    let _ = PostThreadMessageW(thread_id as u32, WM_QUIT, WPARAM(0), LPARAM(0));
+                }
+            }
+        }
+    }
 
     #[derive(Clone, Copy)]
     struct TriggerKey {

@@ -219,6 +219,7 @@ impl Default for GeneralConfig {
 pub struct ShortcutsConfig {
     pub toggle_main_window: Option<ShortcutBinding>,
     pub middle_mouse: MiddleMouseShortcutConfig,
+    pub wheel_mouse: WheelShortcutConfig,
     pub open_settings: Option<ShortcutBinding>,
     pub toggle_clipboard_monitor: Option<ShortcutBinding>,
     pub plain_text_paste: Option<ShortcutBinding>,
@@ -244,6 +245,7 @@ impl Default for ShortcutsConfig {
         Self {
             toggle_main_window: Some(ShortcutBinding::toggle_main_window_default()),
             middle_mouse: MiddleMouseShortcutConfig::default(),
+            wheel_mouse: WheelShortcutConfig::default(),
             open_settings: None,
             toggle_clipboard_monitor: None,
             plain_text_paste: None,
@@ -880,6 +882,170 @@ impl MiddleMouseShortcutConfig {
     }
 }
 
+/// 鼠标侧键按住弹出的收藏轮盘配置。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct WheelShortcutConfig {
+    pub enabled: bool,
+    pub button: WheelMouseButton,
+    pub hold_threshold_ms: u16,
+}
+
+impl Default for WheelShortcutConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            button: WheelMouseButton::Back,
+            hold_threshold_ms: 150,
+        }
+    }
+}
+
+impl WheelShortcutConfig {
+    pub(crate) fn normalized(mut self) -> Self {
+        self.hold_threshold_ms = self.hold_threshold_ms.clamp(10, 1000);
+        self
+    }
+}
+
+/// 触发轮盘的鼠标侧键。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WheelMouseButton {
+    Back,
+    Forward,
+}
+
+/// 轮盘外观配置：独立材质选择 + 自定义调色与文字。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct WheelAppearanceConfig {
+    /// 轮盘独立材质；默认亚克力（与主窗口同款系统材质）。
+    pub material: WindowMaterial,
+    /// 材质明暗（0~2，1 为默认）。
+    pub material_brightness: f32,
+    /// 扇区底色（"RRGGBB" 或 "RRGGBBAA"）。
+    pub sector_color: String,
+    /// 悬停高亮色（"RRGGBBAA"）。
+    pub hover_color: String,
+    /// 中心盘颜色。
+    pub center_color: String,
+    /// 标题文字颜色（空 = 跟随亮暗模式默认）。
+    pub title_color: String,
+    /// 预览文字颜色（空 = 默认）。
+    pub preview_color: String,
+    /// 中心盘页码文字颜色（空 = 默认）。
+    pub page_color: String,
+    /// 自定义字体族；None 时用应用字体。
+    pub font_family: Option<String>,
+    /// 标题字号 px（10~24）。
+    pub title_font_size: f32,
+    /// 预览字号 px（8~20）。
+    pub preview_font_size: f32,
+}
+
+impl Default for WheelAppearanceConfig {
+    fn default() -> Self {
+        Self {
+            material: WindowMaterial::Acrylic,
+            material_brightness: 1.0,
+            sector_color: String::new(),
+            hover_color: String::new(),
+            center_color: String::new(),
+            title_color: String::new(),
+            preview_color: String::new(),
+            page_color: String::new(),
+            font_family: None,
+            title_font_size: WHEEL_TITLE_FONT_SIZE_DEFAULT,
+            preview_font_size: WHEEL_PREVIEW_FONT_SIZE_DEFAULT,
+        }
+    }
+}
+
+pub const WHEEL_TITLE_FONT_SIZE_DEFAULT: f32 = 12.0;
+pub const WHEEL_PREVIEW_FONT_SIZE_DEFAULT: f32 = 10.0;
+pub const WHEEL_TITLE_FONT_SIZE_MIN: f32 = 10.0;
+pub const WHEEL_TITLE_FONT_SIZE_MAX: f32 = 24.0;
+pub const WHEEL_PREVIEW_FONT_SIZE_MIN: f32 = 8.0;
+pub const WHEEL_PREVIEW_FONT_SIZE_MAX: f32 = 20.0;
+
+impl WheelAppearanceConfig {
+    pub(crate) fn normalized(mut self) -> Self {
+        // 轮盘只支持系统材质（亚克力/模糊）；旧的透明/关闭配置迁移为亚克力。
+        self.material = match self.material {
+            WindowMaterial::Blur => WindowMaterial::Blur,
+            _ => WindowMaterial::Acrylic,
+        };
+        self.sector_color = normalize_hex_color(&self.sector_color);
+        self.hover_color = normalize_hex_color(&self.hover_color);
+        self.center_color = normalize_hex_color(&self.center_color);
+        self.title_color = normalize_hex_color(&self.title_color);
+        self.preview_color = normalize_hex_color(&self.preview_color);
+        self.page_color = normalize_hex_color(&self.page_color);
+        self.font_family = self.font_family.and_then(|family| {
+            let family = family.trim();
+            (!family.is_empty()).then(|| family.to_owned())
+        });
+        self.title_font_size = if self.title_font_size.is_finite() {
+            self.title_font_size
+                .clamp(WHEEL_TITLE_FONT_SIZE_MIN, WHEEL_TITLE_FONT_SIZE_MAX)
+        } else {
+            WHEEL_TITLE_FONT_SIZE_DEFAULT
+        };
+        self.preview_font_size = if self.preview_font_size.is_finite() {
+            self.preview_font_size
+                .clamp(WHEEL_PREVIEW_FONT_SIZE_MIN, WHEEL_PREVIEW_FONT_SIZE_MAX)
+        } else {
+            WHEEL_PREVIEW_FONT_SIZE_DEFAULT
+        };
+        self.material_brightness = if self.material_brightness.is_finite() {
+            self.material_brightness.clamp(
+                WINDOW_MATERIAL_BRIGHTNESS_MIN,
+                WINDOW_MATERIAL_BRIGHTNESS_MAX,
+            )
+        } else {
+            WINDOW_MATERIAL_BRIGHTNESS_DEFAULT
+        };
+        self
+    }
+}
+
+/// 归一化用户输入的十六进制颜色：小写、补 #、非法值回退为空（空 = 用默认色）。
+pub fn normalize_wheel_color(value: &str) -> String {
+    normalize_hex_color(value)
+}
+
+fn normalize_hex_color(value: &str) -> String {
+    let value = value.trim().trim_start_matches('#').to_ascii_lowercase();
+    if !value.is_empty()
+        && value.len() <= 8
+        && value.chars().all(|c| c.is_ascii_hexdigit())
+        && (value.len() == 3 || value.len() == 6 || value.len() == 8)
+    {
+        value
+    } else {
+        String::new()
+    }
+}
+
+impl WheelMouseButton {
+    pub const ALL: [Self; 2] = [Self::Back, Self::Forward];
+
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Back => "back",
+            Self::Forward => "forward",
+        }
+    }
+
+    pub const fn label_key(self) -> &'static str {
+        match self {
+            Self::Back => "settings.shortcuts.wheel_mouse.button.back",
+            Self::Forward => "settings.shortcuts.wheel_mouse.button.forward",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum QuickPasteShortcutKey {
@@ -1487,6 +1653,8 @@ pub struct AppearanceConfig {
     pub only_show_notes: bool,
     pub item_display: ItemDisplayConfig,
     pub preview_information: PreviewInformationConfig,
+    /// 收藏轮盘外观。
+    pub wheel_appearance: WheelAppearanceConfig,
 }
 
 impl Default for AppearanceConfig {
@@ -1513,6 +1681,7 @@ impl Default for AppearanceConfig {
             only_show_notes: false,
             item_display: ItemDisplayConfig::default(),
             preview_information: PreviewInformationConfig::default(),
+            wheel_appearance: WheelAppearanceConfig::default(),
         }
     }
 }
@@ -1811,6 +1980,7 @@ impl AppearanceConfig {
                 )
             })
         });
+        self.wheel_appearance = self.wheel_appearance.normalized();
         self
     }
 }
