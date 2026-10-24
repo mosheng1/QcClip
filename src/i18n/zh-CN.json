@@ -820,6 +820,7 @@
   "settings.personalization.wheel_appearance.hover_color_description": "鼠标指向扇区时的高亮色，格式同上。",
   "settings.personalization.wheel_appearance.center_color": "中心盘颜色",
   "settings.personalization.wheel_appearance.center_color_description": "轮盘中心圆盘的颜色，格式同上。",
+  "settings.personalization.wheel_appearance.pick_color": "点击打开取色器",
   "settings.personalization.position.top": "顶部",
   "settings.personalization.position.bottom": "底部",
   "settings.personalization.position.left": "左侧",

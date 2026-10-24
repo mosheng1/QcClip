@@ -22,7 +22,7 @@ use crate::{
     ui::{SingleSelectOption, single_select, single_select_grid},
     windows::menu::{DropdownItem, DropdownItemId},
 };
-use gpui::{App, Entity, Window, div, px};
+use gpui::{App, Entity, SharedString, Window, div, px};
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::scroll::ScrollableElement as _;
 use gpui_component::slider::Slider;
@@ -409,7 +409,7 @@ impl SettingsWindowView {
                 )
             });
 
-        // ---- 收藏轮盘外观面板：跟随材质开关 + 三个颜色输入 ----
+        // ---- 收藏轮盘外观面板：跟随材质开关 + 三个颜色（色块按钮 + 输入框） ----
         let wheel_follow_switch = Switch::new("settings-wheel-follow-material")
             .large()
             .checked(appearance.wheel_appearance.follow_window_material)
@@ -433,42 +433,39 @@ impl SettingsWindowView {
             });
         let wheel_follow_title =
             translator.translate("settings.personalization.wheel_appearance.follow");
-        let wheel_follow_description =
+        let _wheel_follow_description =
             translator.translate("settings.personalization.wheel_appearance.follow_description");
-        let wheel_sector_input = self.wheel_sector_color_input.clone();
-        let wheel_hover_input = self.wheel_hover_color_input.clone();
-        let wheel_center_input = self.wheel_center_color_input.clone();
-        let make_color_row =
-            |title: String,
-             description: String,
-             input: gpui::Entity<gpui_component::input::InputState>| {
-                let label = title.clone();
-                let description = gpui::SharedString::from(description);
-                h_flex()
-                    .w_full()
-                    .gap_3()
-                    .items_center()
-                    .child(
-                        div()
-                            .id("wheel-color-label")
-                            .w(ui_rem(96.0))
-                            .flex_shrink_0()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(label)
-                            .tooltip(move |window, cx| {
-                                gpui_component::tooltip::Tooltip::new(description.clone())
-                                    .build(window, cx)
-                            }),
-                    )
-                    .child(
-                        div()
-                            .w(ui_rem(120.0))
-                            .flex_shrink_0()
-                            .child(gpui_component::input::Input::new(&input).small().w_full()),
-                    )
-            };
-
+        // 色块按钮 + 十六进制输入；色块点击弹出取色器，选中即保存。
+        let make_wheel_color_row = {
+            let view = view.clone();
+            let save_error = save_error.clone();
+            let pick_color_tooltip: gpui::SharedString = translator
+                .translate("settings.personalization.wheel_appearance.pick_color")
+                .into();
+            let theme_border = theme.border;
+            move |id: &'static str,
+                  title: String,
+                  description: String,
+                  input: gpui::Entity<gpui_component::input::InputState>,
+                  current_hex: &str,
+                  apply: fn(&mut crate::config::WheelAppearanceConfig) -> &mut String,
+                  field_name: &'static str|
+                  -> gpui::AnyElement {
+                wheel_color_row(
+                    id,
+                    title,
+                    description,
+                    input,
+                    current_hex,
+                    apply,
+                    field_name,
+                    view.clone(),
+                    save_error.clone(),
+                    pick_color_tooltip.clone(),
+                    theme_border,
+                )
+            }
+        };
         let theme_options = available_theme_options(cx);
         let light_selector = settings_dropdown(
             "settings-light-theme-select",
@@ -832,32 +829,44 @@ impl SettingsWindowView {
                                 ),
                             )
                             .when(!appearance.wheel_appearance.follow_window_material, |this| {
-                                this.child(make_color_row(
+                                this.child(make_wheel_color_row(
+                                    "wheel-sector-color",
                                     translator.translate(
                                         "settings.personalization.wheel_appearance.sector_color",
                                     ),
                                     translator.translate(
                                         "settings.personalization.wheel_appearance.sector_color_description",
                                     ),
-                                    wheel_sector_input,
+                                    self.wheel_sector_color_input.clone(),
+                                    appearance.wheel_appearance.sector_color.as_str(),
+                                    |wheel| &mut wheel.sector_color,
+                                    "轮盘扇区颜色",
                                 ))
-                                .child(make_color_row(
+                                .child(make_wheel_color_row(
+                                    "wheel-hover-color",
                                     translator.translate(
                                         "settings.personalization.wheel_appearance.hover_color",
                                     ),
                                     translator.translate(
                                         "settings.personalization.wheel_appearance.hover_color_description",
                                     ),
-                                    wheel_hover_input,
+                                    self.wheel_hover_color_input.clone(),
+                                    appearance.wheel_appearance.hover_color.as_str(),
+                                    |wheel| &mut wheel.hover_color,
+                                    "轮盘悬停颜色",
                                 ))
-                                .child(make_color_row(
+                                .child(make_wheel_color_row(
+                                    "wheel-center-color",
                                     translator.translate(
                                         "settings.personalization.wheel_appearance.center_color",
                                     ),
                                     translator.translate(
                                         "settings.personalization.wheel_appearance.center_color_description",
                                     ),
-                                    wheel_center_input,
+                                    self.wheel_center_color_input.clone(),
+                                    appearance.wheel_appearance.center_color.as_str(),
+                                    |wheel| &mut wheel.center_color,
+                                    "轮盘中心颜色",
                                 ))
                             }),
                     ),
@@ -1270,4 +1279,114 @@ const fn window_material_label_key(material: WindowMaterial) -> &'static str {
         WindowMaterial::Blur => "settings.personalization.window_material.blur",
         WindowMaterial::CustomImage => "settings.personalization.window_material.custom_image",
     }
+}
+
+/// 读取颜色输入框当前值作为取色器初始色（非法/为空回退中性灰）。
+fn current_color_u32(
+    input: &gpui::Entity<gpui_component::input::InputState>,
+    cx: &gpui::App,
+) -> u32 {
+    let binding = input.read(cx).value();
+    let raw = binding.trim().trim_start_matches('#');
+    let parsed = raw
+        .get(0..6)
+        .and_then(|hex| u32::from_str_radix(hex, 16).ok());
+    parsed.unwrap_or(0x808088)
+}
+
+/// 轮盘颜色行：标签 + 十六进制输入框 + 色块按钮（弹出取色器，选中即保存）。
+#[allow(clippy::too_many_arguments)]
+fn wheel_color_row(
+    id: &'static str,
+    title: String,
+    description: String,
+    input: gpui::Entity<gpui_component::input::InputState>,
+    current_hex: &str,
+    apply: fn(&mut crate::config::WheelAppearanceConfig) -> &mut String,
+    field_name: &'static str,
+    view: Entity<SettingsWindowView>,
+    save_error: String,
+    pick_color_tooltip: gpui::SharedString,
+    border_color: gpui::Hsla,
+) -> gpui::AnyElement {
+    let label = title.clone();
+    let description: gpui::SharedString = description.into();
+    let hex_digits: String = current_hex
+        .trim()
+        .trim_start_matches('#')
+        .chars()
+        .filter(|c| c.is_ascii_hexdigit())
+        .take(6)
+        .collect();
+    let sample_color = if hex_digits.len() == 6 {
+        u32::from_str_radix(&hex_digits, 16)
+            .map(|rgb| gpui::rgba((rgb << 8) | 0xFF))
+            .unwrap_or_else(|_| gpui::rgba(0x808088FF))
+    } else {
+        gpui::rgba(0x808088FF)
+    };
+    let picker_view = view.clone();
+    let picker_input = input.clone();
+    let picker_save_error = save_error.clone();
+    let picker = div()
+        .id(SharedString::from(format!("{id}-picker")))
+        .w(ui_rem(22.0))
+        .h(ui_rem(22.0))
+        .flex_shrink_0()
+        .rounded(px(4.0))
+        .border_1()
+        .border_color(border_color)
+        .bg(sample_color)
+        .cursor_pointer()
+        .tooltip(move |window, cx| {
+            gpui_component::tooltip::Tooltip::new(pick_color_tooltip.clone()).build(window, cx)
+        })
+        .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
+            let initial = current_color_u32(&picker_input, cx);
+            let input_for_done = picker_input.clone();
+            let view_done = picker_view.clone();
+            let done_save_error = picker_save_error.clone();
+            let result = crate::windows::color_picker::open_color_picker_window(
+                Some(window),
+                initial,
+                move |color, cx| {
+                    let hex = format!("{color:06x}");
+                    let _ = input_for_done;
+                    persist_appearance_change(
+                        view_done.clone(),
+                        field_name,
+                        move |appearance| *apply(&mut appearance.wheel_appearance) = hex.clone(),
+                        done_save_error.clone(),
+                        cx,
+                    );
+                },
+                cx,
+            );
+            if let Err(error) = result {
+                tracing::error!("打开轮盘颜色选择器失败：{error}");
+            }
+        });
+    h_flex()
+        .w_full()
+        .gap_3()
+        .items_center()
+        .child(
+            div()
+                .id(SharedString::from(format!("{id}-label")))
+                .w(ui_rem(96.0))
+                .flex_shrink_0()
+                .text_xs()
+                .child(label)
+                .tooltip(move |window, cx| {
+                    gpui_component::tooltip::Tooltip::new(description.clone()).build(window, cx)
+                }),
+        )
+        .child(
+            div()
+                .w(ui_rem(120.0))
+                .flex_shrink_0()
+                .child(gpui_component::input::Input::new(&input).small().w_full()),
+        )
+        .child(picker)
+        .into_any_element()
 }

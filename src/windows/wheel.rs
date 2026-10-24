@@ -605,8 +605,9 @@ impl Render for WheelWindowView {
             canvas_colors.sector = with_reduced_alpha(colors.sector, 0.45);
             canvas_colors.empty = with_reduced_alpha(colors.empty, 0.45);
             canvas_colors.hover = with_reduced_alpha(colors.hover, 0.85);
-            canvas_colors.center = with_reduced_alpha(colors.center, 0.55);
-            canvas_colors.center_border = with_reduced_alpha(colors.center_border, 0.60);
+            // 中心盘保持较实但提亮，避免深色材质上一块死黑；文字用深色保证对比。
+            canvas_colors.center = 0x2E2E38E0;
+            canvas_colors.center_border = 0x6E6E7EB0;
         }
         let center = point(px(WHEEL_DIAMETER / 2.0), px(WHEEL_DIAMETER / 2.0));
         // 跟随窗口材质时叠加主程序同款材质背景层（亚克力色调/模糊/背景图 + 不透明度遮罩），
@@ -677,10 +678,26 @@ impl Render for WheelWindowView {
                 let label_y =
                     center.y - px(WHEEL_LABEL_RADIUS * rad.cos()) - px(WHEEL_LABEL_HEIGHT / 2.0);
                 let is_hovered = hovered == Some(index);
-                let title_color = if is_hovered {
-                    gpui::rgb(0xFFFFFFu32)
+                // 材质背景上小字辨识度差：加大字号并提升对比度。
+                let (title_size, preview_size, title_color, preview_color) = if follow_material {
+                    (
+                        px(13.0),
+                        px(11.0),
+                        gpui::rgb(0xFFFFFFFF),
+                        gpui::rgb(0xC8CDDCFF),
+                    )
                 } else {
-                    gpui::rgb(0xEDEDF2u32)
+                    let title = if is_hovered {
+                        gpui::rgb(0xFFFFFFu32)
+                    } else {
+                        gpui::rgb(0xEDEDF2u32)
+                    };
+                    (
+                        px(12.0),
+                        px(10.0),
+                        title,
+                        gpui::rgb(if is_hovered { 0xE2E8FFu32 } else { 0x9A9AA5u32 }),
+                    )
                 };
                 div()
                     .absolute()
@@ -696,8 +713,8 @@ impl Render for WheelWindowView {
                     .child(
                         div()
                             .max_w_full()
-                            .text_size(px(12.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_size(title_size)
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(title_color)
                             .overflow_hidden()
                             .whitespace_nowrap()
@@ -706,12 +723,8 @@ impl Render for WheelWindowView {
                     .child(
                         div()
                             .max_w_full()
-                            .text_size(px(10.0))
-                            .text_color(if is_hovered {
-                                gpui::rgb(0xE2E8FFu32)
-                            } else {
-                                gpui::rgb(0x9A9AA5u32)
-                            })
+                            .text_size(preview_size)
+                            .text_color(preview_color)
                             .overflow_hidden()
                             .whitespace_nowrap()
                             .child(entry.preview.clone()),
@@ -726,16 +739,16 @@ impl Render for WheelWindowView {
                 .w(px(WHEEL_CENTER_RADIUS * 2.0))
                 .h(px(WHEEL_CENTER_RADIUS * 2.0))
                 .rounded_full()
-                .bg(rgba(colors.center))
+                .bg(rgba(canvas_colors.center))
                 .border_1()
-                .border_color(rgba(colors.center_border))
+                .border_color(rgba(canvas_colors.center_border))
                 .flex()
                 .items_center()
                 .justify_center()
                 .child(
                     div()
                         .text_size(px(11.0))
-                        .text_color(gpui::rgb(0x8A8A95u32))
+                        .text_color(gpui::rgb(0xE8E8EDu32))
                         .when(total_pages > 1, |this| {
                             this.child(format!("{} / {}", page + 1, total_pages))
                         }),

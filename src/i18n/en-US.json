@@ -820,6 +820,7 @@
   "settings.personalization.wheel_appearance.hover_color_description": "Highlight color when the cursor points at a sector, same format.",
   "settings.personalization.wheel_appearance.center_color": "Center color",
   "settings.personalization.wheel_appearance.center_color_description": "Color of the wheel center disc, same format.",
+  "settings.personalization.wheel_appearance.pick_color": "Click to open the color picker",
   "settings.personalization.position.top": "Top",
   "settings.personalization.position.bottom": "Bottom",
   "settings.personalization.position.left": "Left",
