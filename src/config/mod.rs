@@ -920,7 +920,7 @@ pub enum WheelMouseButton {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct WheelAppearanceConfig {
-    /// 轮盘独立材质；默认透明（无系统材质）。
+    /// 轮盘独立材质；默认亚克力（与主窗口同款系统材质）。
     pub material: WindowMaterial,
     /// 材质明暗（0~2，1 为默认）。
     pub material_brightness: f32,
@@ -947,7 +947,7 @@ pub struct WheelAppearanceConfig {
 impl Default for WheelAppearanceConfig {
     fn default() -> Self {
         Self {
-            material: WindowMaterial::Transparent,
+            material: WindowMaterial::Acrylic,
             material_brightness: 1.0,
             sector_color: String::new(),
             hover_color: String::new(),
@@ -971,6 +971,11 @@ pub const WHEEL_PREVIEW_FONT_SIZE_MAX: f32 = 20.0;
 
 impl WheelAppearanceConfig {
     pub(crate) fn normalized(mut self) -> Self {
+        // 轮盘只支持系统材质（亚克力/模糊）；旧的透明/关闭配置迁移为亚克力。
+        self.material = match self.material {
+            WindowMaterial::Blur => WindowMaterial::Blur,
+            _ => WindowMaterial::Acrylic,
+        };
         self.sector_color = normalize_hex_color(&self.sector_color);
         self.hover_color = normalize_hex_color(&self.hover_color);
         self.center_color = normalize_hex_color(&self.center_color);

@@ -410,17 +410,14 @@ impl SettingsWindowView {
             });
 
         // ---- 收藏轮盘外观面板：独立材质 + 明暗 + 颜色（色块按钮 + 输入框） ----
-        // 材质仿窗口材质控件：亚克力/模糊直接挂系统 DWM 材质（HWND 椭圆裁剪，天然圆形），
-        // 透明 = 无系统材质纯色；不与主窗口材质绑定。
+        // 材质与主窗口同一链路（椭圆裁剪 + 系统亚克力 + 明暗 tint），
+        // 只提供亚克力/模糊两种系统材质，不再提供透明模式。
         let wheel_material_selector = single_select(
             "settings-wheel-material-select",
             crate::window_material::available_materials()
                 .into_iter()
                 .filter(|material| {
-                    !matches!(
-                        material,
-                        WindowMaterial::CustomImage | WindowMaterial::Disabled
-                    )
+                    matches!(material, WindowMaterial::Acrylic | WindowMaterial::Blur)
                 })
                 .map(|material| {
                     SingleSelectOption::new(
@@ -429,7 +426,10 @@ impl SettingsWindowView {
                     )
                 })
                 .collect::<Vec<_>>(),
-            crate::window_material::supported_material(appearance.wheel_appearance.material),
+            match crate::window_material::supported_material(appearance.wheel_appearance.material) {
+                WindowMaterial::Blur => WindowMaterial::Blur,
+                _ => WindowMaterial::Acrylic,
+            },
             {
                 let view = view.clone();
                 let save_error = save_error.clone();

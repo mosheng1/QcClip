@@ -545,24 +545,66 @@ pub(crate) fn apply_window_material(
     }
 }
 
-/// 给独立圆窗（收藏轮盘）应用圆形裁剪。
-/// 注意：不再使用 GPUI Blurred/系统 accent 材质——DWM accent 画整个 HWND 矩形，
-/// SetWindowRgn 的椭圆区域裁不掉合成层，会产生方形外壳；视觉主体由内容层
-/// 的圆形 tint 提供（亚克力=浓 tint、模糊=中 tint、透明=无 tint）。
+/// 给独立圆窗（收藏轮盘）应用材质，完全照搬主窗口亚克力链路，额外加椭圆区域裁剪：
+/// 1) 先用椭圆 SetWindowRgn 让窗口形状是圆
+/// 2) set_background_appearance(Blurred) → GPUI 下发 ACCENT 亚克力
+/// 3) apply_window_material 再覆盖成带明暗 tint 的亚克力（与主窗口同一函数）
+/// 已实测 SetWindowRgn 会被后续 resize/framechanged 重置，因此这里按客户区矩形
+/// 重新裁剪，并由 open 侧在 resize 后多次重放以保证最终生效。
 #[cfg(target_os = "windows")]
 pub(crate) fn apply_circle_window_material(
     window: &Window,
-    physical_diameter: f32,
+    material: crate::config::WindowMaterial,
+    brightness: f32,
+    light_mode: bool,
 ) -> Result<(), String> {
-    if !physical_diameter.is_finite() || physical_diameter < 1.0 {
-        return Ok(());
+    use crate::config::WindowMaterial;
+    use windows::Win32::{
+        Foundation::RECT,
+        Graphics::Gdi::{CreateEllipticRgn, DeleteObject, SetWindowRgn},
+        UI::WindowsAndMessaging::GetClientRect,
+    };
+
+    let hwnd = window_hwnd(window)?;
+
+    // 1) 按真实客户区裁剪成椭圆（内切圆）。
+    let mut rect = RECT::default();
+    // SAFETY: hwnd 已校验，rect 由本函数持有。
+    unsafe { GetClientRect(hwnd, &mut rect) }
+        .map_err(|error| format!("读取轮盘客户区失败：{error}"))?;
+    let width = (rect.right - rect.left).max(1);
+    let height = (rect.bottom - rect.top).max(1);
+    // SAFETY: 参数是有限客户区坐标，区域所有权在成功后交给系统窗口。
+    let region = unsafe { CreateEllipticRgn(0, 0, width, height) };
+    if region.is_invalid() {
+        return Err("创建轮盘圆形窗口区域失败".to_owned());
     }
-    let scale = window.scale_factor().max(1.0);
-    // SetWindowRgn 使用逻辑（客户区）坐标。
-    let logical = physical_diameter / scale;
-    set_window_circle_clip(window, logical / 2.0, logical / 2.0, logical)?;
-    // 背景保持普通透明；材质感由 wheel.rs 内容层的圆形 tint 层呈现。
-    window.set_background_appearance(gpui::WindowBackgroundAppearance::Transparent);
+    // SAFETY: region 所有权在 SetWindowRgn 成功后转移。
+    if unsafe { SetWindowRgn(hwnd, Some(region), true) } == 0 {
+        // SAFETY: 失败时所有权仍归调用方。
+        unsafe {
+            let _ = DeleteObject(region.into());
+        }
+        return Err("设置轮盘圆形窗口区域失败".to_owned());
+    }
+
+    // 2) 先让 GPUI 进入 Blurred（内部下发一次 ACCENT 亚克力），再用主窗口同款
+    //    apply_window_material 覆盖 tint，保证与主窗口亚克力一致。
+    let effective = crate::window_material::supported_material(material);
+    match effective {
+        WindowMaterial::Acrylic => {
+            window.set_background_appearance(gpui::WindowBackgroundAppearance::Blurred);
+            apply_window_material(window, effective, brightness, light_mode);
+        }
+        WindowMaterial::Blur => {
+            window.set_background_appearance(gpui::WindowBackgroundAppearance::Transparent);
+            apply_window_material(window, effective, brightness, light_mode);
+        }
+        WindowMaterial::Disabled | WindowMaterial::Transparent | WindowMaterial::CustomImage => {
+            window.set_background_appearance(gpui::WindowBackgroundAppearance::Transparent);
+            apply_window_material(window, WindowMaterial::Disabled, 1.0, light_mode);
+        }
+    }
     Ok(())
 }
 

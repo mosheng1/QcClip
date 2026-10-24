@@ -332,19 +332,46 @@ pub(crate) fn open_wheel_window(cx: &mut App) -> bool {
             cx.update_global::<WheelWindowService, _>(|service, _| {
                 service.window = Some(window);
             });
-            // 初始定位到光标处；place_window 内部完成窗口尺寸设定后
-            // 立即应用椭圆裁剪（resize 的 SetWindowPos 是同步调用，返回即生效）。
-            // 材质视觉由 render 的圆形 tint 层提供，不再使用系统 accent（会出方形壳）。
+            // 初始定位到光标处；resize 完成后应用「椭圆裁剪 + 主窗口同款亚克力」。
+            // SetWindowRgn 会被 resize/framechanged 重置，所以在这里以及随后
+            // 的延迟重放里各执行一次，确保最终窗口区域是圆形。
+            let wheel_appearance = crate::config_runtime::appearance_config(cx).wheel_appearance;
+            let wheel_material = wheel_appearance.material;
+            let wheel_brightness = wheel_appearance.material_brightness;
+            let light_mode = !gpui_component::Theme::global(cx).mode.is_dark();
             let _ = handle.update(cx, |view, window, cx| {
                 view.place_window(window, cx);
                 #[cfg(target_os = "windows")]
                 if let Err(error) = platform_window::apply_circle_window_material(
                     window,
-                    view.window_physical_diameter,
+                    wheel_material,
+                    wheel_brightness,
+                    light_mode,
                 ) {
-                    tracing::error!("应用轮盘圆形裁剪失败：{error}");
+                    tracing::error!("应用轮盘材质失败：{error}");
                 }
             });
+            // 二次重放：resize 的 WM_SIZE/FRAMECHANGED 会清掉窗口区域。
+            #[cfg(target_os = "windows")]
+            {
+                let replay_handle = handle.clone();
+                cx.spawn(async move |cx| {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(24))
+                        .await;
+                    let _ = replay_handle.update(cx, |_, window, _| {
+                        if let Err(error) = platform_window::apply_circle_window_material(
+                            window,
+                            wheel_material,
+                            wheel_brightness,
+                            light_mode,
+                        ) {
+                            tracing::debug!("轮盘圆形区域二次应用失败：{error}");
+                        }
+                    });
+                })
+                .detach();
+            }
             start_wheel_pointer_tracking(cx);
             true
         }
@@ -641,58 +668,12 @@ impl Render for WheelWindowView {
         // 画布回调里要用的悬停/条目/配色快照。
         let canvas_hovered = hovered;
         let canvas_entries = entries.clone();
-        // 系统材质（亚克力/模糊）已挂到 HWND 并被椭圆裁剪成圆形；
-        // 内容层再垫一块半透明圆形 tint 给材质视觉主体，扇区按比例降低不透明度透出材质。
-        let uses_system_material = matches!(
-            crate::window_material::supported_material(
-                crate::config_runtime::appearance_config(cx)
-                    .wheel_appearance
-                    .material
-            ),
-            crate::config::WindowMaterial::Acrylic | crate::config::WindowMaterial::Blur
-        );
-        let mut canvas_colors = colors;
-        if uses_system_material {
-            canvas_colors.sector = with_reduced_alpha(canvas_colors.sector, 0.45);
-            canvas_colors.empty = with_reduced_alpha(canvas_colors.empty, 0.45);
-            canvas_colors.hover = with_reduced_alpha(canvas_colors.hover, 0.85);
-        }
+        // 亚克力/模糊由系统材质提供（与主窗口同一条链路），内容层不再叠 tint，
+        // 扇区保持原配色与不透明度，只让材质从扇区缝隙和半透明处透出。
+        let canvas_colors = colors;
         let center = point(px(WHEEL_DIAMETER / 2.0), px(WHEEL_DIAMETER / 2.0));
-        // 材质视觉（内容层圆形 tint，替代系统 accent——后者画整个 HWND 矩形出方形壳）：
-        // 亚克力 = 浓 tint 磨砂感；模糊 = 中 tint；透明 = 无底，扇区自身配色即全部。
-        let dark_mode = gpui_component::Theme::global(cx).mode.is_dark();
-        let wheel_material = crate::window_material::supported_material(
-            crate::config_runtime::appearance_config(cx)
-                .wheel_appearance
-                .material,
-        );
-        let material_tint = match wheel_material {
-            crate::config::WindowMaterial::Acrylic => Some(if dark_mode {
-                rgba(0x202028C8u32)
-            } else {
-                rgba(0xFFFFFFE0u32)
-            }),
-            crate::config::WindowMaterial::Blur => Some(if dark_mode {
-                rgba(0x1E1E268Cu32)
-            } else {
-                rgba(0xFFFFFFB3u32)
-            }),
-            _ => None,
-        }
-        .map(|color| {
-            div()
-                .absolute()
-                .left_0()
-                .top_0()
-                .size(px(WHEEL_DIAMETER))
-                .rounded_full()
-                .bg(color)
-        });
 
         let mut root = div().relative().size_full();
-        if let Some(tint) = material_tint {
-            root = root.child(tint);
-        }
         root = root.child(
             canvas(
                 move |_, _, _| {},
@@ -742,19 +723,10 @@ impl Render for WheelWindowView {
                 let label_y =
                     center.y - px(WHEEL_LABEL_RADIUS * rad.cos()) - px(WHEEL_LABEL_HEIGHT / 2.0);
                 let is_hovered = hovered == Some(index);
-                // 文字颜色/字号/字体全部读配置快照；系统材质上自动提亮防止半透明背景糊字。
-                let title_color = if uses_system_material && is_hovered {
-                    0xFFFFFFFF
-                } else if uses_system_material {
-                    lighten_for_material(canvas_colors.title)
-                } else {
-                    canvas_colors.title
-                };
-                let preview_color = if uses_system_material {
-                    lighten_for_material(canvas_colors.preview)
-                } else {
-                    canvas_colors.preview
-                };
+                // 文字颜色/字号/字体全部读配置快照；扇区底色已足够，不再自动提亮。
+                let title_color = canvas_colors.title;
+                let preview_color = canvas_colors.preview;
+                let _ = is_hovered;
                 let title = div()
                     .max_w_full()
                     .text_size(px(canvas_colors.title_font_size))
@@ -824,16 +796,6 @@ impl Render for WheelWindowView {
         );
         root
     }
-}
-
-/// 材质半透明背景上把文字色向白色提亮一档，保证可读性。
-fn lighten_for_material(color: u32) -> u32 {
-    let r = (color >> 24) & 0xFF;
-    let g = (color >> 16) & 0xFF;
-    let b = (color >> 8) & 0xFF;
-    let a = color & 0xFF;
-    let mix = |channel: u32| -> u32 { channel + ((255 - channel) * 45 / 100) };
-    (mix(r) << 24) | (mix(g) << 16) | (mix(b) << 8) | a
 }
 
 fn deg_to_rad(deg: f32) -> f32 {
