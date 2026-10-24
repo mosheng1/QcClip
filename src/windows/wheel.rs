@@ -332,24 +332,36 @@ pub(crate) fn open_wheel_window(cx: &mut App) -> bool {
             cx.update_global::<WheelWindowService, _>(|service, _| {
                 service.window = Some(window);
             });
+            // 初始定位到光标处（先完成窗口尺寸设定）。
+            let _ = handle.update(cx, |view, window, cx| {
+                view.place_window(window, cx);
+            });
             // 独立材质：椭圆裁剪 HWND + GPUI Blurred 背景（Windows 上为系统亚克力）。
+            // resize 是异步生效的，延迟一帧再裁剪，确保窗口区域已按目标直径应用。
             #[cfg(target_os = "windows")]
             {
                 let material = crate::config_runtime::appearance_config(cx)
                     .wheel_appearance
                     .material;
-                let _ = handle.update(cx, |_, window, _| {
-                    if let Err(error) =
-                        platform_window::apply_circle_window_material(window, material)
-                    {
-                        tracing::error!("应用轮盘材质失败：{error}");
-                    }
-                });
+                let scale = cx.update_global::<WheelSession, _>(|session, _| session.scale);
+                let physical_diameter = WHEEL_DIAMETER * scale;
+                let material_handle = handle.clone();
+                cx.spawn(async move |cx| {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(32))
+                        .await;
+                    let _ = material_handle.update(cx, |_, window, _| {
+                        if let Err(error) = platform_window::apply_circle_window_material(
+                            window,
+                            material,
+                            physical_diameter,
+                        ) {
+                            tracing::error!("应用轮盘材质失败：{error}");
+                        }
+                    });
+                })
+                .detach();
             }
-            // 初始定位到光标处。
-            let _ = handle.update(cx, |view, window, cx| {
-                view.place_window(window, cx);
-            });
             start_wheel_pointer_tracking(cx);
             true
         }
