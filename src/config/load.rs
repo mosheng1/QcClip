@@ -805,6 +805,13 @@ fn read_shortcuts(object: &Map<String, Value>, warnings: &mut Vec<String>) -> Sh
             default.middle_mouse,
             warnings,
         ),
+        wheel_mouse: read_field(
+            object,
+            "wheelMouse",
+            "shortcuts.wheelMouse",
+            default.wheel_mouse,
+            warnings,
+        ),
         open_settings: read_field(
             object,
             "openSettings",

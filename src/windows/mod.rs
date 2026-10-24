@@ -8,3 +8,4 @@ pub(crate) mod notification;
 pub(crate) mod preview;
 pub(crate) mod quick_paste;
 pub(crate) mod settings;
+pub(crate) mod wheel;

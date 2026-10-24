@@ -14,6 +14,8 @@ use crate::config::{
 
 #[cfg(target_os = "windows")]
 mod middle_mouse;
+#[cfg(target_os = "windows")]
+mod wheel_mouse;
 
 const SESSION_SHORTCUT_INITIAL_REPEAT_DELAY: Duration = Duration::from_millis(250);
 const SESSION_SHORTCUT_REPEAT_INTERVAL: Duration = Duration::from_millis(50);
@@ -34,6 +36,8 @@ pub(crate) enum RegistrationStatus {
 pub(crate) struct HotkeyRuntime {
     #[cfg(target_os = "windows")]
     middle_mouse: middle_mouse::MiddleMouseRuntime,
+    #[cfg(target_os = "windows")]
+    wheel_mouse: wheel_mouse::WheelMouseRuntime,
     manager: Option<GlobalHotKeyManager>,
     main_hotkey: Option<HotKey>,
     settings_hotkey: Option<HotKey>,
@@ -173,6 +177,11 @@ impl HotkeyRuntime {
             #[cfg(target_os = "windows")]
             middle_mouse: middle_mouse::MiddleMouseRuntime::install(
                 crate::config_runtime::shortcuts_config(cx).middle_mouse,
+                cx,
+            ),
+            #[cfg(target_os = "windows")]
+            wheel_mouse: wheel_mouse::WheelMouseRuntime::install(
+                crate::config_runtime::shortcuts_config(cx).wheel_mouse,
                 cx,
             ),
             manager,
@@ -996,6 +1005,9 @@ impl HotkeyRuntime {
         #[cfg(target_os = "windows")]
         self.middle_mouse
             .configure(shortcuts.middle_mouse, enabled && !self.suspended);
+        #[cfg(target_os = "windows")]
+        self.wheel_mouse
+            .configure(shortcuts.wheel_mouse, enabled && !self.suspended);
         if !enabled {
             return self.unregister_all();
         }
@@ -1023,6 +1035,9 @@ impl HotkeyRuntime {
         #[cfg(target_os = "windows")]
         self.middle_mouse
             .configure(crate::config::MiddleMouseShortcutConfig::default(), false);
+        #[cfg(target_os = "windows")]
+        self.wheel_mouse
+            .configure(crate::config::WheelShortcutConfig::default(), false);
         let first_error = self.unregister_all().err();
         self.status = RegistrationStatus::Suspended;
         self.quick_paste_index_status = RegistrationStatus::Suspended;
@@ -1039,6 +1054,9 @@ impl HotkeyRuntime {
         #[cfg(target_os = "windows")]
         self.middle_mouse
             .configure(shortcuts.middle_mouse, self.global_enabled);
+        #[cfg(target_os = "windows")]
+        self.wheel_mouse
+            .configure(shortcuts.wheel_mouse, self.global_enabled);
         self.suspended_main_status = None;
         self.suspended_settings_status = None;
         self.suspended_clipboard_monitor_status = None;
@@ -1759,6 +1777,27 @@ pub(crate) fn set_middle_mouse_config(
     cx.update_global::<HotkeyRuntime, _>(|runtime, _| {
         runtime
             .middle_mouse
+            .configure(config, runtime.global_enabled && !runtime.suspended);
+    });
+    #[cfg(not(target_os = "windows"))]
+    let _ = config;
+    cx.refresh_windows();
+    Ok(())
+}
+
+pub(crate) fn set_wheel_mouse_config(
+    config: crate::config::WheelShortcutConfig,
+    cx: &mut App,
+) -> Result<(), String> {
+    let mut shortcuts = crate::config_runtime::shortcuts_config(cx);
+    shortcuts.wheel_mouse = config.normalized();
+    let config = shortcuts.wheel_mouse;
+    crate::config_runtime::set_shortcuts_config(shortcuts, cx)
+        .map_err(|error| error.to_string())?;
+    #[cfg(target_os = "windows")]
+    cx.update_global::<HotkeyRuntime, _>(|runtime, _| {
+        runtime
+            .wheel_mouse
             .configure(config, runtime.global_enabled && !runtime.suspended);
     });
     #[cfg(not(target_os = "windows"))]

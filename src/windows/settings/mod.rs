@@ -1080,6 +1080,7 @@ struct SettingsWindowView {
     recording_focus_handle: FocusHandle,
     adaptive_max_lines_slider: Entity<SliderState>,
     middle_mouse_threshold_slider: Entity<SliderState>,
+    wheel_mouse_threshold_slider: Entity<SliderState>,
     window_material_opacity_slider: Entity<SliderState>,
     background_image_blur_slider: Entity<SliderState>,
     window_material_brightness_slider: Entity<SliderState>,
@@ -1098,6 +1099,7 @@ struct SettingsWindowView {
     filter_hover_delay_slider: Entity<SliderState>,
     _adaptive_max_lines_subscription: Subscription,
     _middle_mouse_threshold_subscription: Subscription,
+    _wheel_mouse_threshold_subscription: Subscription,
     _window_material_opacity_subscription: Subscription,
     _background_image_blur_subscription: Subscription,
     _window_material_brightness_subscription: Subscription,
@@ -1141,6 +1143,39 @@ impl SettingsWindowView {
                     .err()
                     .map(|error| {
                         tracing::error!("保存鼠标中键长按阈值失败：{error}");
+                        i18n::translator(cx).translate("settings.shortcuts.save_error")
+                    });
+                view.shortcut_error = notify_settings_error(SettingsPage::Shortcuts, error, cx);
+                cx.notify();
+            },
+        );
+        let wheel_mouse_threshold = config_runtime::shortcuts_config(cx)
+            .wheel_mouse
+            .hold_threshold_ms;
+        let wheel_mouse_threshold_slider = cx.new(|_| {
+            SliderState::new()
+                .min(10.0)
+                .max(1000.0)
+                .step(1.0)
+                .default_value(f32::from(wheel_mouse_threshold))
+        });
+        let wheel_mouse_threshold_subscription = cx.subscribe_in(
+            &wheel_mouse_threshold_slider,
+            window,
+            |view, _, event: &SliderEvent, _, cx| {
+                let SliderEvent::Change(value) = event else {
+                    return;
+                };
+                let mut config = config_runtime::shortcuts_config(cx).wheel_mouse;
+                let threshold = value.end().round().clamp(10.0, 1000.0) as u16;
+                if !config.enabled || config.hold_threshold_ms == threshold {
+                    return;
+                }
+                config.hold_threshold_ms = threshold;
+                let error = hotkey::set_wheel_mouse_config(config, cx)
+                    .err()
+                    .map(|error| {
+                        tracing::error!("保存侧键轮盘按住阈值失败：{error}");
                         i18n::translator(cx).translate("settings.shortcuts.save_error")
                     });
                 view.shortcut_error = notify_settings_error(SettingsPage::Shortcuts, error, cx);
@@ -1590,6 +1625,7 @@ impl SettingsWindowView {
             recording_focus_handle,
             adaptive_max_lines_slider,
             middle_mouse_threshold_slider,
+            wheel_mouse_threshold_slider,
             window_material_opacity_slider,
             background_image_blur_slider,
             window_material_brightness_slider,
@@ -1606,6 +1642,7 @@ impl SettingsWindowView {
             search_engines_expanded: false,
             _adaptive_max_lines_subscription: adaptive_max_lines_subscription,
             _middle_mouse_threshold_subscription: middle_mouse_threshold_subscription,
+            _wheel_mouse_threshold_subscription: wheel_mouse_threshold_subscription,
             _window_material_opacity_subscription: window_material_opacity_subscription,
             _background_image_blur_subscription: background_image_blur_subscription,
             _window_material_brightness_subscription: window_material_brightness_subscription,
@@ -1916,6 +1953,16 @@ impl Render for SettingsWindowView {
         self.middle_mouse_threshold_slider.update(cx, |slider, cx| {
             if slider.value() != SliderValue::Single(threshold) {
                 slider.set_value(threshold, window, cx);
+            }
+        });
+        let wheel_threshold = f32::from(
+            config_runtime::shortcuts_config(cx)
+                .wheel_mouse
+                .hold_threshold_ms,
+        );
+        self.wheel_mouse_threshold_slider.update(cx, |slider, cx| {
+            if slider.value() != SliderValue::Single(wheel_threshold) {
+                slider.set_value(wheel_threshold, window, cx);
             }
         });
         self.sync_window_material_opacity_slider(window, cx);

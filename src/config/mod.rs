@@ -219,6 +219,7 @@ impl Default for GeneralConfig {
 pub struct ShortcutsConfig {
     pub toggle_main_window: Option<ShortcutBinding>,
     pub middle_mouse: MiddleMouseShortcutConfig,
+    pub wheel_mouse: WheelShortcutConfig,
     pub open_settings: Option<ShortcutBinding>,
     pub toggle_clipboard_monitor: Option<ShortcutBinding>,
     pub plain_text_paste: Option<ShortcutBinding>,
@@ -244,6 +245,7 @@ impl Default for ShortcutsConfig {
         Self {
             toggle_main_window: Some(ShortcutBinding::toggle_main_window_default()),
             middle_mouse: MiddleMouseShortcutConfig::default(),
+            wheel_mouse: WheelShortcutConfig::default(),
             open_settings: None,
             toggle_clipboard_monitor: None,
             plain_text_paste: None,
@@ -877,6 +879,58 @@ impl MiddleMouseShortcutConfig {
     pub(crate) fn normalized(mut self) -> Self {
         self.hold_threshold_ms = self.hold_threshold_ms.clamp(10, 1000);
         self
+    }
+}
+
+/// 鼠标侧键按住弹出的收藏轮盘配置。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct WheelShortcutConfig {
+    pub enabled: bool,
+    pub button: WheelMouseButton,
+    pub hold_threshold_ms: u16,
+}
+
+impl Default for WheelShortcutConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            button: WheelMouseButton::Back,
+            hold_threshold_ms: 150,
+        }
+    }
+}
+
+impl WheelShortcutConfig {
+    pub(crate) fn normalized(mut self) -> Self {
+        self.hold_threshold_ms = self.hold_threshold_ms.clamp(10, 1000);
+        self
+    }
+}
+
+/// 触发轮盘的鼠标侧键。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WheelMouseButton {
+    Back,
+    Forward,
+}
+
+impl WheelMouseButton {
+    pub const ALL: [Self; 2] = [Self::Back, Self::Forward];
+
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Back => "back",
+            Self::Forward => "forward",
+        }
+    }
+
+    pub const fn label_key(self) -> &'static str {
+        match self {
+            Self::Back => "settings.shortcuts.wheel.button.back",
+            Self::Forward => "settings.shortcuts.wheel.button.forward",
+        }
     }
 }
 
