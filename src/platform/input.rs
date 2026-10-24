@@ -162,10 +162,9 @@ mod windows_input {
                 VK_RSHIFT, VK_RWIN,
             },
             WindowsAndMessaging::{
-                CallNextHookEx, GetForegroundWindow, GetMessageW, HHOOK, HOOKPROC, LLMHF_INJECTED,
+                CallNextHookEx, GetForegroundWindow, GetMessageW, HHOOK, LLMHF_INJECTED,
                 MSLLHOOKSTRUCT, PostThreadMessageW, SetWindowsHookExW, UnhookWindowsHookEx,
                 WH_MOUSE_LL, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP,
-                WM_XBUTTONDOWN, WM_XBUTTONUP,
             },
         },
     };
@@ -197,13 +196,15 @@ mod windows_input {
                 WM_LBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONDOWN | WM_RBUTTONUP
             )
         {
-            let info = &*(lparam.0 as *const MSLLHOOKSTRUCT);
+            // SAFETY: 低级鼠标钩子的 lparam 指向系统提供的 MSLLHOOKSTRUCT，仅在本回调内读取。
+            let info = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
             // LLMHF_INJECTED 标记来自 SendInput 的合成输入，放行避免吞掉自己模拟的点击。
             if info.flags & LLMHF_INJECTED == 0 {
                 return LRESULT(1);
             }
         }
-        CallNextHookEx(None, code, wparam, lparam)
+        // SAFETY: 标准钩子链转发；句柄为 None 表示当前钩子。
+        unsafe { CallNextHookEx(None, code, wparam, lparam) }
     }
 
     pub(crate) fn install_wheel_click_hook() {

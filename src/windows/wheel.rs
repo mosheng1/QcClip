@@ -89,22 +89,22 @@ impl WheelColors {
             // 亮色模式下预览色略深保证对比。
             colors.preview = 0x5A5A66;
         }
-        if let Some(color) = parse_hex_rgba(&wheel.sector_color, colors.sector) {
+        if let Some(color) = parse_hex_rgba(&wheel.sector_color) {
             colors.sector = color;
         }
-        if let Some(color) = parse_hex_rgba(&wheel.hover_color, colors.hover) {
+        if let Some(color) = parse_hex_rgba(&wheel.hover_color) {
             colors.hover = color;
         }
-        if let Some(color) = parse_hex_rgba(&wheel.center_color, colors.center) {
+        if let Some(color) = parse_hex_rgba(&wheel.center_color) {
             colors.center = color;
         }
-        if let Some(color) = parse_hex_rgba(&wheel.title_color, colors.title) {
+        if let Some(color) = parse_hex_rgba(&wheel.title_color) {
             colors.title = color;
         }
-        if let Some(color) = parse_hex_rgba(&wheel.preview_color, colors.preview) {
+        if let Some(color) = parse_hex_rgba(&wheel.preview_color) {
             colors.preview = color;
         }
-        if let Some(color) = parse_hex_rgba(&wheel.page_color, colors.page) {
+        if let Some(color) = parse_hex_rgba(&wheel.page_color) {
             colors.page = color;
         }
         colors.font_family = wheel
@@ -124,8 +124,8 @@ fn with_reduced_alpha(color: u32, factor: f32) -> u32 {
 }
 
 /// 解析 "RRGGBB"、"RRGGBBAA"、"RGB" 十六进制颜色为 0xRRGGBBAA。
-/// 非法或为空返回 fallback；"RRGGBB" 补 FF 不透明度。
-fn parse_hex_rgba(value: &str, fallback: u32) -> Option<u32> {
+/// 非法或为空返回 None（调用方保持原色）；"RRGGBB" 补 FF 不透明度。
+fn parse_hex_rgba(value: &str) -> Option<u32> {
     let value = value.trim().trim_start_matches('#');
     if value.is_empty() {
         return None;
@@ -332,36 +332,23 @@ pub(crate) fn open_wheel_window(cx: &mut App) -> bool {
             cx.update_global::<WheelWindowService, _>(|service, _| {
                 service.window = Some(window);
             });
-            // 初始定位到光标处（先完成窗口尺寸设定）。
+            // 初始定位到光标处；place_window 内部完成窗口尺寸设定后
+            // 立即应用椭圆裁剪与材质（resize 的 SetWindowPos 是同步调用，返回即生效）。
+            #[cfg(target_os = "windows")]
+            let material = crate::config_runtime::appearance_config(cx)
+                .wheel_appearance
+                .material;
             let _ = handle.update(cx, |view, window, cx| {
                 view.place_window(window, cx);
+                #[cfg(target_os = "windows")]
+                if let Err(error) = platform_window::apply_circle_window_material(
+                    window,
+                    material,
+                    view.window_physical_diameter,
+                ) {
+                    tracing::error!("应用轮盘材质失败：{error}");
+                }
             });
-            // 独立材质：椭圆裁剪 HWND + GPUI Blurred 背景（Windows 上为系统亚克力）。
-            // resize 是异步生效的，延迟一帧再裁剪，确保窗口区域已按目标直径应用。
-            #[cfg(target_os = "windows")]
-            {
-                let material = crate::config_runtime::appearance_config(cx)
-                    .wheel_appearance
-                    .material;
-                let scale = cx.update_global::<WheelSession, _>(|session, _| session.scale);
-                let physical_diameter = WHEEL_DIAMETER * scale;
-                let material_handle = handle.clone();
-                cx.spawn(async move |cx| {
-                    cx.background_executor()
-                        .timer(std::time::Duration::from_millis(32))
-                        .await;
-                    let _ = material_handle.update(cx, |_, window, _| {
-                        if let Err(error) = platform_window::apply_circle_window_material(
-                            window,
-                            material,
-                            physical_diameter,
-                        ) {
-                            tracing::error!("应用轮盘材质失败：{error}");
-                        }
-                    });
-                })
-                .detach();
-            }
             start_wheel_pointer_tracking(cx);
             true
         }
@@ -403,9 +390,9 @@ pub(crate) fn page_wheel(forward: bool, cx: &mut App) {
         } else {
             page.checked_sub(1).unwrap_or(pages - 1)
         };
-        Some((next, next != page))
+        (next != page).then_some(next)
     });
-    let Some((next, changed)) = next.filter(|(_, changed)| *changed) else {
+    let Some(next) = next else {
         return;
     };
     let page = load_wheel_page(cx, next);
@@ -589,6 +576,8 @@ fn truncate_chars(text: &str, max: usize) -> String {
 struct WheelWindowView {
     popup: platform_window::BorderlessPopup,
     placed: bool,
+    /// place_window 记录的最终物理直径，供材质椭圆裁剪使用。
+    window_physical_diameter: f32,
 }
 
 impl WheelWindowView {
@@ -596,6 +585,7 @@ impl WheelWindowView {
         Self {
             popup,
             placed: false,
+            window_physical_diameter: 0.0,
         }
     }
 
@@ -626,6 +616,7 @@ impl WheelWindowView {
         {
             tracing::error!("调整收藏轮盘窗口大小失败");
         }
+        self.window_physical_diameter = diameter;
     }
 }
 
