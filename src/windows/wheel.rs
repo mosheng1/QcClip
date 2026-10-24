@@ -333,20 +333,16 @@ pub(crate) fn open_wheel_window(cx: &mut App) -> bool {
                 service.window = Some(window);
             });
             // 初始定位到光标处；place_window 内部完成窗口尺寸设定后
-            // 立即应用椭圆裁剪与材质（resize 的 SetWindowPos 是同步调用，返回即生效）。
-            #[cfg(target_os = "windows")]
-            let material = crate::config_runtime::appearance_config(cx)
-                .wheel_appearance
-                .material;
+            // 立即应用椭圆裁剪（resize 的 SetWindowPos 是同步调用，返回即生效）。
+            // 材质视觉由 render 的圆形 tint 层提供，不再使用系统 accent（会出方形壳）。
             let _ = handle.update(cx, |view, window, cx| {
                 view.place_window(window, cx);
                 #[cfg(target_os = "windows")]
                 if let Err(error) = platform_window::apply_circle_window_material(
                     window,
-                    material,
                     view.window_physical_diameter,
                 ) {
-                    tracing::error!("应用轮盘材质失败：{error}");
+                    tracing::error!("应用轮盘圆形裁剪失败：{error}");
                 }
             });
             start_wheel_pointer_tracking(cx);
@@ -662,20 +658,35 @@ impl Render for WheelWindowView {
             canvas_colors.hover = with_reduced_alpha(canvas_colors.hover, 0.85);
         }
         let center = point(px(WHEEL_DIAMETER / 2.0), px(WHEEL_DIAMETER / 2.0));
-        // 材质模式：整圆 tint 底（暗色 55% / 亮色 70%），给亚克力一个可见的色调主体。
+        // 材质视觉（内容层圆形 tint，替代系统 accent——后者画整个 HWND 矩形出方形壳）：
+        // 亚克力 = 浓 tint 磨砂感；模糊 = 中 tint；透明 = 无底，扇区自身配色即全部。
         let dark_mode = gpui_component::Theme::global(cx).mode.is_dark();
-        let material_tint = uses_system_material.then(|| {
+        let wheel_material = crate::window_material::supported_material(
+            crate::config_runtime::appearance_config(cx)
+                .wheel_appearance
+                .material,
+        );
+        let material_tint = match wheel_material {
+            crate::config::WindowMaterial::Acrylic => Some(if dark_mode {
+                rgba(0x202028C8u32)
+            } else {
+                rgba(0xFFFFFFE0u32)
+            }),
+            crate::config::WindowMaterial::Blur => Some(if dark_mode {
+                rgba(0x1E1E268Cu32)
+            } else {
+                rgba(0xFFFFFFB3u32)
+            }),
+            _ => None,
+        }
+        .map(|color| {
             div()
                 .absolute()
                 .left_0()
                 .top_0()
                 .size(px(WHEEL_DIAMETER))
                 .rounded_full()
-                .bg(if dark_mode {
-                    rgba(0x1E1E268Cu32)
-                } else {
-                    rgba(0xFFFFFFB3u32)
-                })
+                .bg(color)
         });
 
         let mut root = div().relative().size_full();

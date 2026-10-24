@@ -545,19 +545,15 @@ pub(crate) fn apply_window_material(
     }
 }
 
-/// 给独立圆窗（收藏轮盘）应用材质：先椭圆裁剪 HWND 再设置 GPUI 背景外观。
-/// diameter 为目标物理直径；不读当前 viewport（窗口 resize 异步生效，
-/// 创建后立刻读会拿到旧的小尺寸，裁出偏移的小椭圆导致轮盘残缺）。
-/// 亚克力/模糊走 GPUI 的 Blurred（Windows 上为 ACCENT_ENABLE_ACRYLICBLURBEHIND），
-/// DWM 材质跟随椭圆窗口区域，天然圆形；透明材质恢复普通 alpha 透明。
+/// 给独立圆窗（收藏轮盘）应用圆形裁剪。
+/// 注意：不再使用 GPUI Blurred/系统 accent 材质——DWM accent 画整个 HWND 矩形，
+/// SetWindowRgn 的椭圆区域裁不掉合成层，会产生方形外壳；视觉主体由内容层
+/// 的圆形 tint 提供（亚克力=浓 tint、模糊=中 tint、透明=无 tint）。
 #[cfg(target_os = "windows")]
 pub(crate) fn apply_circle_window_material(
     window: &Window,
-    material: crate::config::WindowMaterial,
     physical_diameter: f32,
 ) -> Result<(), String> {
-    use crate::config::WindowMaterial;
-
     if !physical_diameter.is_finite() || physical_diameter < 1.0 {
         return Ok(());
     }
@@ -565,16 +561,8 @@ pub(crate) fn apply_circle_window_material(
     // SetWindowRgn 使用逻辑（客户区）坐标。
     let logical = physical_diameter / scale;
     set_window_circle_clip(window, logical / 2.0, logical / 2.0, logical)?;
-
-    // GPUI 的 Blurred 在 Windows 上即 ACCENT_ENABLE_ACRYLICBLURBEHIND（带近零 tint），
-    // 视觉主体由内容层的圆形 tint 提供；透明/关闭恢复普通透明。
-    let appearance = match crate::window_material::supported_material(material) {
-        WindowMaterial::Acrylic | WindowMaterial::Blur => gpui::WindowBackgroundAppearance::Blurred,
-        WindowMaterial::Disabled | WindowMaterial::Transparent | WindowMaterial::CustomImage => {
-            gpui::WindowBackgroundAppearance::Transparent
-        }
-    };
-    window.set_background_appearance(appearance);
+    // 背景保持普通透明；材质感由 wheel.rs 内容层的圆形 tint 层呈现。
+    window.set_background_appearance(gpui::WindowBackgroundAppearance::Transparent);
     Ok(())
 }
 
