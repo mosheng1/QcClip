@@ -409,32 +409,86 @@ impl SettingsWindowView {
                 )
             });
 
-        // ---- 收藏轮盘外观面板：跟随材质开关 + 三个颜色（色块按钮 + 输入框） ----
-        let wheel_follow_switch = Switch::new("settings-wheel-follow-material")
-            .large()
-            .checked(appearance.wheel_appearance.follow_window_material)
-            .accessibility_label(
-                translator.translate("settings.personalization.wheel_appearance.follow"),
-            )
-            .on_click({
+        // ---- 收藏轮盘外观面板：独立材质 + 明暗 + 颜色（色块按钮 + 输入框） ----
+        // 材质仿窗口材质控件：亚克力/模糊直接挂系统 DWM 材质（HWND 椭圆裁剪，天然圆形），
+        // 透明 = 无系统材质纯色；不与主窗口材质绑定。
+        let wheel_material_selector = single_select(
+            "settings-wheel-material-select",
+            crate::window_material::available_materials()
+                .into_iter()
+                .filter(|material| {
+                    !matches!(
+                        material,
+                        WindowMaterial::CustomImage | WindowMaterial::Disabled
+                    )
+                })
+                .map(|material| {
+                    SingleSelectOption::new(
+                        material,
+                        translator.translate(window_material_label_key(material)),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            crate::window_material::supported_material(appearance.wheel_appearance.material),
+            {
                 let view = view.clone();
                 let save_error = save_error.clone();
-                move |checked, _, cx| {
+                move |material, cx| {
                     persist_appearance_change(
                         view.clone(),
-                        "轮盘跟随窗口材质",
-                        move |appearance| {
-                            appearance.wheel_appearance.follow_window_material = *checked
-                        },
+                        "轮盘材质",
+                        move |appearance| appearance.wheel_appearance.material = material,
                         save_error.clone(),
                         cx,
                     );
                 }
-            });
-        let wheel_follow_title =
-            translator.translate("settings.personalization.wheel_appearance.follow");
-        let _wheel_follow_description =
-            translator.translate("settings.personalization.wheel_appearance.follow_description");
+            },
+            theme,
+            single_select_animation,
+        );
+        let wheel_material_row = h_flex()
+            .w_full()
+            .gap_3()
+            .items_center()
+            .child(
+                div()
+                    .w(ui_rem(96.0))
+                    .flex_shrink_0()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(
+                        translator.translate("settings.personalization.wheel_appearance.material"),
+                    ),
+            )
+            .child(div().flex_1().min_w_0().child(wheel_material_selector));
+        // 材质明暗滑条（复用窗口明暗滑条状态渲染，绑定 wheel_appearance.material_brightness）。
+        let wheel_brightness_row = h_flex()
+            .w_full()
+            .gap_3()
+            .items_center()
+            .child(
+                div()
+                    .w(ui_rem(96.0))
+                    .flex_shrink_0()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(
+                        translator
+                            .translate("settings.personalization.wheel_appearance.brightness"),
+                    ),
+            )
+            .child(Slider::new(&self.wheel_brightness_slider).flex_1())
+            .child(
+                div()
+                    .w(ui_rem(40.0))
+                    .flex_shrink_0()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(format!(
+                        "{}%",
+                        (appearance.wheel_appearance.material_brightness * 100.0).round() as i32
+                    )),
+            );
         // 色块按钮 + 十六进制输入；色块点击弹出取色器，选中即保存。
         let make_wheel_color_row = {
             let view = view.clone();
@@ -811,24 +865,19 @@ impl SettingsWindowView {
                         v_flex()
                             .w_full()
                             .gap_3()
-                            .child(
-                                self.highlight_element(
-                                    theme,
-                                    wheel_follow_title.clone(),
-                                    h_flex()
-                                        .w_full()
-                                        .items_center()
-                                        .justify_between()
-                                        .gap_3()
-                                        .child(
-                                            div().text_sm().text_color(theme.foreground).child(
-                                                wheel_follow_title,
-                                            ),
-                                        )
-                                        .child(wheel_follow_switch),
+                            // 独立材质下拉（仿窗口材质控件，不与主窗口绑定）。
+                            .child(wheel_material_row)
+                            // 亚克力/模糊时显示明暗滑条。
+                            .when(
+                                matches!(
+                                    crate::window_material::supported_material(
+                                        appearance.wheel_appearance.material
+                                    ),
+                                    WindowMaterial::Acrylic | WindowMaterial::Blur
                                 ),
+                                |this| this.child(wheel_brightness_row),
                             )
-                            // 颜色行始终显示：跟随材质时同样允许覆盖颜色，无需先关开关。
+                            // 颜色行始终显示：材质与调色可自由组合。
                             .child(make_wheel_color_row(
                                 "wheel-sector-color",
                                 translator.translate(
@@ -1019,7 +1068,41 @@ impl SettingsWindowView {
                                                 appearance.wheel_appearance.preview_font_size.round() as i32
                                             )),
                                     ),
-                            ),
+                            )
+                            // 一键重置轮盘外观为默认值。
+                            .child({
+                                let view = view.clone();
+                                let save_error = save_error.clone();
+                                h_flex().w_full().justify_end().child(
+                                    Button::new("settings-wheel-appearance-reset")
+                                        .warning()
+                                        .small()
+                                        .label(translator.translate(
+                                            "settings.personalization.wheel_appearance.reset",
+                                        ))
+                                        .on_click(move |_, _, cx| {
+                                            let mut config = config_runtime::appearance_config(cx);
+                                            config.wheel_appearance =
+                                                crate::config::WheelAppearanceConfig::default();
+                                            let error_message =
+                                                match config_runtime::set_appearance_config(config, cx) {
+                                                    Ok(_) => None,
+                                                    Err(error) => {
+                                                        tracing::error!("重置轮盘外观失败：{error}");
+                                                        Some(save_error.clone())
+                                                    }
+                                                };
+                                            view.update(cx, |view, cx| {
+                                                view.appearance_error = notify_settings_error(
+                                                    SettingsPage::Personalization,
+                                                    error_message,
+                                                    cx,
+                                                );
+                                                cx.notify();
+                                            });
+                                        }),
+                                )
+                            }),
                     ),
             )
             .child(

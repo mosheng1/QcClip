@@ -85,8 +85,8 @@ impl WheelColors {
             colors.preview = 0x5A5A66;
             colors.page = 0x4A4A55;
         }
-        if !dark && !wheel.follow_window_material {
-            // 亮色独立模式预览色略深。
+        if !dark {
+            // 亮色模式下预览色略深保证对比。
             colors.preview = 0x5A5A66;
         }
         if let Some(color) = parse_hex_rgba(&wheel.sector_color, colors.sector) {
@@ -332,6 +332,20 @@ pub(crate) fn open_wheel_window(cx: &mut App) -> bool {
             cx.update_global::<WheelWindowService, _>(|service, _| {
                 service.window = Some(window);
             });
+            // 独立材质：椭圆裁剪 HWND + GPUI Blurred 背景（Windows 上为系统亚克力）。
+            #[cfg(target_os = "windows")]
+            {
+                let material = crate::config_runtime::appearance_config(cx)
+                    .wheel_appearance
+                    .material;
+                let _ = handle.update(cx, |_, window, _| {
+                    if let Err(error) =
+                        platform_window::apply_circle_window_material(window, material)
+                    {
+                        tracing::error!("应用轮盘材质失败：{error}");
+                    }
+                });
+            }
             // 初始定位到光标处。
             let _ = handle.update(cx, |view, window, cx| {
                 view.place_window(window, cx);
@@ -628,38 +642,42 @@ impl Render for WheelWindowView {
         // 画布回调里要用的悬停/条目/配色快照。
         let canvas_hovered = hovered;
         let canvas_entries = entries.clone();
-        let follow_material = crate::config_runtime::appearance_config(cx)
-            .wheel_appearance
-            .follow_window_material;
-        // 跟随材质时降低扇区不透明度，让圆形裁剪内的材质背景透出来。
+        // 系统材质（亚克力/模糊）已挂到 HWND 并被椭圆裁剪成圆形；
+        // 内容层再垫一块半透明圆形 tint 给材质视觉主体，扇区按比例降低不透明度透出材质。
+        let uses_system_material = matches!(
+            crate::window_material::supported_material(
+                crate::config_runtime::appearance_config(cx)
+                    .wheel_appearance
+                    .material
+            ),
+            crate::config::WindowMaterial::Acrylic | crate::config::WindowMaterial::Blur
+        );
         let mut canvas_colors = colors;
-        if follow_material {
+        if uses_system_material {
             canvas_colors.sector = with_reduced_alpha(canvas_colors.sector, 0.45);
             canvas_colors.empty = with_reduced_alpha(canvas_colors.empty, 0.45);
             canvas_colors.hover = with_reduced_alpha(canvas_colors.hover, 0.85);
-            // 中心盘保持较实但提亮，避免深色材质上一块死黑；文字用深色保证对比。
-            canvas_colors.center = 0x2E2E38E0;
-            canvas_colors.center_border = 0x6E6E7EB0;
         }
         let center = point(px(WHEEL_DIAMETER / 2.0), px(WHEEL_DIAMETER / 2.0));
-        // 跟随窗口材质时叠加主程序同款材质背景层（亚克力色调/模糊/背景图 + 不透明度遮罩），
-        // 并整体裁剪成圆形，避免材质溢出轮盘外沿形成方形区域。
-        let material_background = follow_material
-            .then(|| crate::window_material::background_element(_window, cx))
-            .map(|background| {
-                div()
-                    .absolute()
-                    .left_0()
-                    .top_0()
-                    .size(px(WHEEL_DIAMETER))
-                    .rounded_full()
-                    .overflow_hidden()
-                    .child(background)
-            });
+        // 材质模式：整圆 tint 底（暗色 55% / 亮色 70%），给亚克力一个可见的色调主体。
+        let dark_mode = gpui_component::Theme::global(cx).mode.is_dark();
+        let material_tint = uses_system_material.then(|| {
+            div()
+                .absolute()
+                .left_0()
+                .top_0()
+                .size(px(WHEEL_DIAMETER))
+                .rounded_full()
+                .bg(if dark_mode {
+                    rgba(0x1E1E268Cu32)
+                } else {
+                    rgba(0xFFFFFFB3u32)
+                })
+        });
 
         let mut root = div().relative().size_full();
-        if let Some(background) = material_background {
-            root = root.child(background);
+        if let Some(tint) = material_tint {
+            root = root.child(tint);
         }
         root = root.child(
             canvas(
@@ -710,15 +728,15 @@ impl Render for WheelWindowView {
                 let label_y =
                     center.y - px(WHEEL_LABEL_RADIUS * rad.cos()) - px(WHEEL_LABEL_HEIGHT / 2.0);
                 let is_hovered = hovered == Some(index);
-                // 文字颜色/字号/字体全部读配置快照；材质模式自动提亮防止半透明背景糊字。
-                let title_color = if follow_material && is_hovered {
+                // 文字颜色/字号/字体全部读配置快照；系统材质上自动提亮防止半透明背景糊字。
+                let title_color = if uses_system_material && is_hovered {
                     0xFFFFFFFF
-                } else if follow_material {
+                } else if uses_system_material {
                     lighten_for_material(canvas_colors.title)
                 } else {
                     canvas_colors.title
                 };
-                let preview_color = if follow_material {
+                let preview_color = if uses_system_material {
                     lighten_for_material(canvas_colors.preview)
                 } else {
                     canvas_colors.preview

@@ -916,12 +916,14 @@ pub enum WheelMouseButton {
     Forward,
 }
 
-/// 轮盘外观配置：跟随窗口材质或独立调色，文字颜色/字体/字号可自定义。
+/// 轮盘外观配置：独立材质选择 + 自定义调色与文字。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct WheelAppearanceConfig {
-    /// true 时沿用主窗口的窗口材质（亚克力/模糊/背景图/透明度）。
-    pub follow_window_material: bool,
+    /// 轮盘独立材质；默认透明（无系统材质）。
+    pub material: WindowMaterial,
+    /// 材质明暗（0~2，1 为默认）。
+    pub material_brightness: f32,
     /// 扇区底色（"RRGGBB" 或 "RRGGBBAA"）。
     pub sector_color: String,
     /// 悬停高亮色（"RRGGBBAA"）。
@@ -945,7 +947,8 @@ pub struct WheelAppearanceConfig {
 impl Default for WheelAppearanceConfig {
     fn default() -> Self {
         Self {
-            follow_window_material: true,
+            material: WindowMaterial::Transparent,
+            material_brightness: 1.0,
             sector_color: String::new(),
             hover_color: String::new(),
             center_color: String::new(),
@@ -989,6 +992,14 @@ impl WheelAppearanceConfig {
                 .clamp(WHEEL_PREVIEW_FONT_SIZE_MIN, WHEEL_PREVIEW_FONT_SIZE_MAX)
         } else {
             WHEEL_PREVIEW_FONT_SIZE_DEFAULT
+        };
+        self.material_brightness = if self.material_brightness.is_finite() {
+            self.material_brightness.clamp(
+                WINDOW_MATERIAL_BRIGHTNESS_MIN,
+                WINDOW_MATERIAL_BRIGHTNESS_MAX,
+            )
+        } else {
+            WINDOW_MATERIAL_BRIGHTNESS_DEFAULT
         };
         self
     }

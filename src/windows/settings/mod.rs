@@ -1097,6 +1097,7 @@ struct SettingsWindowView {
     wheel_page_color_input: Entity<InputState>,
     wheel_title_size_slider: Entity<SliderState>,
     wheel_preview_size_slider: Entity<SliderState>,
+    wheel_brightness_slider: Entity<SliderState>,
     clipboard_formats_expanded: bool,
     search_engine_url_input: Entity<InputState>,
     /// 待添加引擎已选择的图标本地路径；为空则用内置品牌图标或通用图标。
@@ -1127,6 +1128,7 @@ struct SettingsWindowView {
     _wheel_page_color_subscription: Subscription,
     _wheel_title_size_subscription: Subscription,
     _wheel_preview_size_subscription: Subscription,
+    _wheel_brightness_subscription: Subscription,
     _shortcut_recording_blur_subscription: Subscription,
     _settings_search_subscription: Subscription,
 }
@@ -1761,6 +1763,36 @@ impl SettingsWindowView {
                 cx.notify();
             },
         );
+        // 轮盘材质明暗滑条（0.3~1.7，步进 0.05）。
+        let wheel_brightness_slider = cx.new(|_| {
+            SliderState::new()
+                .min(crate::config::WINDOW_MATERIAL_BRIGHTNESS_MIN)
+                .max(crate::config::WINDOW_MATERIAL_BRIGHTNESS_MAX)
+                .step(0.05)
+                .default_value(wheel_appearance.material_brightness)
+        });
+        let wheel_brightness_subscription = cx.subscribe_in(
+            &wheel_brightness_slider,
+            window,
+            move |_view, _slider, event: &SliderEvent, _window, cx| {
+                let SliderEvent::Change(value) = event else {
+                    return;
+                };
+                let brightness = value.end().clamp(
+                    crate::config::WINDOW_MATERIAL_BRIGHTNESS_MIN,
+                    crate::config::WINDOW_MATERIAL_BRIGHTNESS_MAX,
+                );
+                let mut appearance = config_runtime::appearance_config(cx);
+                if (appearance.wheel_appearance.material_brightness - brightness).abs() < 0.001 {
+                    return;
+                }
+                appearance.wheel_appearance.material_brightness = brightness;
+                if let Err(error) = config_runtime::set_appearance_config(appearance, cx) {
+                    tracing::error!("保存轮盘材质明暗失败：{error}");
+                }
+                cx.notify();
+            },
+        );
         let recording_focus_handle = cx.focus_handle();
         let search_results_scroll_handle = ScrollHandle::new();
         let shortcut_scroll_handle = ScrollHandle::new();
@@ -1867,6 +1899,7 @@ impl SettingsWindowView {
             wheel_page_color_input,
             wheel_title_size_slider,
             wheel_preview_size_slider,
+            wheel_brightness_slider,
             clipboard_formats_expanded: false,
             search_engine_url_input,
             pending_search_engine_icon: None,
@@ -1892,6 +1925,7 @@ impl SettingsWindowView {
             _wheel_page_color_subscription: wheel_page_subscription,
             _wheel_title_size_subscription: wheel_title_size_subscription,
             _wheel_preview_size_subscription: wheel_preview_size_subscription,
+            _wheel_brightness_subscription: wheel_brightness_subscription,
             _shortcut_recording_blur_subscription: shortcut_recording_blur_subscription,
             _settings_search_subscription: settings_search_subscription,
         }
@@ -2038,6 +2072,19 @@ impl SettingsWindowView {
         self.wheel_preview_size_slider.update(cx, |slider, cx| {
             if slider.value() != SliderValue::Single(preview_size) {
                 slider.set_value(preview_size, window, cx);
+            }
+        });
+        let brightness = config_runtime::appearance_config(cx)
+            .wheel_appearance
+            .material_brightness;
+        let brightness = if brightness.is_finite() {
+            brightness
+        } else {
+            crate::config::WINDOW_MATERIAL_BRIGHTNESS_DEFAULT
+        };
+        self.wheel_brightness_slider.update(cx, |slider, cx| {
+            if slider.value() != SliderValue::Single(brightness) {
+                slider.set_value(brightness, window, cx);
             }
         });
     }
