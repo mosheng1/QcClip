@@ -409,6 +409,66 @@ impl SettingsWindowView {
                 )
             });
 
+        // ---- 收藏轮盘外观面板：跟随材质开关 + 三个颜色输入 ----
+        let wheel_follow_switch = Switch::new("settings-wheel-follow-material")
+            .large()
+            .checked(appearance.wheel_appearance.follow_window_material)
+            .accessibility_label(
+                translator.translate("settings.personalization.wheel_appearance.follow"),
+            )
+            .on_click({
+                let view = view.clone();
+                let save_error = save_error.clone();
+                move |checked, _, cx| {
+                    persist_appearance_change(
+                        view.clone(),
+                        "轮盘跟随窗口材质",
+                        move |appearance| {
+                            appearance.wheel_appearance.follow_window_material = *checked
+                        },
+                        save_error.clone(),
+                        cx,
+                    );
+                }
+            });
+        let wheel_follow_title =
+            translator.translate("settings.personalization.wheel_appearance.follow");
+        let wheel_follow_description =
+            translator.translate("settings.personalization.wheel_appearance.follow_description");
+        let wheel_sector_input = self.wheel_sector_color_input.clone();
+        let wheel_hover_input = self.wheel_hover_color_input.clone();
+        let wheel_center_input = self.wheel_center_color_input.clone();
+        let make_color_row =
+            |title: String,
+             description: String,
+             input: gpui::Entity<gpui_component::input::InputState>| {
+                let label = title.clone();
+                let description = gpui::SharedString::from(description);
+                h_flex()
+                    .w_full()
+                    .gap_3()
+                    .items_center()
+                    .child(
+                        div()
+                            .id("wheel-color-label")
+                            .w(ui_rem(96.0))
+                            .flex_shrink_0()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(label)
+                            .tooltip(move |window, cx| {
+                                gpui_component::tooltip::Tooltip::new(description.clone())
+                                    .build(window, cx)
+                            }),
+                    )
+                    .child(
+                        div()
+                            .w(ui_rem(120.0))
+                            .flex_shrink_0()
+                            .child(gpui_component::input::Input::new(&input).small().w_full()),
+                    )
+            };
+
         let theme_options = available_theme_options(cx);
         let light_selector = settings_dropdown(
             "settings-light-theme-select",
@@ -742,6 +802,65 @@ impl SettingsWindowView {
                     .px_4()
                     .py_3()
                     .child(window_material_panel),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .px_4()
+                    .py_3()
+                    .child(
+                        v_flex()
+                            .w_full()
+                            .gap_3()
+                            .child(
+                                self.highlight_element(
+                                    theme,
+                                    wheel_follow_title.clone(),
+                                    h_flex()
+                                        .w_full()
+                                        .items_center()
+                                        .justify_between()
+                                        .gap_3()
+                                        .child(
+                                            div().text_sm().text_color(theme.foreground).child(
+                                                wheel_follow_title,
+                                            ),
+                                        )
+                                        .child(wheel_follow_switch),
+                                ),
+                            )
+                            .when(!appearance.wheel_appearance.follow_window_material, |this| {
+                                this.child(make_color_row(
+                                    translator.translate(
+                                        "settings.personalization.wheel_appearance.sector_color",
+                                    ),
+                                    translator.translate(
+                                        "settings.personalization.wheel_appearance.sector_color_description",
+                                    ),
+                                    wheel_sector_input,
+                                ))
+                                .child(make_color_row(
+                                    translator.translate(
+                                        "settings.personalization.wheel_appearance.hover_color",
+                                    ),
+                                    translator.translate(
+                                        "settings.personalization.wheel_appearance.hover_color_description",
+                                    ),
+                                    wheel_hover_input,
+                                ))
+                                .child(make_color_row(
+                                    translator.translate(
+                                        "settings.personalization.wheel_appearance.center_color",
+                                    ),
+                                    translator.translate(
+                                        "settings.personalization.wheel_appearance.center_color_description",
+                                    ),
+                                    wheel_center_input,
+                                ))
+                            }),
+                    ),
             )
             .child(
                 self.setting_row(

@@ -29,6 +29,91 @@ const WHEEL_PREVIEW_MAX_CHARS: usize = 20;
 const WHEEL_SECTOR_FILL: u32 = 0x23232BE6;
 const WHEEL_SECTOR_HOVER_FILL: u32 = 0x3D6BFFF2;
 const WHEEL_SECTOR_EMPTY_FILL: u32 = 0x1A1A20A0;
+const WHEEL_CENTER_FILL: u32 = 0x16161CCC;
+const WHEEL_CENTER_BORDER: u32 = 0x3A3A4699;
+
+/// 轮盘打开期间生效的外观快照。
+#[derive(Clone, Copy, Debug)]
+struct WheelColors {
+    sector: u32,
+    hover: u32,
+    empty: u32,
+    center: u32,
+    center_border: u32,
+}
+
+impl Default for WheelColors {
+    fn default() -> Self {
+        Self {
+            sector: WHEEL_SECTOR_FILL,
+            hover: WHEEL_SECTOR_HOVER_FILL,
+            empty: WHEEL_SECTOR_EMPTY_FILL,
+            center: WHEEL_CENTER_FILL,
+            center_border: WHEEL_CENTER_BORDER,
+        }
+    }
+}
+
+impl WheelColors {
+    /// 从外观配置推导：跟随材质时按明暗模式选默认色，独立调色时覆盖对应项。
+    fn resolve(cx: &App) -> Self {
+        let appearance = crate::config_runtime::appearance_config(cx);
+        let wheel = &appearance.wheel_appearance;
+        let mut colors = Self::default();
+        if !wheel.follow_window_material {
+            // 独立调色：按亮暗模式取一组可读默认，再用用户色覆盖非空项。
+            let dark = gpui_component::Theme::global(cx).mode.is_dark();
+            if !dark {
+                colors.sector = 0xFFFFFFD9;
+                colors.hover = 0x3D6BFFF2;
+                colors.empty = 0xF2F2F780;
+                colors.center = 0xFFFFFFE6;
+                colors.center_border = 0xC9C9D480;
+            }
+            if let Some(color) = parse_hex_rgba(&wheel.sector_color, colors.sector) {
+                colors.sector = color;
+            }
+        }
+        if let Some(color) = parse_hex_rgba(&wheel.hover_color, colors.hover) {
+            colors.hover = color;
+        }
+        if let Some(color) = parse_hex_rgba(&wheel.center_color, colors.center) {
+            colors.center = color;
+        }
+        colors
+    }
+}
+
+/// 解析 "RRGGBB"、"RRGGBBAA"、"RGB" 十六进制颜色为 0xRRGGBBAA。
+/// 非法或为空返回 fallback；"RRGGBB" 补 FF 不透明度。
+fn parse_hex_rgba(value: &str, fallback: u32) -> Option<u32> {
+    let value = value.trim().trim_start_matches('#');
+    if value.is_empty() {
+        return None;
+    }
+    let expand = |c: char| -> Option<u32> { c.to_digit(16).map(|d| d * 16 + d) };
+    let channels: Vec<u32> = match value.len() {
+        3 => value
+            .chars()
+            .map(|c| expand(c).ok_or(()))
+            .collect::<Result<_, _>>()
+            .ok()?,
+        6 | 8 => (0..value.len())
+            .step_by(2)
+            .map(|i| u32::from_str_radix(&value[i..i + 2], 16).map_err(|_| ()))
+            .collect::<Result<_, _>>()
+            .ok()?,
+        _ => return None,
+    };
+    let mut out = 0u32;
+    for channel in &channels {
+        out = (out << 8) | channel;
+    }
+    if channels.len() == 3 {
+        out = (out << 8) | 0xFF;
+    }
+    Some(out)
+}
 
 /// 轮盘扇区数据。
 #[derive(Debug, Clone)]
@@ -107,6 +192,8 @@ struct WheelSession {
     _page_listener: Option<crate::platform::input::WheelPageListener>,
     /// 左/右键点击拦截（防点击穿透到底下窗口）；轮盘关闭即解除。
     _click_guard: Option<crate::platform::input::WheelClickSwallowGuard>,
+    /// 打开时解析的外观配色快照。
+    colors: WheelColors,
 }
 
 impl Default for WheelSession {
@@ -119,6 +206,7 @@ impl Default for WheelSession {
             page: 0,
             _page_listener: None,
             _click_guard: None,
+            colors: WheelColors::default(),
         }
     }
 }
@@ -142,6 +230,9 @@ pub(crate) fn open_wheel_window(cx: &mut App) -> bool {
     if page.slots.iter().filter(|entry| entry.item_id != 0).count() < 2 {
         return false;
     }
+    let follow_material = crate::config_runtime::appearance_config(cx)
+        .wheel_appearance
+        .follow_window_material;
     let Some(pointer) = platform_window::physical_cursor_position() else {
         return false;
     };
@@ -159,6 +250,7 @@ pub(crate) fn open_wheel_window(cx: &mut App) -> bool {
         page: 0,
         _page_listener: None,
         _click_guard: None,
+        colors: WheelColors::resolve(cx),
     });
     // 轮盘存续期间监听左/右键翻页 + 拦截点击穿透；窗口关闭（Session 清理）后任务自动退出。
     let (page_listener, page_receiver) = crate::platform::input::WheelPageListener::install();
@@ -204,6 +296,12 @@ pub(crate) fn open_wheel_window(cx: &mut App) -> bool {
             cx.update_global::<WheelWindowService, _>(|service, _| {
                 service.window = Some(window);
             });
+            // 跟随窗口材质：把轮盘窗口注册进材质系统，得到亚克力/模糊/背景图效果。
+            if follow_material {
+                let _ = handle.update(cx, |_, window, cx| {
+                    crate::window_material::register_window(window, cx);
+                });
+            }
             // 初始定位到光标处。
             let _ = handle.update(cx, |view, window, cx| {
                 view.place_window(window, cx);
@@ -270,6 +368,7 @@ fn reset_wheel_session(cx: &mut App) {
         session.entries.clear();
         session.total = 0;
         session.page = 0;
+        session.colors = WheelColors::default();
     });
 }
 
@@ -476,14 +575,15 @@ impl WheelWindowView {
 
 impl Render for WheelWindowView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (origin, cursor, entries, page, total_pages) =
-            cx.update_global::<WheelSession, _>(|session, _| {
+        let (origin, cursor, entries, page, total_pages, colors) = cx
+            .update_global::<WheelSession, _>(|session, _| {
                 (
                     session.origin,
                     platform_window::physical_cursor_position(),
                     session.entries.clone(),
                     session.page,
                     session.total_pages(),
+                    session.colors,
                 )
             });
         let hovered = origin
@@ -495,132 +595,135 @@ impl Render for WheelWindowView {
                 )
             })
             .flatten();
-        // 画布回调里要用的悬停/条目快照。
+        // 画布回调里要用的悬停/条目/配色快照。
         let canvas_hovered = hovered;
         let canvas_entries = entries.clone();
+        let canvas_colors = colors;
         let center = point(px(WHEEL_DIAMETER / 2.0), px(WHEEL_DIAMETER / 2.0));
+        // 跟随窗口材质时叠加主程序同款材质背景层（亚克力/模糊/背景图 + 不透明度遮罩）。
+        let material_background = crate::config_runtime::appearance_config(cx)
+            .wheel_appearance
+            .follow_window_material
+            .then(|| crate::window_material::background_element(_window, cx));
 
-        div()
-            .relative()
-            .size_full()
-            .child(
-                canvas(
-                    move |_, _, _| {},
-                    move |bounds, _, window, _| {
-                        // 画布原点在窗口左上角，扇区路径围绕画布中心绘制。
-                        let offset_x = bounds.origin.x;
-                        let offset_y = bounds.origin.y;
-                        for index in 0..WHEEL_SECTOR_COUNT {
-                            let filled = canvas_entries
-                                .get(index)
-                                .map(|entry| !entry.title.is_empty())
-                                .unwrap_or(false);
-                            let is_hovered = canvas_hovered == Some(index) && filled;
-                            let fill = if is_hovered {
-                                WHEEL_SECTOR_HOVER_FILL
-                            } else if filled {
-                                WHEEL_SECTOR_FILL
-                            } else {
-                                WHEEL_SECTOR_EMPTY_FILL
-                            };
-                            if let Some(mut sector) = ring_sector_path(
-                                center,
-                                WHEEL_SECTOR_INNER_RADIUS,
-                                WHEEL_SECTOR_OUTER_RADIUS,
-                                index,
-                            ) {
-                                // Path 坐标以路径自身 bounds 为基准，平移到画布位置。
-                                sector.bounds.origin = point(
-                                    sector.bounds.origin.x + offset_x,
-                                    sector.bounds.origin.y + offset_y,
-                                );
-                                window.paint_path(sector, rgba(fill));
-                            }
-                        }
-                    },
-                )
-                .absolute()
-                .size_full(),
-            )
-            .children(
-                entries
-                    .iter()
-                    .take(WHEEL_SECTOR_COUNT)
-                    .enumerate()
-                    .map(|(index, entry)| {
-                        let angle = sector_center_angle_deg(index);
-                        let rad = deg_to_rad(angle);
-                        // 与命中判定同约定：0°=正上方，顺时针。
-                        let label_x = center.x + px(WHEEL_LABEL_RADIUS * rad.sin())
-                            - px(WHEEL_LABEL_WIDTH / 2.0);
-                        let label_y = center.y
-                            - px(WHEEL_LABEL_RADIUS * rad.cos())
-                            - px(WHEEL_LABEL_HEIGHT / 2.0);
-                        let is_hovered = hovered == Some(index);
-                        let title_color = if is_hovered {
-                            gpui::rgb(0xFFFFFFu32)
+        let mut root = div().relative().size_full();
+        if let Some(background) = material_background {
+            root = root.child(background);
+        }
+        root = root.child(
+            canvas(
+                move |_, _, _| {},
+                move |bounds, _, window, _| {
+                    // 画布原点在窗口左上角，扇区路径围绕画布中心绘制。
+                    let offset_x = bounds.origin.x;
+                    let offset_y = bounds.origin.y;
+                    for index in 0..WHEEL_SECTOR_COUNT {
+                        let filled = canvas_entries
+                            .get(index)
+                            .map(|entry| !entry.title.is_empty())
+                            .unwrap_or(false);
+                        let is_hovered = canvas_hovered == Some(index) && filled;
+                        let fill = if is_hovered {
+                            canvas_colors.hover
+                        } else if filled {
+                            canvas_colors.sector
                         } else {
-                            gpui::rgb(0xEDEDF2u32)
+                            canvas_colors.empty
                         };
-                        div()
-                            .absolute()
-                            .left(label_x)
-                            .top(label_y)
-                            .w(px(WHEEL_LABEL_WIDTH))
-                            .h(px(WHEEL_LABEL_HEIGHT))
-                            .flex()
-                            .flex_col()
-                            .items_center()
-                            .justify_center()
-                            .gap_0p5()
-                            .child(
-                                div()
-                                    .max_w_full()
-                                    .text_size(px(12.0))
-                                    .font_weight(gpui::FontWeight::MEDIUM)
-                                    .text_color(title_color)
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .child(entry.title.clone()),
-                            )
-                            .child(
-                                div()
-                                    .max_w_full()
-                                    .text_size(px(10.0))
-                                    .text_color(if is_hovered {
-                                        gpui::rgb(0xE2E8FFu32)
-                                    } else {
-                                        gpui::rgb(0x9A9AA5u32)
-                                    })
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .child(entry.preview.clone()),
-                            )
-                    }),
+                        if let Some(mut sector) = ring_sector_path(
+                            center,
+                            WHEEL_SECTOR_INNER_RADIUS,
+                            WHEEL_SECTOR_OUTER_RADIUS,
+                            index,
+                        ) {
+                            // Path 坐标以路径自身 bounds 为基准，平移到画布位置。
+                            sector.bounds.origin = point(
+                                sector.bounds.origin.x + offset_x,
+                                sector.bounds.origin.y + offset_y,
+                            );
+                            window.paint_path(sector, rgba(fill));
+                        }
+                    }
+                },
             )
-            .child(
+            .absolute()
+            .size_full(),
+        );
+        root = root.children(entries.iter().take(WHEEL_SECTOR_COUNT).enumerate().map(
+            |(index, entry)| {
+                let angle = sector_center_angle_deg(index);
+                let rad = deg_to_rad(angle);
+                // 与命中判定同约定：0°=正上方，顺时针。
+                let label_x =
+                    center.x + px(WHEEL_LABEL_RADIUS * rad.sin()) - px(WHEEL_LABEL_WIDTH / 2.0);
+                let label_y =
+                    center.y - px(WHEEL_LABEL_RADIUS * rad.cos()) - px(WHEEL_LABEL_HEIGHT / 2.0);
+                let is_hovered = hovered == Some(index);
+                let title_color = if is_hovered {
+                    gpui::rgb(0xFFFFFFu32)
+                } else {
+                    gpui::rgb(0xEDEDF2u32)
+                };
                 div()
                     .absolute()
-                    .left(px(WHEEL_DIAMETER / 2.0 - WHEEL_CENTER_RADIUS))
-                    .top(px(WHEEL_DIAMETER / 2.0 - WHEEL_CENTER_RADIUS))
-                    .w(px(WHEEL_CENTER_RADIUS * 2.0))
-                    .h(px(WHEEL_CENTER_RADIUS * 2.0))
-                    .rounded_full()
-                    .bg(rgba(0x16161CCCu32))
-                    .border_1()
-                    .border_color(rgba(0x3A3A4699u32))
+                    .left(label_x)
+                    .top(label_y)
+                    .w(px(WHEEL_LABEL_WIDTH))
+                    .h(px(WHEEL_LABEL_HEIGHT))
                     .flex()
+                    .flex_col()
                     .items_center()
                     .justify_center()
+                    .gap_0p5()
                     .child(
                         div()
-                            .text_size(px(11.0))
-                            .text_color(gpui::rgb(0x8A8A95u32))
-                            .when(total_pages > 1, |this| {
-                                this.child(format!("{} / {}", page + 1, total_pages))
-                            }),
-                    ),
-            )
+                            .max_w_full()
+                            .text_size(px(12.0))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(title_color)
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .child(entry.title.clone()),
+                    )
+                    .child(
+                        div()
+                            .max_w_full()
+                            .text_size(px(10.0))
+                            .text_color(if is_hovered {
+                                gpui::rgb(0xE2E8FFu32)
+                            } else {
+                                gpui::rgb(0x9A9AA5u32)
+                            })
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .child(entry.preview.clone()),
+                    )
+            },
+        ));
+        root = root.child(
+            div()
+                .absolute()
+                .left(px(WHEEL_DIAMETER / 2.0 - WHEEL_CENTER_RADIUS))
+                .top(px(WHEEL_DIAMETER / 2.0 - WHEEL_CENTER_RADIUS))
+                .w(px(WHEEL_CENTER_RADIUS * 2.0))
+                .h(px(WHEEL_CENTER_RADIUS * 2.0))
+                .rounded_full()
+                .bg(rgba(colors.center))
+                .border_1()
+                .border_color(rgba(colors.center_border))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(gpui::rgb(0x8A8A95u32))
+                        .when(total_pages > 1, |this| {
+                            this.child(format!("{} / {}", page + 1, total_pages))
+                        }),
+                ),
+        );
+        root
     }
 }
 

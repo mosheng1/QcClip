@@ -916,6 +916,58 @@ pub enum WheelMouseButton {
     Forward,
 }
 
+/// 轮盘外观配置：跟随窗口材质或独立调色。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct WheelAppearanceConfig {
+    /// true 时沿用主窗口的窗口材质（亚克力/模糊/背景图/透明度）。
+    pub follow_window_material: bool,
+    /// 独立调色时的扇区底色（"RRGGBB" 或 "RRGGBBAA"）。
+    pub sector_color: String,
+    /// 独立调色时的悬停高亮色（"RRGGBBAA"）。
+    pub hover_color: String,
+    /// 独立调色时的中心盘颜色。
+    pub center_color: String,
+}
+
+impl Default for WheelAppearanceConfig {
+    fn default() -> Self {
+        Self {
+            follow_window_material: true,
+            sector_color: String::new(),
+            hover_color: String::new(),
+            center_color: String::new(),
+        }
+    }
+}
+
+impl WheelAppearanceConfig {
+    pub(crate) fn normalized(mut self) -> Self {
+        self.sector_color = normalize_hex_color(&self.sector_color);
+        self.hover_color = normalize_hex_color(&self.hover_color);
+        self.center_color = normalize_hex_color(&self.center_color);
+        self
+    }
+}
+
+/// 归一化用户输入的十六进制颜色：小写、补 #、非法值回退为空（空 = 用默认色）。
+pub fn normalize_wheel_color(value: &str) -> String {
+    normalize_hex_color(value)
+}
+
+fn normalize_hex_color(value: &str) -> String {
+    let value = value.trim().trim_start_matches('#').to_ascii_lowercase();
+    if !value.is_empty()
+        && value.len() <= 8
+        && value.chars().all(|c| c.is_ascii_hexdigit())
+        && (value.len() == 3 || value.len() == 6 || value.len() == 8)
+    {
+        value
+    } else {
+        String::new()
+    }
+}
+
 impl WheelMouseButton {
     pub const ALL: [Self; 2] = [Self::Back, Self::Forward];
 
@@ -1541,6 +1593,8 @@ pub struct AppearanceConfig {
     pub only_show_notes: bool,
     pub item_display: ItemDisplayConfig,
     pub preview_information: PreviewInformationConfig,
+    /// 收藏轮盘外观。
+    pub wheel_appearance: WheelAppearanceConfig,
 }
 
 impl Default for AppearanceConfig {
@@ -1567,6 +1621,7 @@ impl Default for AppearanceConfig {
             only_show_notes: false,
             item_display: ItemDisplayConfig::default(),
             preview_information: PreviewInformationConfig::default(),
+            wheel_appearance: WheelAppearanceConfig::default(),
         }
     }
 }
@@ -1865,6 +1920,7 @@ impl AppearanceConfig {
                 )
             })
         });
+        self.wheel_appearance = self.wheel_appearance.normalized();
         self
     }
 }

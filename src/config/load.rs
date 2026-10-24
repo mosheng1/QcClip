@@ -492,6 +492,13 @@ fn read_appearance(object: &Map<String, Value>, warnings: &mut Vec<String>) -> A
                 ),
             }
         }),
+        wheel_appearance: read_field(
+            object,
+            "wheelAppearance",
+            "appearance.wheelAppearance",
+            default.wheel_appearance,
+            warnings,
+        ),
     }
 }
 
