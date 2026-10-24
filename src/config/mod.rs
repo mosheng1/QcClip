@@ -928,8 +928,8 @@ impl WheelMouseButton {
 
     pub const fn label_key(self) -> &'static str {
         match self {
-            Self::Back => "settings.shortcuts.wheel.button.back",
-            Self::Forward => "settings.shortcuts.wheel.button.forward",
+            Self::Back => "settings.shortcuts.wheel_mouse.button.back",
+            Self::Forward => "settings.shortcuts.wheel_mouse.button.forward",
         }
     }
 }
