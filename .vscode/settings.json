@@ -1,0 +1,13 @@
+{
+    "rust-analyzer.linkedProjects": ["Cargo.toml"],
+    "rust-analyzer.check.command": "check",
+    "rust-analyzer.check.overrideCommand": {
+        "command": "cmd",
+        "args": ["/c", "C:\\Users\\18074\\build\\vscode_build.bat", "ra-check"],
+        "problemMatcher": "$rustc"
+    },
+    "editor.formatOnSave": true,
+    "files.watcherExclude": {
+        "**/target/**": true
+    }
+}

@@ -104,7 +104,7 @@ impl Drop for WheelClickSwallowGuard {
 }
 
 impl WheelPageListener {
-    /// 订阅原始输入的左/右键按下事件（true=左键，false=右键）。
+    /// 订阅原始输入的左/右键按下事件（true=下一页/右键，false=上一页/左键）。
     /// 只负责转发事件，消费逻辑由调用方决定。
     pub(crate) fn install() -> (Self, async_channel::Receiver<bool>) {
         #[cfg(target_os = "windows")]
@@ -112,10 +112,10 @@ impl WheelPageListener {
             let (sender, receiver) = async_channel::unbounded::<bool>();
             let subscription = raw_input::Listen::subscribe(move |event| match event {
                 raw_input::Event::MouseDown { button } => match button {
-                    raw_input::MouseButton::Left => {
+                    raw_input::MouseButton::Right => {
                         let _ = sender.try_send(true);
                     }
-                    raw_input::MouseButton::Right => {
+                    raw_input::MouseButton::Left => {
                         let _ = sender.try_send(false);
                     }
                     _ => {}

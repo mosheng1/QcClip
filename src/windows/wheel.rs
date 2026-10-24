@@ -294,10 +294,7 @@ pub(crate) fn open_wheel_window(cx: &mut App) -> bool {
     cx.set_global(WheelSession {
         // 判定圆心取窗口真实中心，而不是鼠标位置：窗口贴边时会被夹回工作区，
         // 用鼠标位置做圆心会导致扇区与视觉错位、贴边侧选不中。
-        origin: Some(point(
-            window_x + diameter / 2.0,
-            window_y + diameter / 2.0,
-        )),
+        origin: Some(point(window_x + diameter / 2.0, window_y + diameter / 2.0)),
         scale,
         entries: page.slots,
         total: page.total,
@@ -409,7 +406,7 @@ fn start_wheel_pointer_tracking(cx: &mut App) {
     .detach();
 }
 
-/// 轮盘打开期间的翻页：`forward` 为 true 表示向后翻一页（右键），false 向前翻（左键）。
+/// 轮盘打开期间的翻页：`forward` 为 true 表示下一页（右键），false 上一页（左键）。
 /// 无轮盘、单页或越界时为无操作。
 pub(crate) fn page_wheel(forward: bool, cx: &mut App) {
     let next = cx.update_global::<WheelSession, _>(|session, _| {
