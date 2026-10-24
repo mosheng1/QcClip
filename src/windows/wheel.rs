@@ -668,9 +668,25 @@ impl Render for WheelWindowView {
         // 画布回调里要用的悬停/条目/配色快照。
         let canvas_hovered = hovered;
         let canvas_entries = entries.clone();
-        // 亚克力/模糊由系统材质提供（与主窗口同一条链路），内容层不再叠 tint，
-        // 扇区保持原配色与不透明度，只让材质从扇区缝隙和半透明处透出。
-        let canvas_colors = colors;
+        // 系统亚克力已在 HWND 上生效，但扇区/中心盘若接近不透明就会把材质整块盖住
+        // （用户看到的"像贴图"）。材质模式下一律压低 alpha，让亚克力真正透出来：
+        // 扇区 ~55%、空槽 ~45%、悬停 ~80%、中心盘 ~55%。
+        let uses_system_material = matches!(
+            crate::window_material::supported_material(
+                crate::config_runtime::appearance_config(cx)
+                    .wheel_appearance
+                    .material
+            ),
+            crate::config::WindowMaterial::Acrylic | crate::config::WindowMaterial::Blur
+        );
+        let mut canvas_colors = colors;
+        if uses_system_material {
+            canvas_colors.sector = with_reduced_alpha(canvas_colors.sector, 0.55);
+            canvas_colors.empty = with_reduced_alpha(canvas_colors.empty, 0.45);
+            canvas_colors.hover = with_reduced_alpha(canvas_colors.hover, 0.80);
+            canvas_colors.center = with_reduced_alpha(canvas_colors.center, 0.55);
+            canvas_colors.center_border = with_reduced_alpha(canvas_colors.center_border, 0.60);
+        }
         let center = point(px(WHEEL_DIAMETER / 2.0), px(WHEEL_DIAMETER / 2.0));
 
         let mut root = div().relative().size_full();
