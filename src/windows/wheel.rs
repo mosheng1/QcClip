@@ -70,9 +70,10 @@ impl WheelColors {
                 colors.center = 0xFFFFFFE6;
                 colors.center_border = 0xC9C9D480;
             }
-            if let Some(color) = parse_hex_rgba(&wheel.sector_color, colors.sector) {
-                colors.sector = color;
-            }
+        }
+        // 用户自定义色在两种模式下都生效（跟随材质时同样允许覆盖扇区底色）。
+        if let Some(color) = parse_hex_rgba(&wheel.sector_color, colors.sector) {
+            colors.sector = color;
         }
         if let Some(color) = parse_hex_rgba(&wheel.hover_color, colors.hover) {
             colors.hover = color;
@@ -82,6 +83,12 @@ impl WheelColors {
         }
         colors
     }
+}
+
+/// 按比例压低 0xRRGGBBAA 的 Alpha 通道，用于材质模式下让背景透出来。
+fn with_reduced_alpha(color: u32, factor: f32) -> u32 {
+    let alpha = (color & 0xFF) as f32 * factor.clamp(0.0, 1.0);
+    ((color & 0xFFFFFF00) as u32) | (alpha.round() as u32 & 0xFF)
 }
 
 /// 解析 "RRGGBB"、"RRGGBBAA"、"RGB" 十六进制颜色为 0xRRGGBBAA。
@@ -230,9 +237,6 @@ pub(crate) fn open_wheel_window(cx: &mut App) -> bool {
     if page.slots.iter().filter(|entry| entry.item_id != 0).count() < 2 {
         return false;
     }
-    let follow_material = crate::config_runtime::appearance_config(cx)
-        .wheel_appearance
-        .follow_window_material;
     let Some(pointer) = platform_window::physical_cursor_position() else {
         return false;
     };
@@ -296,12 +300,6 @@ pub(crate) fn open_wheel_window(cx: &mut App) -> bool {
             cx.update_global::<WheelWindowService, _>(|service, _| {
                 service.window = Some(window);
             });
-            // 跟随窗口材质：把轮盘窗口注册进材质系统，得到亚克力/模糊/背景图效果。
-            if follow_material {
-                let _ = handle.update(cx, |_, window, cx| {
-                    crate::window_material::register_window(window, cx);
-                });
-            }
             // 初始定位到光标处。
             let _ = handle.update(cx, |view, window, cx| {
                 view.place_window(window, cx);
@@ -598,13 +596,33 @@ impl Render for WheelWindowView {
         // 画布回调里要用的悬停/条目/配色快照。
         let canvas_hovered = hovered;
         let canvas_entries = entries.clone();
-        let canvas_colors = colors;
-        let center = point(px(WHEEL_DIAMETER / 2.0), px(WHEEL_DIAMETER / 2.0));
-        // 跟随窗口材质时叠加主程序同款材质背景层（亚克力/模糊/背景图 + 不透明度遮罩）。
-        let material_background = crate::config_runtime::appearance_config(cx)
+        let follow_material = crate::config_runtime::appearance_config(cx)
             .wheel_appearance
-            .follow_window_material
-            .then(|| crate::window_material::background_element(_window, cx));
+            .follow_window_material;
+        // 跟随材质时降低扇区不透明度，让圆形裁剪内的材质背景透出来。
+        let mut canvas_colors = colors;
+        if follow_material {
+            canvas_colors.sector = with_reduced_alpha(colors.sector, 0.45);
+            canvas_colors.empty = with_reduced_alpha(colors.empty, 0.45);
+            canvas_colors.hover = with_reduced_alpha(colors.hover, 0.85);
+            canvas_colors.center = with_reduced_alpha(colors.center, 0.55);
+            canvas_colors.center_border = with_reduced_alpha(colors.center_border, 0.60);
+        }
+        let center = point(px(WHEEL_DIAMETER / 2.0), px(WHEEL_DIAMETER / 2.0));
+        // 跟随窗口材质时叠加主程序同款材质背景层（亚克力色调/模糊/背景图 + 不透明度遮罩），
+        // 并整体裁剪成圆形，避免材质溢出轮盘外沿形成方形区域。
+        let material_background = follow_material
+            .then(|| crate::window_material::background_element(_window, cx))
+            .map(|background| {
+                div()
+                    .absolute()
+                    .left_0()
+                    .top_0()
+                    .size(px(WHEEL_DIAMETER))
+                    .rounded_full()
+                    .overflow_hidden()
+                    .child(background)
+            });
 
         let mut root = div().relative().size_full();
         if let Some(background) = material_background {
