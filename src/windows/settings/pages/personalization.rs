@@ -828,47 +828,198 @@ impl SettingsWindowView {
                                         .child(wheel_follow_switch),
                                 ),
                             )
-                            .when(!appearance.wheel_appearance.follow_window_material, |this| {
-                                this.child(make_wheel_color_row(
-                                    "wheel-sector-color",
+                            // 颜色行始终显示：跟随材质时同样允许覆盖颜色，无需先关开关。
+                            .child(make_wheel_color_row(
+                                "wheel-sector-color",
+                                translator.translate(
+                                    "settings.personalization.wheel_appearance.sector_color",
+                                ),
+                                translator.translate(
+                                    "settings.personalization.wheel_appearance.sector_color_description",
+                                ),
+                                self.wheel_sector_color_input.clone(),
+                                appearance.wheel_appearance.sector_color.as_str(),
+                                |wheel| &mut wheel.sector_color,
+                                "轮盘扇区颜色",
+                            ))
+                            .child(make_wheel_color_row(
+                                "wheel-hover-color",
+                                translator.translate(
+                                    "settings.personalization.wheel_appearance.hover_color",
+                                ),
+                                translator.translate(
+                                    "settings.personalization.wheel_appearance.hover_color_description",
+                                ),
+                                self.wheel_hover_color_input.clone(),
+                                appearance.wheel_appearance.hover_color.as_str(),
+                                |wheel| &mut wheel.hover_color,
+                                "轮盘悬停颜色",
+                            ))
+                            .child(make_wheel_color_row(
+                                "wheel-center-color",
+                                translator.translate(
+                                    "settings.personalization.wheel_appearance.center_color",
+                                ),
+                                translator.translate(
+                                    "settings.personalization.wheel_appearance.center_color_description",
+                                ),
+                                self.wheel_center_color_input.clone(),
+                                appearance.wheel_appearance.center_color.as_str(),
+                                |wheel| &mut wheel.center_color,
+                                "轮盘中心颜色",
+                            ))
+                            .child(make_wheel_color_row(
+                                "wheel-title-color",
+                                translator.translate(
+                                    "settings.personalization.wheel_appearance.title_color",
+                                ),
+                                translator.translate(
+                                    "settings.personalization.wheel_appearance.title_color_description",
+                                ),
+                                self.wheel_title_color_input.clone(),
+                                appearance.wheel_appearance.title_color.as_str(),
+                                |wheel| &mut wheel.title_color,
+                                "轮盘标题颜色",
+                            ))
+                            .child(make_wheel_color_row(
+                                "wheel-preview-color",
+                                translator.translate(
+                                    "settings.personalization.wheel_appearance.preview_color",
+                                ),
+                                translator.translate(
+                                    "settings.personalization.wheel_appearance.preview_color_description",
+                                ),
+                                self.wheel_preview_color_input.clone(),
+                                appearance.wheel_appearance.preview_color.as_str(),
+                                |wheel| &mut wheel.preview_color,
+                                "轮盘预览颜色",
+                            ))
+                            .child(make_wheel_color_row(
+                                "wheel-page-color",
+                                translator.translate(
+                                    "settings.personalization.wheel_appearance.page_color",
+                                ),
+                                translator.translate(
+                                    "settings.personalization.wheel_appearance.page_color_description",
+                                ),
+                                self.wheel_page_color_input.clone(),
+                                appearance.wheel_appearance.page_color.as_str(),
+                                |wheel| &mut wheel.page_color,
+                                "轮盘页码颜色",
+                            ))
+                            // 轮盘字体：套用「应用字体」同款下拉控件。
+                            .child({
+                                let current_wheel_font = appearance
+                                    .wheel_appearance
+                                    .font_family
+                                    .clone()
+                                    .unwrap_or_default();
+                                let mut wheel_font_items = vec![DropdownItem::option(
+                                    DropdownItemId::new(""),
                                     translator.translate(
-                                        "settings.personalization.wheel_appearance.sector_color",
+                                        "settings.personalization.wheel_appearance.font_default",
                                     ),
-                                    translator.translate(
-                                        "settings.personalization.wheel_appearance.sector_color_description",
+                                )
+                                .selected(current_wheel_font.is_empty())];
+                                wheel_font_items.extend(
+                                    crate::ui::fonts::system_font_names(cx).iter().map(|family| {
+                                        DropdownItem::option(
+                                            DropdownItemId::new(family.clone()),
+                                            family.clone(),
+                                        )
+                                        .selected(*family == current_wheel_font)
+                                    }),
+                                );
+                                let font_row = settings_dropdown_with_font(
+                                    "settings-wheel-font-select",
+                                    current_wheel_font,
+                                    wheel_font_items,
+                                    Some(".SystemUIFont".into()),
+                                    {
+                                        let view = view.clone();
+                                        let save_error = save_error.clone();
+                                        move |id, cx| {
+                                            let family =
+                                                (!id.as_str().is_empty()).then(|| id.as_str().to_owned());
+                                            persist_appearance_change(
+                                                view.clone(),
+                                                "轮盘字体",
+                                                move |appearance| {
+                                                    appearance.wheel_appearance.font_family = family
+                                                },
+                                                save_error.clone(),
+                                                cx,
+                                            );
+                                        }
+                                    },
+                                    cx,
+                                );
+                                h_flex().w_full().gap_3().items_center()
+                                    .child(
+                                        div()
+                                            .w(ui_rem(96.0))
+                                            .flex_shrink_0()
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground)
+                                            .child(
+                                                translator.translate(
+                                                    "settings.personalization.wheel_appearance.font_family",
+                                                ),
+                                            ),
+                                    )
+                                    .child(div().flex_1().min_w_0().child(font_row))
+                            })
+                            // 字号滑条：标题 / 预览。
+                            .child(
+                                h_flex().w_full().gap_3().items_center()
+                                    .child(
+                                        div()
+                                            .w(ui_rem(96.0))
+                                            .flex_shrink_0()
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground)
+                                            .child(translator.translate(
+                                                "settings.personalization.wheel_appearance.title_font_size",
+                                            )),
+                                    )
+                                    .child(Slider::new(&self.wheel_title_size_slider).flex_1())
+                                    .child(
+                                        div()
+                                            .w(ui_rem(40.0))
+                                            .flex_shrink_0()
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground)
+                                            .child(format!(
+                                                "{}px",
+                                                appearance.wheel_appearance.title_font_size.round() as i32
+                                            )),
                                     ),
-                                    self.wheel_sector_color_input.clone(),
-                                    appearance.wheel_appearance.sector_color.as_str(),
-                                    |wheel| &mut wheel.sector_color,
-                                    "轮盘扇区颜色",
-                                ))
-                                .child(make_wheel_color_row(
-                                    "wheel-hover-color",
-                                    translator.translate(
-                                        "settings.personalization.wheel_appearance.hover_color",
+                            )
+                            .child(
+                                h_flex().w_full().gap_3().items_center()
+                                    .child(
+                                        div()
+                                            .w(ui_rem(96.0))
+                                            .flex_shrink_0()
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground)
+                                            .child(translator.translate(
+                                                "settings.personalization.wheel_appearance.preview_font_size",
+                                            )),
+                                    )
+                                    .child(Slider::new(&self.wheel_preview_size_slider).flex_1())
+                                    .child(
+                                        div()
+                                            .w(ui_rem(40.0))
+                                            .flex_shrink_0()
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground)
+                                            .child(format!(
+                                                "{}px",
+                                                appearance.wheel_appearance.preview_font_size.round() as i32
+                                            )),
                                     ),
-                                    translator.translate(
-                                        "settings.personalization.wheel_appearance.hover_color_description",
-                                    ),
-                                    self.wheel_hover_color_input.clone(),
-                                    appearance.wheel_appearance.hover_color.as_str(),
-                                    |wheel| &mut wheel.hover_color,
-                                    "轮盘悬停颜色",
-                                ))
-                                .child(make_wheel_color_row(
-                                    "wheel-center-color",
-                                    translator.translate(
-                                        "settings.personalization.wheel_appearance.center_color",
-                                    ),
-                                    translator.translate(
-                                        "settings.personalization.wheel_appearance.center_color_description",
-                                    ),
-                                    self.wheel_center_color_input.clone(),
-                                    appearance.wheel_appearance.center_color.as_str(),
-                                    |wheel| &mut wheel.center_color,
-                                    "轮盘中心颜色",
-                                ))
-                            }),
+                            ),
                     ),
             )
             .child(

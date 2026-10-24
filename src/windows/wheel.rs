@@ -33,13 +33,20 @@ const WHEEL_CENTER_FILL: u32 = 0x16161CCC;
 const WHEEL_CENTER_BORDER: u32 = 0x3A3A4699;
 
 /// 轮盘打开期间生效的外观快照。
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct WheelColors {
     sector: u32,
     hover: u32,
     empty: u32,
     center: u32,
     center_border: u32,
+    /// 标题/预览/页码文字颜色与字体设置。
+    title: u32,
+    preview: u32,
+    page: u32,
+    font_family: Option<gpui::SharedString>,
+    title_font_size: f32,
+    preview_font_size: f32,
 }
 
 impl Default for WheelColors {
@@ -50,28 +57,38 @@ impl Default for WheelColors {
             empty: WHEEL_SECTOR_EMPTY_FILL,
             center: WHEEL_CENTER_FILL,
             center_border: WHEEL_CENTER_BORDER,
+            title: 0xEDEDF2,
+            preview: 0x9A9AA5,
+            page: 0xE8E8ED,
+            font_family: None,
+            title_font_size: crate::config::WHEEL_TITLE_FONT_SIZE_DEFAULT,
+            preview_font_size: crate::config::WHEEL_PREVIEW_FONT_SIZE_DEFAULT,
         }
     }
 }
 
 impl WheelColors {
-    /// 从外观配置推导：跟随材质时按明暗模式选默认色，独立调色时覆盖对应项。
+    /// 从外观配置推导：默认色按亮暗模式选择，用户配置覆盖非空项；文字/字体同样可覆盖。
     fn resolve(cx: &App) -> Self {
         let appearance = crate::config_runtime::appearance_config(cx);
         let wheel = &appearance.wheel_appearance;
         let mut colors = Self::default();
-        if !wheel.follow_window_material {
-            // 独立调色：按亮暗模式取一组可读默认，再用用户色覆盖非空项。
-            let dark = gpui_component::Theme::global(cx).mode.is_dark();
-            if !dark {
-                colors.sector = 0xFFFFFFD9;
-                colors.hover = 0x3D6BFFF2;
-                colors.empty = 0xF2F2F780;
-                colors.center = 0xFFFFFFE6;
-                colors.center_border = 0xC9C9D480;
-            }
+        let dark = gpui_component::Theme::global(cx).mode.is_dark();
+        if !dark {
+            colors.sector = 0xFFFFFFD9;
+            colors.hover = 0x3D6BFFF2;
+            colors.empty = 0xF2F2F780;
+            colors.center = 0xFFFFFFE6;
+            colors.center_border = 0xC9C9D480;
+            // 亮色模式下文字换深色系。
+            colors.title = 0x1F1F24;
+            colors.preview = 0x5A5A66;
+            colors.page = 0x4A4A55;
         }
-        // 用户自定义色在两种模式下都生效（跟随材质时同样允许覆盖扇区底色）。
+        if !dark && !wheel.follow_window_material {
+            // 亮色独立模式预览色略深。
+            colors.preview = 0x5A5A66;
+        }
         if let Some(color) = parse_hex_rgba(&wheel.sector_color, colors.sector) {
             colors.sector = color;
         }
@@ -81,6 +98,21 @@ impl WheelColors {
         if let Some(color) = parse_hex_rgba(&wheel.center_color, colors.center) {
             colors.center = color;
         }
+        if let Some(color) = parse_hex_rgba(&wheel.title_color, colors.title) {
+            colors.title = color;
+        }
+        if let Some(color) = parse_hex_rgba(&wheel.preview_color, colors.preview) {
+            colors.preview = color;
+        }
+        if let Some(color) = parse_hex_rgba(&wheel.page_color, colors.page) {
+            colors.page = color;
+        }
+        colors.font_family = wheel
+            .font_family
+            .as_ref()
+            .map(|family| gpui::SharedString::from(family.clone()));
+        colors.title_font_size = wheel.title_font_size;
+        colors.preview_font_size = wheel.preview_font_size;
         colors
     }
 }
@@ -581,7 +613,7 @@ impl Render for WheelWindowView {
                     session.entries.clone(),
                     session.page,
                     session.total_pages(),
-                    session.colors,
+                    session.colors.clone(),
                 )
             });
         let hovered = origin
@@ -602,9 +634,9 @@ impl Render for WheelWindowView {
         // 跟随材质时降低扇区不透明度，让圆形裁剪内的材质背景透出来。
         let mut canvas_colors = colors;
         if follow_material {
-            canvas_colors.sector = with_reduced_alpha(colors.sector, 0.45);
-            canvas_colors.empty = with_reduced_alpha(colors.empty, 0.45);
-            canvas_colors.hover = with_reduced_alpha(colors.hover, 0.85);
+            canvas_colors.sector = with_reduced_alpha(canvas_colors.sector, 0.45);
+            canvas_colors.empty = with_reduced_alpha(canvas_colors.empty, 0.45);
+            canvas_colors.hover = with_reduced_alpha(canvas_colors.hover, 0.85);
             // 中心盘保持较实但提亮，避免深色材质上一块死黑；文字用深色保证对比。
             canvas_colors.center = 0x2E2E38E0;
             canvas_colors.center_border = 0x6E6E7EB0;
@@ -678,26 +710,43 @@ impl Render for WheelWindowView {
                 let label_y =
                     center.y - px(WHEEL_LABEL_RADIUS * rad.cos()) - px(WHEEL_LABEL_HEIGHT / 2.0);
                 let is_hovered = hovered == Some(index);
-                // 材质背景上小字辨识度差：加大字号并提升对比度。
-                let (title_size, preview_size, title_color, preview_color) = if follow_material {
-                    (
-                        px(13.0),
-                        px(11.0),
-                        gpui::rgb(0xFFFFFFFF),
-                        gpui::rgb(0xC8CDDCFF),
-                    )
+                // 文字颜色/字号/字体全部读配置快照；材质模式自动提亮防止半透明背景糊字。
+                let title_color = if follow_material && is_hovered {
+                    0xFFFFFFFF
+                } else if follow_material {
+                    lighten_for_material(canvas_colors.title)
                 } else {
-                    let title = if is_hovered {
-                        gpui::rgb(0xFFFFFFu32)
-                    } else {
-                        gpui::rgb(0xEDEDF2u32)
-                    };
-                    (
-                        px(12.0),
-                        px(10.0),
-                        title,
-                        gpui::rgb(if is_hovered { 0xE2E8FFu32 } else { 0x9A9AA5u32 }),
-                    )
+                    canvas_colors.title
+                };
+                let preview_color = if follow_material {
+                    lighten_for_material(canvas_colors.preview)
+                } else {
+                    canvas_colors.preview
+                };
+                let title = div()
+                    .max_w_full()
+                    .text_size(px(canvas_colors.title_font_size))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(gpui::rgb(title_color))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .child(entry.title.clone());
+                let title = if let Some(family) = &canvas_colors.font_family {
+                    title.font_family(family.clone())
+                } else {
+                    title
+                };
+                let preview = div()
+                    .max_w_full()
+                    .text_size(px(canvas_colors.preview_font_size))
+                    .text_color(gpui::rgb(preview_color))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .child(entry.preview.clone());
+                let preview = if let Some(family) = &canvas_colors.font_family {
+                    preview.font_family(family.clone())
+                } else {
+                    preview
                 };
                 div()
                     .absolute()
@@ -710,27 +759,21 @@ impl Render for WheelWindowView {
                     .items_center()
                     .justify_center()
                     .gap_0p5()
-                    .child(
-                        div()
-                            .max_w_full()
-                            .text_size(title_size)
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(title_color)
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .child(entry.title.clone()),
-                    )
-                    .child(
-                        div()
-                            .max_w_full()
-                            .text_size(preview_size)
-                            .text_color(preview_color)
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .child(entry.preview.clone()),
-                    )
+                    .child(title)
+                    .child(preview)
             },
         ));
+        let page_label = div()
+            .text_size(px(11.0))
+            .text_color(gpui::rgb(canvas_colors.page))
+            .when(total_pages > 1, |this| {
+                this.child(format!("{} / {}", page + 1, total_pages))
+            });
+        let page_label = if let Some(family) = &canvas_colors.font_family {
+            page_label.font_family(family.clone())
+        } else {
+            page_label
+        };
         root = root.child(
             div()
                 .absolute()
@@ -745,17 +788,20 @@ impl Render for WheelWindowView {
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(
-                    div()
-                        .text_size(px(11.0))
-                        .text_color(gpui::rgb(0xE8E8EDu32))
-                        .when(total_pages > 1, |this| {
-                            this.child(format!("{} / {}", page + 1, total_pages))
-                        }),
-                ),
+                .child(page_label),
         );
         root
     }
+}
+
+/// 材质半透明背景上把文字色向白色提亮一档，保证可读性。
+fn lighten_for_material(color: u32) -> u32 {
+    let r = (color >> 24) & 0xFF;
+    let g = (color >> 16) & 0xFF;
+    let b = (color >> 8) & 0xFF;
+    let a = color & 0xFF;
+    let mix = |channel: u32| -> u32 { channel + ((255 - channel) * 45 / 100) };
+    (mix(r) << 24) | (mix(g) << 16) | (mix(b) << 8) | a
 }
 
 fn deg_to_rad(deg: f32) -> f32 {

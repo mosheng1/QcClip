@@ -1092,6 +1092,11 @@ struct SettingsWindowView {
     wheel_sector_color_input: Entity<InputState>,
     wheel_hover_color_input: Entity<InputState>,
     wheel_center_color_input: Entity<InputState>,
+    wheel_title_color_input: Entity<InputState>,
+    wheel_preview_color_input: Entity<InputState>,
+    wheel_page_color_input: Entity<InputState>,
+    wheel_title_size_slider: Entity<SliderState>,
+    wheel_preview_size_slider: Entity<SliderState>,
     clipboard_formats_expanded: bool,
     search_engine_url_input: Entity<InputState>,
     /// 待添加引擎已选择的图标本地路径；为空则用内置品牌图标或通用图标。
@@ -1117,6 +1122,11 @@ struct SettingsWindowView {
     _wheel_sector_color_subscription: Subscription,
     _wheel_hover_color_subscription: Subscription,
     _wheel_center_color_subscription: Subscription,
+    _wheel_title_color_subscription: Subscription,
+    _wheel_preview_color_subscription: Subscription,
+    _wheel_page_color_subscription: Subscription,
+    _wheel_title_size_subscription: Subscription,
+    _wheel_preview_size_subscription: Subscription,
     _shortcut_recording_blur_subscription: Subscription,
     _settings_search_subscription: Subscription,
 }
@@ -1618,6 +1628,139 @@ impl SettingsWindowView {
                 );
             },
         );
+        // 文字三色输入（标题/预览/页码）。
+        let wheel_title_color_input = cx.new(|cx| {
+            InputState::new(window, cx).default_value(wheel_appearance.title_color.clone())
+        });
+        let wheel_preview_color_input = cx.new(|cx| {
+            InputState::new(window, cx).default_value(wheel_appearance.preview_color.clone())
+        });
+        let wheel_page_color_input = cx.new(|cx| {
+            InputState::new(window, cx).default_value(wheel_appearance.page_color.clone())
+        });
+        let title_input_for_save = wheel_title_color_input.clone();
+        let title_save_error = wheel_color_save_error.clone();
+        let wheel_title_subscription = cx.subscribe_in(
+            &title_input_for_save,
+            window,
+            move |view, input, event: &InputEvent, _window, cx| {
+                if !matches!(event, InputEvent::PressEnter { .. }) {
+                    return;
+                }
+                let raw = input.read(cx).value().to_string();
+                save_wheel_color(
+                    view,
+                    raw,
+                    |wheel| &mut wheel.title_color,
+                    "轮盘标题颜色",
+                    title_save_error.clone(),
+                    cx,
+                );
+            },
+        );
+        let preview_input_for_save = wheel_preview_color_input.clone();
+        let preview_save_error = wheel_color_save_error.clone();
+        let wheel_preview_subscription = cx.subscribe_in(
+            &preview_input_for_save,
+            window,
+            move |view, input, event: &InputEvent, _window, cx| {
+                if !matches!(event, InputEvent::PressEnter { .. }) {
+                    return;
+                }
+                let raw = input.read(cx).value().to_string();
+                save_wheel_color(
+                    view,
+                    raw,
+                    |wheel| &mut wheel.preview_color,
+                    "轮盘预览颜色",
+                    preview_save_error.clone(),
+                    cx,
+                );
+            },
+        );
+        let page_input_for_save = wheel_page_color_input.clone();
+        let page_save_error = wheel_color_save_error.clone();
+        let wheel_page_subscription = cx.subscribe_in(
+            &page_input_for_save,
+            window,
+            move |view, input, event: &InputEvent, _window, cx| {
+                if !matches!(event, InputEvent::PressEnter { .. }) {
+                    return;
+                }
+                let raw = input.read(cx).value().to_string();
+                save_wheel_color(
+                    view,
+                    raw,
+                    |wheel| &mut wheel.page_color,
+                    "轮盘页码颜色",
+                    page_save_error.clone(),
+                    cx,
+                );
+            },
+        );
+        // 字号滑条（标题 10~24 / 预览 8~20，步进 1）。
+        let wheel_title_size_slider = cx.new(|_| {
+            SliderState::new()
+                .min(crate::config::WHEEL_TITLE_FONT_SIZE_MIN)
+                .max(crate::config::WHEEL_TITLE_FONT_SIZE_MAX)
+                .step(1.0)
+                .default_value(wheel_appearance.title_font_size)
+        });
+        let title_size_save_error = wheel_color_save_error.clone();
+        let wheel_title_size_subscription = cx.subscribe_in(
+            &wheel_title_size_slider,
+            window,
+            move |_view, _slider, event: &SliderEvent, _window, cx| {
+                let SliderEvent::Change(value) = event else {
+                    return;
+                };
+                let size = value.end().round().clamp(
+                    crate::config::WHEEL_TITLE_FONT_SIZE_MIN,
+                    crate::config::WHEEL_TITLE_FONT_SIZE_MAX,
+                );
+                let mut appearance = config_runtime::appearance_config(cx);
+                if (appearance.wheel_appearance.title_font_size - size).abs() < 0.05 {
+                    return;
+                }
+                appearance.wheel_appearance.title_font_size = size;
+                if let Err(error) = config_runtime::set_appearance_config(appearance, cx) {
+                    tracing::error!("保存轮盘标题字号失败：{error}");
+                    let _ = &title_size_save_error;
+                }
+                cx.notify();
+            },
+        );
+        let wheel_preview_size_slider = cx.new(|_| {
+            SliderState::new()
+                .min(crate::config::WHEEL_PREVIEW_FONT_SIZE_MIN)
+                .max(crate::config::WHEEL_PREVIEW_FONT_SIZE_MAX)
+                .step(1.0)
+                .default_value(wheel_appearance.preview_font_size)
+        });
+        let preview_size_save_error = wheel_color_save_error.clone();
+        let wheel_preview_size_subscription = cx.subscribe_in(
+            &wheel_preview_size_slider,
+            window,
+            move |_view, _slider, event: &SliderEvent, _window, cx| {
+                let SliderEvent::Change(value) = event else {
+                    return;
+                };
+                let size = value.end().round().clamp(
+                    crate::config::WHEEL_PREVIEW_FONT_SIZE_MIN,
+                    crate::config::WHEEL_PREVIEW_FONT_SIZE_MAX,
+                );
+                let mut appearance = config_runtime::appearance_config(cx);
+                if (appearance.wheel_appearance.preview_font_size - size).abs() < 0.05 {
+                    return;
+                }
+                appearance.wheel_appearance.preview_font_size = size;
+                if let Err(error) = config_runtime::set_appearance_config(appearance, cx) {
+                    tracing::error!("保存轮盘预览字号失败：{error}");
+                    let _ = &preview_size_save_error;
+                }
+                cx.notify();
+            },
+        );
         let recording_focus_handle = cx.focus_handle();
         let search_results_scroll_handle = ScrollHandle::new();
         let shortcut_scroll_handle = ScrollHandle::new();
@@ -1719,6 +1862,11 @@ impl SettingsWindowView {
             wheel_sector_color_input,
             wheel_hover_color_input,
             wheel_center_color_input,
+            wheel_title_color_input,
+            wheel_preview_color_input,
+            wheel_page_color_input,
+            wheel_title_size_slider,
+            wheel_preview_size_slider,
             clipboard_formats_expanded: false,
             search_engine_url_input,
             pending_search_engine_icon: None,
@@ -1739,6 +1887,11 @@ impl SettingsWindowView {
             _wheel_sector_color_subscription: wheel_sector_subscription,
             _wheel_hover_color_subscription: wheel_hover_subscription,
             _wheel_center_color_subscription: wheel_center_subscription,
+            _wheel_title_color_subscription: wheel_title_subscription,
+            _wheel_preview_color_subscription: wheel_preview_subscription,
+            _wheel_page_color_subscription: wheel_page_subscription,
+            _wheel_title_size_subscription: wheel_title_size_subscription,
+            _wheel_preview_size_subscription: wheel_preview_size_subscription,
             _shortcut_recording_blur_subscription: shortcut_recording_blur_subscription,
             _settings_search_subscription: settings_search_subscription,
         }
@@ -1864,6 +2017,9 @@ impl SettingsWindowView {
             (&self.wheel_sector_color_input, wheel.sector_color),
             (&self.wheel_hover_color_input, wheel.hover_color),
             (&self.wheel_center_color_input, wheel.center_color),
+            (&self.wheel_title_color_input, wheel.title_color),
+            (&self.wheel_preview_color_input, wheel.preview_color),
+            (&self.wheel_page_color_input, wheel.page_color),
         ] {
             input.update(cx, |state, cx| {
                 if state.value().as_ref() != value.as_str() {
@@ -1871,6 +2027,19 @@ impl SettingsWindowView {
                 }
             });
         }
+        // 字号滑条同步。
+        let title_size = wheel_title_size_for_sync(cx);
+        self.wheel_title_size_slider.update(cx, |slider, cx| {
+            if slider.value() != SliderValue::Single(title_size) {
+                slider.set_value(title_size, window, cx);
+            }
+        });
+        let preview_size = wheel_preview_size_for_sync(cx);
+        self.wheel_preview_size_slider.update(cx, |slider, cx| {
+            if slider.value() != SliderValue::Single(preview_size) {
+                slider.set_value(preview_size, window, cx);
+            }
+        });
     }
 
     pub(crate) fn refresh_application_filter_apps(&mut self, cx: &mut Context<Self>) {
@@ -2002,6 +2171,29 @@ impl SettingsWindowView {
 
 fn optional_limit_text(value: Option<u32>) -> String {
     value.map(|value| value.to_string()).unwrap_or_default()
+}
+
+/// 轮盘字号滑条同步用的当前配置值（异常时回退默认）。
+fn wheel_title_size_for_sync(cx: &gpui::App) -> f32 {
+    let size = config_runtime::appearance_config(cx)
+        .wheel_appearance
+        .title_font_size;
+    if size.is_finite() {
+        size
+    } else {
+        crate::config::WHEEL_TITLE_FONT_SIZE_DEFAULT
+    }
+}
+
+fn wheel_preview_size_for_sync(cx: &gpui::App) -> f32 {
+    let size = config_runtime::appearance_config(cx)
+        .wheel_appearance
+        .preview_font_size;
+    if size.is_finite() {
+        size
+    } else {
+        crate::config::WHEEL_PREVIEW_FONT_SIZE_DEFAULT
+    }
 }
 
 pub(in crate::windows::settings) fn parse_optional_limit(value: &str) -> Option<Option<u32>> {

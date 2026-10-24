@@ -916,18 +916,30 @@ pub enum WheelMouseButton {
     Forward,
 }
 
-/// 轮盘外观配置：跟随窗口材质或独立调色。
+/// 轮盘外观配置：跟随窗口材质或独立调色，文字颜色/字体/字号可自定义。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct WheelAppearanceConfig {
     /// true 时沿用主窗口的窗口材质（亚克力/模糊/背景图/透明度）。
     pub follow_window_material: bool,
-    /// 独立调色时的扇区底色（"RRGGBB" 或 "RRGGBBAA"）。
+    /// 扇区底色（"RRGGBB" 或 "RRGGBBAA"）。
     pub sector_color: String,
-    /// 独立调色时的悬停高亮色（"RRGGBBAA"）。
+    /// 悬停高亮色（"RRGGBBAA"）。
     pub hover_color: String,
-    /// 独立调色时的中心盘颜色。
+    /// 中心盘颜色。
     pub center_color: String,
+    /// 标题文字颜色（空 = 跟随亮暗模式默认）。
+    pub title_color: String,
+    /// 预览文字颜色（空 = 默认）。
+    pub preview_color: String,
+    /// 中心盘页码文字颜色（空 = 默认）。
+    pub page_color: String,
+    /// 自定义字体族；None 时用应用字体。
+    pub font_family: Option<String>,
+    /// 标题字号 px（10~24）。
+    pub title_font_size: f32,
+    /// 预览字号 px（8~20）。
+    pub preview_font_size: f32,
 }
 
 impl Default for WheelAppearanceConfig {
@@ -937,15 +949,47 @@ impl Default for WheelAppearanceConfig {
             sector_color: String::new(),
             hover_color: String::new(),
             center_color: String::new(),
+            title_color: String::new(),
+            preview_color: String::new(),
+            page_color: String::new(),
+            font_family: None,
+            title_font_size: WHEEL_TITLE_FONT_SIZE_DEFAULT,
+            preview_font_size: WHEEL_PREVIEW_FONT_SIZE_DEFAULT,
         }
     }
 }
+
+pub const WHEEL_TITLE_FONT_SIZE_DEFAULT: f32 = 12.0;
+pub const WHEEL_PREVIEW_FONT_SIZE_DEFAULT: f32 = 10.0;
+pub const WHEEL_TITLE_FONT_SIZE_MIN: f32 = 10.0;
+pub const WHEEL_TITLE_FONT_SIZE_MAX: f32 = 24.0;
+pub const WHEEL_PREVIEW_FONT_SIZE_MIN: f32 = 8.0;
+pub const WHEEL_PREVIEW_FONT_SIZE_MAX: f32 = 20.0;
 
 impl WheelAppearanceConfig {
     pub(crate) fn normalized(mut self) -> Self {
         self.sector_color = normalize_hex_color(&self.sector_color);
         self.hover_color = normalize_hex_color(&self.hover_color);
         self.center_color = normalize_hex_color(&self.center_color);
+        self.title_color = normalize_hex_color(&self.title_color);
+        self.preview_color = normalize_hex_color(&self.preview_color);
+        self.page_color = normalize_hex_color(&self.page_color);
+        self.font_family = self.font_family.and_then(|family| {
+            let family = family.trim();
+            (!family.is_empty()).then(|| family.to_owned())
+        });
+        self.title_font_size = if self.title_font_size.is_finite() {
+            self.title_font_size
+                .clamp(WHEEL_TITLE_FONT_SIZE_MIN, WHEEL_TITLE_FONT_SIZE_MAX)
+        } else {
+            WHEEL_TITLE_FONT_SIZE_DEFAULT
+        };
+        self.preview_font_size = if self.preview_font_size.is_finite() {
+            self.preview_font_size
+                .clamp(WHEEL_PREVIEW_FONT_SIZE_MIN, WHEEL_PREVIEW_FONT_SIZE_MAX)
+        } else {
+            WHEEL_PREVIEW_FONT_SIZE_DEFAULT
+        };
         self
     }
 }
