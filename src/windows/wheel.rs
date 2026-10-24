@@ -280,6 +280,16 @@ pub(crate) fn open_wheel_window(cx: &mut App) -> bool {
         .map(|display| display.scale_factor)
         .unwrap_or(1.0)
         .max(1.0);
+    // 先算出窗口最终物理位置（可能被工作区夹取，不等同于光标位置），
+    // 截图必须按这个位置取，否则模糊底图会与轮盘错位、取到旁边的内容。
+    let diameter = WHEEL_DIAMETER * scale;
+    let (window_x, window_y) = match display.map(|display| display.bounds) {
+        Some(bounds) => {
+            let margin = 8.0 * scale;
+            centered_overlay_origin(pointer, diameter, diameter, margin, bounds)
+        }
+        None => (pointer.x - diameter / 2.0, pointer.y - diameter / 2.0),
+    };
 
     cx.set_global(WheelSession {
         origin: Some(pointer),
@@ -290,7 +300,7 @@ pub(crate) fn open_wheel_window(cx: &mut App) -> bool {
         _page_listener: None,
         _click_guard: None,
         colors: WheelColors::resolve(cx),
-        backdrop: capture_wheel_backdrop(pointer, scale),
+        backdrop: capture_wheel_backdrop(window_x, window_y, diameter),
     });
     // 轮盘存续期间监听左/右键翻页 + 拦截点击穿透；窗口关闭（Session 清理）后任务自动退出。
     let (page_listener, page_receiver) = crate::platform::input::WheelPageListener::install();
@@ -312,19 +322,10 @@ pub(crate) fn open_wheel_window(cx: &mut App) -> bool {
     })
     .detach();
 
-    let diameter = WHEEL_DIAMETER * scale;
-    let (x, y) = match display.map(|display| display.bounds) {
-        Some(bounds) => {
-            let margin = 8.0 * scale;
-            centered_overlay_origin(pointer, diameter, diameter, margin, bounds)
-        }
-        None => (pointer.x - diameter / 2.0, pointer.y - diameter / 2.0),
-    };
-
     let result = platform_window::open_borderless_overlay(
         cx,
         Bounds {
-            origin: point(px(x / scale), px(y / scale)),
+            origin: point(px(window_x / scale), px(window_y / scale)),
             size: size(px(WHEEL_DIAMETER), px(WHEEL_DIAMETER)),
         },
         display.map(|display| display.display_id),
@@ -500,21 +501,20 @@ struct WheelPage {
     total: usize,
 }
 
-/// 在轮盘窗口出现前截取光标为中心的方形屏幕区域，作为亚克力模糊底图。
-/// 失败时返回 None（轮盘退化为纯色半透明圆盘，不影响功能）。
+/// 在轮盘窗口出现前，按窗口最终物理位置截取方形屏幕区域，作为模糊底图。
+/// 必须用窗口位置而不是光标位置：窗口会被工作区夹取，两者可能不一致。
+/// 失败时返回 None（轮盘退化为半透明圆盘，不影响功能）。
 fn capture_wheel_backdrop(
-    pointer: Point<f32>,
-    scale: f32,
+    window_x: f32,
+    window_y: f32,
+    diameter: f32,
 ) -> Option<std::sync::Arc<gpui::RenderImage>> {
-    let diameter = WHEEL_DIAMETER * scale;
-    let half = diameter / 2.0;
-    let left = (pointer.x - half).round().max(0.0);
-    let top = (pointer.y - half).round().max(0.0);
-    // 截取尺寸按物理像素，最多 1:1，避免超大屏时内存爆炸。
+    // 截取尺寸按物理像素，最多 1024，避免超大屏时内存爆炸。
     let side = diameter.round().clamp(16.0, 1024.0) as u32;
-    let captured = crate::platform::window::capture_screen_region(left, top, side, side).ok()?;
-    let mut rgba = captured;
-    // GPUI 的 RenderImage 期望 RGBA 数据，A 通道在 GDI 截屏里可能是 0，统一补成不透明。
+    let left = window_x.round().max(0.0);
+    let top = window_y.round().max(0.0);
+    let mut rgba = crate::platform::window::capture_screen_region(left, top, side, side).ok()?;
+    // GDI 截屏的 alpha 通道不可靠，统一补成不透明。
     for pixel in rgba.pixels_mut() {
         pixel.0[3] = 255;
     }

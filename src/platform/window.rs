@@ -607,14 +607,16 @@ pub(crate) fn capture_screen_region(
             info.bmiHeader = BITMAPINFOHEADER {
                 biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
                 biWidth: width as i32,
-                // 负高度表示自上而下的行序，和图像内存布局一致。
-                biHeight: -(height as i32),
+                // 正高度 = GDI 标准的 bottom-up 行序（负高度在部分驱动上不生效，
+                // 会拿到翻转图像，表现为模糊底图上下对称）。
+                biHeight: height as i32,
                 biPlanes: 1,
                 biBitCount: 32,
                 biCompression: BI_RGB.0,
                 ..Default::default()
             };
-            let mut buffer = vec![0u8; (width as usize) * (height as usize) * 4];
+            let stride = (width as usize) * 4;
+            let mut buffer = vec![0u8; stride * (height as usize)];
             let lines = windows::Win32::Graphics::Gdi::GetDIBits(
                 memory_dc,
                 bitmap,
@@ -625,7 +627,15 @@ pub(crate) fn capture_screen_region(
                 DIB_RGB_COLORS,
             );
             if lines > 0 {
-                // GDI 给出 BGRA，转成 RGBA 供 GPUI 使用。
+                // 1) bottom-up → top-down 逐行翻转。
+                for row in 0..(height as usize / 2) {
+                    let top = row * stride;
+                    let bottom = (height as usize - 1 - row) * stride;
+                    for offset in 0..stride {
+                        buffer.swap(top + offset, bottom + offset);
+                    }
+                }
+                // 2) GDI 的 32bpp 是 BGRA，转成 RGBA 供 GPUI 使用。
                 for pixel in buffer.chunks_exact_mut(4) {
                     pixel.swap(0, 2);
                 }
