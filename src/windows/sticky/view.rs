@@ -1141,7 +1141,7 @@ impl StickyNote {
                 cx.listener(|this, _, _, _| this.header_drag_start = None),
             )
             .on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
-                if event.click_count() >= 2 {
+                if is_collapse_double_click(event) {
                     this.toggle_collapsed(window, cx);
                 }
             }))
@@ -1208,7 +1208,7 @@ impl StickyNote {
                 cx.listener(|this, _, _, _| this.header_drag_start = None),
             )
             .on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
-                if event.click_count() >= 2 {
+                if is_collapse_double_click(event) {
                     this.toggle_collapsed(window, cx);
                 }
             }))
@@ -2172,6 +2172,11 @@ fn header_button(
             if active { paper.accent } else { paper.muted },
         ))
         .into_any_element()
+}
+
+fn is_collapse_double_click(event: &ClickEvent) -> bool {
+    let count = event.click_count();
+    count >= 2 && count % 2 == 0
 }
 
 fn lock_resize(window: &Window, locked: bool) {
