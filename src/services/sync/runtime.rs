@@ -3,7 +3,7 @@ use std::{
     io,
     net::{SocketAddr, TcpListener, TcpStream, UdpSocket},
     sync::{
-        Arc, Mutex, RwLock,
+        Arc, Condvar, Mutex, RwLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread,
@@ -104,6 +104,31 @@ struct TestQueues {
     incoming: [async_channel::Receiver<DavJob>; 2],
 }
 
+/// 后台线程的唤醒信号。计数器避免在检查空闲与开始等待之间错过唤醒。
+#[derive(Default)]
+struct Wake {
+    count: Mutex<u64>,
+    signal: Condvar,
+}
+impl Wake {
+    fn seen(&self) -> u64 {
+        *self.count.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    fn wake(&self) {
+        *self.count.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+        self.signal.notify_all();
+    }
+    /// 活跃时按原间隔轮询；空闲时一直阻塞到配置变更、开始配对或退出时被唤醒，关闭同步后不留后台任务。
+    fn pause(&self, seen: u64, idle: bool, interval: Duration) {
+        if !idle {
+            thread::sleep(interval);
+            return;
+        }
+        let count = self.count.lock().unwrap_or_else(|e| e.into_inner());
+        drop(self.signal.wait_while(count, |count| *count == seen));
+    }
+}
+
 type ClipboardWriter =
     Box<dyn Fn(&Database, &RawBlobStore, i64) -> std::result::Result<(), String> + Send + Sync>;
 
@@ -138,6 +163,7 @@ pub struct Runtime {
     dav_poll: Mutex<()>,
     next_pull: Mutex<Instant>,
     dav_traffic: Arc<webdav::Traffic>,
+    wake: Arc<Wake>,
 }
 
 impl SyncService {
@@ -165,6 +191,7 @@ impl SyncService {
             cx.on_app_quit(move |_| {
                 if let Some(runtime) = weak.upgrade() {
                     runtime.stop.store(true, Ordering::Release);
+                    runtime.wake.wake();
                 }
                 async {}
             })
@@ -303,6 +330,7 @@ impl Runtime {
             dav_poll: Mutex::new(()),
             next_pull: Mutex::new(Instant::now()),
             dav_traffic: Arc::new(webdav::Traffic::default()),
+            wake: Arc::default(),
         }
     }
     fn dav_client(&self, config: &super::config::DavConfig) -> Result<webdav::Client> {
@@ -397,6 +425,9 @@ impl Runtime {
         let invitation = Invitation::create(&client, config.profile)?;
         let status = invitation.status(None)?;
         *active = Some((invitation, config.dav));
+        drop(active);
+        // 唤醒 WebDAV 线程，确保连接码过期后能被清理。
+        self.notify();
         Ok(status)
     }
     pub fn invitation_status(&self) -> Option<InvitationStatus> {
@@ -495,6 +526,8 @@ impl Runtime {
             invitation.cleanup(&self.dav_client(dav)?)?;
         }
         *active = None;
+        drop(active);
+        self.notify();
         Ok(())
     }
     fn cleanup_pairing(&self) {
@@ -559,6 +592,7 @@ impl Runtime {
             dav_poll: Mutex::new(()),
             next_pull: Mutex::new(Instant::now()),
             dav_traffic: Arc::new(webdav::Traffic::default()),
+            wake: Arc::default(),
         });
         let _ = super::ACTIVE.set(Arc::downgrade(&runtime));
         for (name, receiver) in [
@@ -637,6 +671,7 @@ impl Runtime {
             })?;
         }
         let weak = Arc::downgrade(&runtime);
+        let wake = runtime.wake.clone();
         thread::Builder::new()
             .name("同步局域网接收".into())
             .spawn(move || {
@@ -660,6 +695,7 @@ impl Runtime {
                         });
                 }
                 loop {
+                    let seen = wake.seen();
                     let Some(runtime) = weak.upgrade() else {
                         break;
                     };
@@ -692,17 +728,20 @@ impl Runtime {
                             }
                         }
                     }
+                    let idle = runtime.idle();
                     drop(runtime);
-                    thread::sleep(Duration::from_millis(40));
+                    wake.pause(seen, idle, Duration::from_millis(40));
                 }
             })?;
         let weak = Arc::downgrade(&runtime);
+        let wake = runtime.wake.clone();
         thread::Builder::new()
             .name("同步局域网发现".into())
             .spawn(move || {
                 let mut socket: Option<UdpSocket> = None;
                 let mut last = Instant::now() - Duration::from_secs(5);
                 loop {
+                    let seen = wake.seen();
                     let Some(runtime) = weak.upgrade() else {
                         break;
                     };
@@ -763,17 +802,21 @@ impl Runtime {
                     } else {
                         socket = None;
                     }
+                    let idle = runtime.idle();
                     drop(runtime);
-                    thread::sleep(Duration::from_millis(200));
+                    wake.pause(seen, idle, Duration::from_millis(200));
                 }
             })?;
         let weak = Arc::downgrade(&runtime);
+        let wake = runtime.wake.clone();
         thread::Builder::new()
             .name("同步会话维护".into())
             .spawn(move || {
                 let mut next = Instant::now();
                 let mut probe_round = 0usize;
+                let mut was_idle = false;
                 loop {
+                    let seen = wake.seen();
                     let Some(runtime) = weak.upgrade() else {
                         break;
                     };
@@ -812,14 +855,21 @@ impl Runtime {
                             probe_round = probe_round.wrapping_add(1);
                         }
                         runtime.poll_local_pairing();
-                        runtime.notify();
+                        // 空闲后不再周期唤醒界面，但转入空闲时仍刷新一次，让配对过期等状态及时显示。
+                        let idle = runtime.idle();
+                        if !(idle && was_idle) {
+                            runtime.notify();
+                        }
+                        was_idle = idle;
                         next = Instant::now() + Duration::from_secs(2);
                     }
+                    let idle = runtime.idle();
                     drop(runtime);
-                    thread::sleep(Duration::from_millis(200));
+                    wake.pause(seen, idle, Duration::from_millis(200));
                 }
             })?;
         let weak = Arc::downgrade(&runtime);
+        let wake = runtime.wake.clone();
         thread::Builder::new()
             .name("同步 WebDAV 轮询".into())
             .spawn(move || {
@@ -827,6 +877,7 @@ impl Runtime {
                 let mut generation = 0;
                 let mut next_cleanup = Instant::now();
                 loop {
+                    let seen = wake.seen();
                     let Some(runtime) = weak.upgrade() else {
                         break;
                     };
@@ -840,7 +891,13 @@ impl Runtime {
                         generation = current;
                         errors = 0;
                     }
-                    if Instant::now() >= next_cleanup {
+                    let enabled = runtime
+                        .config
+                        .read()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .enabled;
+                    // 托管文件只由同步产生，关闭同步时不做清理；重新开启后会立即补做一次。
+                    if enabled && Instant::now() >= next_cleanup {
                         let data = runtime.data.read().unwrap_or_else(|e| e.into_inner());
                         if let Err(error) = repository::cleanup_managed_files(&data.0, &data.1) {
                             tracing::warn!("清理同步托管文件失败：{error}");
@@ -856,8 +913,15 @@ impl Runtime {
                         }
                         next_cleanup = Instant::now() + Duration::from_secs(300);
                     }
-                    if Instant::now()
-                        >= *runtime.next_pull.lock().unwrap_or_else(|e| e.into_inner())
+                    // 连接码可以在同步关闭时生成，其过期清理仍需继续，否则会在云端残留。
+                    let pairing = runtime
+                        .invitation
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .is_some();
+                    if (enabled || pairing)
+                        && Instant::now()
+                            >= *runtime.next_pull.lock().unwrap_or_else(|e| e.into_inner())
                     {
                         let config = runtime.config();
                         runtime.cleanup_pairing();
@@ -883,8 +947,9 @@ impl Runtime {
                                         .min(86400),
                                 );
                     }
+                    let idle = runtime.idle();
                     drop(runtime);
-                    thread::sleep(Duration::from_millis(200));
+                    wake.pause(seen, idle, Duration::from_millis(200));
                 }
             })?;
         Ok(runtime)
@@ -1012,6 +1077,17 @@ impl Runtime {
     }
     pub(super) fn notify(&self) {
         let _ = self.changed.try_send(());
+        self.wake.wake();
+    }
+    /// 同步未启用、没有进行中的局域网配对且没有待清理的连接码时，后台线程无事可做。
+    fn idle(&self) -> bool {
+        !self.config.read().unwrap_or_else(|e| e.into_inner()).enabled
+            && !self.local_pairing_busy()
+            && self
+                .invitation
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_none()
     }
     fn take_received_changes(&self) -> Vec<super::ReceivedChange> {
         std::mem::take(

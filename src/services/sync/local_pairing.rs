@@ -227,6 +227,14 @@ impl Runtime {
                 p.incoming && p.authenticated && p.created.elapsed().as_secs() < REQUEST_TTL
             })
     }
+    /// 配对窗口开启或仍有未完成的配对请求时，后台线程需要保持轮询。
+    pub(super) fn local_pairing_busy(&self) -> bool {
+        let state = self.local_pairing.lock().unwrap_or_else(|e| e.into_inner());
+        state.active()
+            || state.pending.as_ref().is_some_and(|p| {
+                !p.added && !p.rejected && p.created.elapsed().as_secs() < REQUEST_TTL
+            })
+    }
     pub(super) fn pairing_advertisement(&self) -> Option<Vec<u8>> {
         let config = self.config();
         let state = self.local_pairing.lock().unwrap_or_else(|e| e.into_inner());
