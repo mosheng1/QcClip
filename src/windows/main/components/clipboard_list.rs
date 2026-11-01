@@ -1157,11 +1157,14 @@ fn hover_action_fields(
     .filter(|field| display.enabled(*field))
     .filter(|field| match field {
         Edit | SplitWords => has_editable_text(item),
-        PastePlain => item.all_format_options.iter().any(|preview| {
-            preview.role() == FormatRole::PlainText
-                && preview.is_restorable
-                && !is_empty_textual_preview(preview)
-        }),
+        PastePlain => {
+            context_menu::has_file_list(item)
+                || item.all_format_options.iter().any(|preview| {
+                    preview.role() == FormatRole::PlainText
+                        && preview.is_restorable
+                        && !is_empty_textual_preview(preview)
+                })
+        }
         OpenDefault => can_open_with_default(item),
         OpenBrowser => has_plain_text_links(item),
         Delete => active_tab != TabId::Favorites,
@@ -1268,16 +1271,23 @@ fn render_hover_action_buttons(
     };
     let delete_tooltip = translator.translate("main.menu.delete");
 
-    let plain_text_format = item
-        .all_format_options
-        .iter()
-        .filter(|preview| {
-            preview.role() == FormatRole::PlainText
-                && preview.is_restorable
-                && !is_empty_textual_preview(preview)
-        })
-        .min_by_key(|preview| preview.format_order)
-        .map(|preview| (preview.format_namespace.clone(), preview.format_key.clone()));
+    // 文件条目的纯文本粘贴优先使用文件路径。
+    let plain_text_format = if context_menu::has_file_list(item) {
+        Some((
+            "windows".to_owned(),
+            context_menu::FILE_PATH_FORMAT_KEY.to_owned(),
+        ))
+    } else {
+        item.all_format_options
+            .iter()
+            .filter(|preview| {
+                preview.role() == FormatRole::PlainText
+                    && preview.is_restorable
+                    && !is_empty_textual_preview(preview)
+            })
+            .min_by_key(|preview| preview.format_order)
+            .map(|preview| (preview.format_namespace.clone(), preview.format_key.clone()))
+    };
 
     let paste_plain_button = plain_text_format.map(|(format_namespace, format_key)| {
         let paste_window = main_window.clone();

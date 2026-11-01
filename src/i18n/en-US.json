@@ -243,6 +243,8 @@
   "main.format.image_file": "Image file",
   "main.format.image_html": "Image (HTML)",
   "main.format.file": "File",
+  "main.format.file_name": "File name",
+  "main.format.file_path": "File path",
   "main.format.application": "Application format",
   "main.format.custom": "Application format ({name})",
   "main.format.internal": "Internal format",

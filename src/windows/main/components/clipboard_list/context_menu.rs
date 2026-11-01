@@ -47,6 +47,15 @@ pub(crate) fn confirm_remove_from_favorites(
 /// 右键菜单"图片文件"使用的虚拟格式标识，与 PasteService 中的约定一致。
 pub(super) const IMAGE_FILE_FORMAT_KEY: &str = "qcclip-image-file";
 
+pub(super) use crate::services::paste::{FILE_NAME_FORMAT_KEY, FILE_PATH_FORMAT_KEY};
+
+/// 条目是否带有可恢复的文件列表，决定是否提供文件名称、文件路径纯文本粘贴。
+pub(super) fn has_file_list(item: &ClipboardListItem) -> bool {
+    item.all_format_options
+        .iter()
+        .any(|preview| preview.is_restorable && preview.role() == FormatRole::FileList)
+}
+
 /// 右键菜单"使用默认程序打开"的动作标识。
 pub(super) const OPEN_WITH_DEFAULT_ACTION: &str = "open-with-default";
 
@@ -322,8 +331,14 @@ pub(super) fn paste_menu_item(
                 FormatRole::FileList | FormatRole::VirtualFile
             )
         });
+    // 有可恢复的文件列表时，额外提供“文件名称”“文件路径”纯文本选项。
+    let has_file_text_options = has_file_list(item);
     let mut format_actions = Vec::new();
-    let paste = if previews.len() > 1 || has_additional_formats || has_image_file_option {
+    let paste = if previews.len() > 1
+        || has_additional_formats
+        || has_image_file_option
+        || has_file_text_options
+    {
         let mut formats = previews
             .iter()
             .map(|preview| {
@@ -344,6 +359,22 @@ pub(super) fn paste_menu_item(
                 MenuActionId::new(format!("paste-format-{index}")),
                 translator.translate("main.format.image_file"),
             ));
+        }
+        if has_file_text_options {
+            for (format_key, label_key) in [
+                (FILE_NAME_FORMAT_KEY, "main.format.file_name"),
+                (FILE_PATH_FORMAT_KEY, "main.format.file_path"),
+            ] {
+                let index = format_actions.len();
+                format_actions.push(FormatAction {
+                    format_namespace: "windows".to_owned(),
+                    format_key: format_key.to_owned(),
+                });
+                formats.push(MenuItem::action(
+                    MenuActionId::new(format!("paste-format-{index}")),
+                    translator.translate(label_key),
+                ));
+            }
         }
         if has_additional_formats {
             formats.push(MenuItem::separator());

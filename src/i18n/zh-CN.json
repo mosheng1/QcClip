@@ -243,6 +243,8 @@
   "main.format.image_file": "图片文件",
   "main.format.image_html": "图片（HTML）",
   "main.format.file": "文件",
+  "main.format.file_name": "文件名称",
+  "main.format.file_path": "文件路径",
   "main.format.application": "应用格式",
   "main.format.custom": "应用格式（{name}）",
   "main.format.internal": "内部格式",

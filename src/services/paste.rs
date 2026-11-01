@@ -62,6 +62,12 @@ struct MergedPayload {
 /// 右键菜单“图片文件”使用的虚拟格式标识；命中时粘贴为 CF_HDROP 文件列表。
 pub const IMAGE_FILE_FORMAT_KEY: &str = "qcclip-image-file";
 
+/// 右键菜单“文件名称”使用的虚拟格式标识；命中时把文件列表中的文件名作为纯文本粘贴。
+pub const FILE_NAME_FORMAT_KEY: &str = "qcclip-file-name";
+
+/// 右键菜单“文件路径”使用的虚拟格式标识；命中时把文件列表中的完整路径作为纯文本粘贴。
+pub const FILE_PATH_FORMAT_KEY: &str = "qcclip-file-path";
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PasteOrderTarget {
     Clipboard,
@@ -208,7 +214,11 @@ impl PasteService {
         let connection = self.database.connect()?;
         let payloads = self.load_payloads(&connection, item_id)?;
         // “图片文件”是右键菜单提供的虚拟格式：只保留图片载荷，CF_HDROP 由写入剪贴板时统一附加。
-        let payloads = if format_key == IMAGE_FILE_FORMAT_KEY {
+        let payloads = if format_key == FILE_NAME_FORMAT_KEY || format_key == FILE_PATH_FORMAT_KEY {
+            let text = file_list_text(&payloads, format_key == FILE_NAME_FORMAT_KEY)
+                .ok_or(PasteError::NoRestorableFormat)?;
+            vec![text_payload(&text)]
+        } else if format_key == IMAGE_FILE_FORMAT_KEY {
             payloads
                 .into_iter()
                 .filter(|payload| payload_role(payload) == FormatRole::Image)
@@ -311,7 +321,7 @@ impl PasteService {
         Ok(())
     }
 
-    /// 将条目中优先级最高的可恢复纯文本格式粘贴到当前活动窗口。
+    /// 将条目中优先级最高的可恢复纯文本格式粘贴到当前活动窗口；文件条目优先粘贴文件路径。
     pub(crate) fn paste_item_plain_text(
         &self,
         item_id: i64,
@@ -319,7 +329,10 @@ impl PasteService {
     ) -> Result<(), PasteError> {
         let connection = self.database.connect()?;
         let payloads = self.load_payloads(&connection, item_id)?;
-        let Some(payload) = preferred_plain_text_payload(&payloads) else {
+        let Some(payload) = file_list_text(&payloads, false)
+            .map(|text| text_payload(&text))
+            .or_else(|| preferred_plain_text_payload(&payloads))
+        else {
             drop(connection);
             return self.paste_item_with_default_formats(item_id, move_to_first);
         };
@@ -1174,12 +1187,40 @@ fn preferred_plain_text_payload(payloads: &[ClipboardPayload]) -> Option<Clipboa
         .cloned()
 }
 
-/// 关闭格式粘贴时的合并载荷：文件和图片合并保持原样，避免只粘贴“[图片]”占位文本。
+/// 把文件列表载荷转换为每行一项的文本；`names_only` 为 true 时只取文件名，否则取完整路径。
+/// 条目没有可解析的文件列表时返回空。
+fn file_list_text(payloads: &[ClipboardPayload], names_only: bool) -> Option<String> {
+    let paths = payloads
+        .iter()
+        .find(|payload| payload_role(payload) == FormatRole::FileList)
+        .map(|payload| parse_file_list(&payload.bytes))
+        .filter(|paths| !paths.is_empty())?;
+    let lines = paths
+        .iter()
+        .map(|path| {
+            // 盘符根目录等没有文件名的路径回落为完整路径。
+            let name = names_only.then(|| path.file_name()).flatten();
+            name.unwrap_or(path.as_os_str())
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect::<Vec<_>>();
+    Some(lines.join("\r\n"))
+}
+
+/// 关闭格式粘贴时的合并载荷：纯文件合并粘贴为路径文本；图片合并保持原样，避免只粘贴“[图片]”占位文本。
 fn plain_text_merged_payloads(payloads: Vec<ClipboardPayload>) -> Vec<ClipboardPayload> {
     if payloads
         .iter()
         .any(|payload| payload_role(payload) == FormatRole::FileList)
     {
+        // 图片合并会同时携带“[图片]”文本载荷，只有纯文件合并才转换为路径。
+        let has_text = payloads
+            .iter()
+            .any(|payload| payload_role(payload) == FormatRole::PlainText);
+        if !has_text && let Some(text) = file_list_text(&payloads, false) {
+            return vec![text_payload(&text)];
+        }
         return payloads;
     }
     match preferred_plain_text_payload(&payloads) {
@@ -1269,6 +1310,47 @@ b",
             super::html_payload("<img>"),
         ]);
         assert_eq!(payloads.len(), 3);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn plain_text_merged_payloads_pastes_paths_for_pure_file_merge() {
+        let payloads = super::plain_text_merged_payloads(vec![
+            super::file_list_payload(&[
+                std::path::PathBuf::from(r"C:\docs\a.txt"),
+                std::path::PathBuf::from(r"D:\b.png"),
+            ])
+            .unwrap(),
+        ]);
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(
+            super::decode_text_payload(&payloads[0]),
+            "C:\\docs\\a.txt\r\nD:\\b.png"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn file_list_text_returns_names_or_paths() {
+        let payloads = vec![
+            super::file_list_payload(&[
+                std::path::PathBuf::from(r"C:\docs\a.txt"),
+                std::path::PathBuf::from(r"C:\"),
+            ])
+            .unwrap(),
+        ];
+        assert_eq!(
+            super::file_list_text(&payloads, true).as_deref(),
+            Some("a.txt\r\nC:\\")
+        );
+        assert_eq!(
+            super::file_list_text(&payloads, false).as_deref(),
+            Some("C:\\docs\\a.txt\r\nC:\\")
+        );
+        assert_eq!(
+            super::file_list_text(&[super::text_payload("x")], false),
+            None
+        );
     }
 
     use crate::domain::capture::{CapturedClipboard, FormatKind, RawFormat, SourceApplication};
