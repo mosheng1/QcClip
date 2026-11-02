@@ -1,12 +1,12 @@
 use gpui::{
-    AnyElement, App, AppContext, ColorExt as _, Context, Entity, FontWeight, Window, div,
-    prelude::*, px,
+    AnyElement, App, AppContext, ColorExt as _, Context, Entity, FontWeight, Subscription, Window,
+    div, prelude::*, px,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Sizable as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
-    input::{Input, InputState},
+    input::{Input, InputEvent, InputState},
     scroll::ScrollableElement as _,
     switch::Switch,
     v_flex,
@@ -65,6 +65,7 @@ pub(in crate::windows::settings) struct SyncForm {
     dav_return_remote: bool,
     local_pin: Entity<InputState>,
     busy: bool,
+    _url_subscription: Subscription,
 }
 
 impl SyncForm {
@@ -95,6 +96,15 @@ impl SyncForm {
         let invitation = SyncService::get(cx)
             .ok()
             .and_then(|r| r.invitation_status());
+        let url = input(
+            config
+                .as_ref()
+                .map(|c| c.dav.url.clone())
+                .unwrap_or_default(),
+            "https://dav.example.com/remote.php/dav/files/user",
+            cx,
+        );
+        let url_subscription = subscribe_sync_url_changes(&url, cx);
         Self {
             name: input(
                 config
@@ -114,14 +124,7 @@ impl SyncForm {
                 cx,
             ),
             code: input(String::new(), "qcclip1:…", cx),
-            url: input(
-                config
-                    .as_ref()
-                    .map(|c| c.dav.url.clone())
-                    .unwrap_or_default(),
-                "https://dav.example.com/remote.php/dav/files/user",
-                cx,
-            ),
+            url,
             username: input(
                 config
                     .as_ref()
@@ -169,8 +172,20 @@ impl SyncForm {
             dav_return_remote: false,
             local_pin: input(String::new(), "000000", cx),
             busy: false,
+            _url_subscription: url_subscription,
         }
     }
+}
+
+fn subscribe_sync_url_changes<T: 'static>(
+    url: &Entity<InputState>,
+    cx: &mut Context<T>,
+) -> Subscription {
+    cx.subscribe(url, |_, _, event: &InputEvent, cx| {
+        if matches!(event, InputEvent::Change) {
+            cx.notify();
+        }
+    })
 }
 
 fn feedback(
@@ -2386,4 +2401,64 @@ fn save_dav(
         },
         true,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{cell::Cell, rc::Rc};
+
+    use gpui::{
+        AppContext, Context, Entity, IntoElement, Render, Subscription, TestAppContext, Window, div,
+    };
+    use gpui_component::input::{InputEvent, InputState};
+
+    struct UrlRefreshProbe {
+        url: Entity<InputState>,
+        notifications: Rc<Cell<usize>>,
+        _notification_subscription: Subscription,
+        _url_subscription: Subscription,
+    }
+
+    impl UrlRefreshProbe {
+        fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+            let url = cx.new(|cx| InputState::new(window, cx));
+            let notifications = Rc::new(Cell::new(0));
+            let observed_notifications = notifications.clone();
+            let notification_subscription = cx.observe_self(move |_, _| {
+                observed_notifications.set(observed_notifications.get() + 1);
+            });
+            let url_subscription = super::subscribe_sync_url_changes(&url, cx);
+
+            Self {
+                url,
+                notifications,
+                _notification_subscription: notification_subscription,
+                _url_subscription: url_subscription,
+            }
+        }
+    }
+
+    impl Render for UrlRefreshProbe {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+        }
+    }
+
+    #[gpui::test]
+    fn url_change_notifies_parent_view_to_refresh_http_warning(cx: &mut TestAppContext) {
+        cx.skip_drawing();
+        let window = cx.add_window(UrlRefreshProbe::new);
+        let notifications_before = window
+            .read_with(cx, |view, _| view.notifications.get())
+            .unwrap();
+        let url = window.read_with(cx, |view, _| view.url.clone()).unwrap();
+
+        url.update(cx, |_, cx| cx.emit(InputEvent::Change));
+        cx.run_until_parked();
+
+        let notifications_after = window
+            .read_with(cx, |view, _| view.notifications.get())
+            .unwrap();
+        assert_eq!(notifications_after, notifications_before + 1);
+    }
 }
