@@ -1081,7 +1081,11 @@ impl Runtime {
     }
     /// 同步未启用、没有进行中的局域网配对且没有待清理的连接码时，后台线程无事可做。
     fn idle(&self) -> bool {
-        !self.config.read().unwrap_or_else(|e| e.into_inner()).enabled
+        !self
+            .config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .enabled
             && !self.local_pairing_busy()
             && self
                 .invitation
