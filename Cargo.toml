@@ -68,6 +68,7 @@ url = "2"
 embed-resource = "3.0.11"
 
 [dev-dependencies]
+gpui = { git = "https://github.com/gpui-ce/gpui-ce", rev = "8e36ac0921443f036bcc41f3f988a8285a734dc0", package = "gpui-ce", features = ["test-support"] }
 rcgen = "0.13"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 

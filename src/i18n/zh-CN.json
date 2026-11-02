@@ -1058,6 +1058,7 @@
   "sync.webdav": "WebDAV 云端缓存",
   "sync.dav_help": "两端使用同一目录。每台设备独立维护最近上传的加密缓存，无需同时在线。",
   "sync.dav_url_help": "填写 WebDAV 服务器上已存在的目录地址，不能填写本地文件夹路径",
+  "sync.dav_http_warning": "HTTP 不加密传输 WebDAV 账号密码和访问路径。网络链路上的第三方可能读取这些信息；同步载荷仍有端到端加密。建议使用独立密码。",
   "sync.dav_enabled": "启用 WebDAV 通道",
   "sync.poll": "自动拉取间隔（秒）",
   "sync.test": "测试连接",
