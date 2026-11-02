@@ -639,7 +639,7 @@ fn webdav_connection_requires_valid_dav_xml() {
 }
 
 #[test]
-fn webdav_accepts_local_http_and_keeps_public_connections_on_https() {
+fn webdav_accepts_http_and_https_addresses_with_valid_urls() {
     let mut config = Config::fresh();
     config.dav.enabled = true;
     for address in [
@@ -648,6 +648,9 @@ fn webdav_accepts_local_http_and_keeps_public_connections_on_https() {
         "http://localhost:8888/",
         "http://[::1]:8888/",
         "http://[fd00::1]:8888/",
+        "http://dav.example.com/sync",
+        "http://8.8.8.8:8888/",
+        "http://192.168.1.3.example.com/",
         "https://dav.jianguoyun.com/dav/QcClipSync/",
     ] {
         config.dav.url = address.into();
@@ -655,12 +658,10 @@ fn webdav_accepts_local_http_and_keeps_public_connections_on_https() {
         assert!(super::webdav::Client::new(&config.dav).is_ok());
     }
     for address in [
-        "http://dav.example.com/sync",
-        "http://8.8.8.8:8888/",
-        "http://192.168.1.3.example.com/",
         "http://user:password@127.0.0.1/",
         "https://dav.example.com/sync?token=secret",
         "https://dav.example.com/sync#fragment",
+        "ftp://dav.example.com/sync",
         "file:///C:/QcClipSync",
         "C:\\CYRJ\\QcClip\\QcClipSync",
     ] {

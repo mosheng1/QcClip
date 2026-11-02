@@ -240,23 +240,8 @@ pub fn validate_dav_url(address: &str) -> Result<url::Url> {
     {
         return fail("WebDAV 地址必须包含服务器，且不能内嵌账号密码、查询参数或片段");
     }
-    let local = match url.host() {
-        Some(url::Host::Domain("localhost")) => true,
-        Some(url::Host::Ipv4(ip)) => ip.is_private() || ip.is_loopback() || ip.is_link_local(),
-        Some(url::Host::Ipv6(ip)) => {
-            ip.is_loopback()
-                || ip.is_unique_local()
-                || ip.is_unicast_link_local()
-                || ip
-                    .to_ipv4_mapped()
-                    .is_some_and(|ip| ip.is_private() || ip.is_loopback() || ip.is_link_local())
-        }
-        _ => false,
-    };
-    if url.scheme() != "https" && !(url.scheme() == "http" && local) {
-        return fail(
-            "WebDAV 公网地址必须使用 HTTPS；HTTP 仅支持 localhost、本机回环或局域网 IP 地址",
-        );
+    if !matches!(url.scheme(), "http" | "https") {
+        return fail("WebDAV 地址仅支持 HTTP 或 HTTPS");
     }
     Ok(url)
 }

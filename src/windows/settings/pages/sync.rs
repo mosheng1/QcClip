@@ -1263,6 +1263,14 @@ impl SettingsWindowView {
         let t = i18n::translator(cx);
         let view = cx.entity();
         let busy = self.sync_form.busy;
+        let uses_http = self
+            .sync_form
+            .url
+            .read(cx)
+            .value()
+            .trim()
+            .to_ascii_lowercase()
+            .starts_with("http://");
         let dav = card(cx)
             .child(heading(
                 t.translate("sync.webdav"),
@@ -1355,6 +1363,14 @@ impl SettingsWindowView {
                     .p_4()
                     .child(div().text_xs().child(t.translate("sync.server_address")))
                     .child(Input::new(&self.sync_form.url).small().w_full())
+                    .when(uses_http, |section| {
+                        section.child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.warning)
+                                .child(t.translate("sync.dav_http_warning")),
+                        )
+                    })
                     .child(
                         div()
                             .text_xs()

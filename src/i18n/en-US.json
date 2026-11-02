@@ -1058,6 +1058,7 @@
   "sync.webdav": "WebDAV cloud cache",
   "sync.dav_help": "Use the same folder on both devices. Each device maintains its own recent encrypted uploads; recipients can be offline.",
   "sync.dav_url_help": "Enter the URL of an existing directory on your WebDAV server, not a local folder path.",
+  "sync.dav_http_warning": "HTTP does not encrypt WebDAV credentials or access paths. Others on the network may read them; synced payloads remain end-to-end encrypted. Use a unique password.",
   "sync.dav_enabled": "Enable WebDAV",
   "sync.poll": "Automatic fetch interval (seconds)",
   "sync.test": "Test connection",
