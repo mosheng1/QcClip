@@ -192,11 +192,9 @@ impl StickyService {
         if Self::focus_existing(item_id, true, cx) {
             return;
         }
-        let note = PersistedStickyNote {
-            item_id,
-            split: true,
-            ..Default::default()
-        };
+        let mut note =
+            PersistedStickyNote::new(item_id, state_runtime::state(cx).sticky_preferences);
+        note.split = true;
         Self::load_and_open(item_id, Some(note), cx);
     }
 
@@ -306,10 +304,10 @@ impl StickyService {
         cx: &mut App,
     ) -> Result<(), String> {
         let item_id = data.item_id;
-        let note = restored.unwrap_or_else(|| PersistedStickyNote {
-            item_id,
-            ..Default::default()
+        let mut note = restored.unwrap_or_else(|| {
+            PersistedStickyNote::new(item_id, state_runtime::state(cx).sticky_preferences)
         });
+        note.preferences = note.preferences.normalized();
         let bounds = restored_bounds(&note, cx).unwrap_or_else(|| {
             let cascade = cx.global::<Self>().notes.len() % 8;
             initial_bounds(&data, cascade, cx)
@@ -320,8 +318,8 @@ impl StickyService {
         } else {
             bounds
         };
-        let topmost = note.topmost;
-        let opacity = note.opacity;
+        let topmost = note.preferences.topmost;
+        let opacity = note.preferences.opacity;
         let view_slot = std::rc::Rc::new(std::cell::RefCell::new(None));
         let view_slot_for_build = view_slot.clone();
         let window = cx

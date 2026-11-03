@@ -12,7 +12,10 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::warn;
 
-use crate::windows::main::tabs::{SymbolCategoryId, TabId};
+use crate::{
+    services::word_split::{JoinSeparator, SplitGranularity},
+    windows::main::tabs::{SymbolCategoryId, TabId},
+};
 
 const PREVIEW_STATE_SAVE_DELAY: Duration = Duration::from_millis(300);
 
@@ -163,9 +166,49 @@ pub(crate) struct PersistedState {
     pub(crate) software_rendering_warning_dismissed: bool,
     /// 贴在屏幕上的便签，启动时按顺序恢复。
     pub(crate) sticky_notes: Vec<PersistedStickyNote>,
+    /// 新便签继承最近一次调整的偏好，关闭所有便签后仍保留。
+    pub(crate) sticky_preferences: PersistedStickyPreferences,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(default)]
+pub(crate) struct PersistedStickyPreferences {
+    /// 用户选择的便签颜色（0xRRGGBB）；为空时跟随主题。
+    #[serde(deserialize_with = "deserialize_sticky_color")]
+    pub(crate) color: Option<u32>,
+    pub(crate) topmost: bool,
+    pub(crate) opacity: f32,
+    pub(crate) granularity: SplitGranularity,
+    pub(crate) include_symbols: bool,
+    pub(crate) separator: JoinSeparator,
+}
+
+impl Default for PersistedStickyPreferences {
+    fn default() -> Self {
+        Self {
+            color: None,
+            topmost: true,
+            opacity: 1.0,
+            granularity: SplitGranularity::default(),
+            include_symbols: false,
+            separator: JoinSeparator::default(),
+        }
+    }
+}
+
+impl PersistedStickyPreferences {
+    pub(crate) fn normalized(mut self) -> Self {
+        self.color = self.color.filter(|color| *color <= 0xFF_FFFF);
+        self.opacity = if self.opacity.is_finite() {
+            self.opacity.clamp(0.3, 1.0)
+        } else {
+            Self::default().opacity
+        };
+        self
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
 pub(crate) struct PersistedStickyNote {
     pub(crate) item_id: i64,
@@ -174,28 +217,19 @@ pub(crate) struct PersistedStickyNote {
     pub(crate) y: f32,
     pub(crate) width: f32,
     pub(crate) height: f32,
-    /// 用户选择的便签颜色（0xRRGGBB）；为空时跟随主题。
-    #[serde(deserialize_with = "deserialize_sticky_color")]
-    pub(crate) color: Option<u32>,
-    pub(crate) topmost: bool,
+    // 保持已发布状态中颜色、置顶和不透明度的字段位置。
+    #[serde(flatten)]
+    pub(crate) preferences: PersistedStickyPreferences,
     pub(crate) collapsed: bool,
-    pub(crate) opacity: f32,
     pub(crate) split: bool,
 }
 
-impl Default for PersistedStickyNote {
-    fn default() -> Self {
+impl PersistedStickyNote {
+    pub(crate) fn new(item_id: i64, preferences: PersistedStickyPreferences) -> Self {
         Self {
-            item_id: 0,
-            x: 0.0,
-            y: 0.0,
-            width: 0.0,
-            height: 0.0,
-            color: None,
-            topmost: true,
-            collapsed: false,
-            opacity: 1.0,
-            split: false,
+            item_id,
+            preferences: preferences.normalized(),
+            ..Default::default()
         }
     }
 }
@@ -286,6 +320,7 @@ impl Default for PersistedState {
             legacy_migration_prompt_dismissed: false,
             software_rendering_warning_dismissed: false,
             sticky_notes: Vec::new(),
+            sticky_preferences: PersistedStickyPreferences::default(),
         }
     }
 }
@@ -422,6 +457,21 @@ pub(crate) fn set_sticky_notes(notes: Vec<PersistedStickyNote>, cx: &mut App) {
     }
 }
 
+pub(crate) fn remember_sticky_preferences(note: PersistedStickyNote, cx: &mut App) {
+    let mut state = state(cx);
+    state.sticky_preferences = note.preferences;
+    if let Some(saved) = state
+        .sticky_notes
+        .iter_mut()
+        .find(|saved| saved.item_id == note.item_id)
+    {
+        *saved = note;
+    }
+    if let Err(error) = set_state(state, cx) {
+        tracing::error!("保存便签偏好失败：{error}");
+    }
+}
+
 pub(crate) fn set_main_window_normal_position(position: PersistedWindowPosition, cx: &mut App) {
     let mut state = state(cx);
     if state.main_window.normal_position == Some(position) {
@@ -546,9 +596,11 @@ fn persist_state(path: &Path, state: &PersistedState) -> Result<(), StateError> 
 mod tests {
     use super::{
         PersistedGallerySort, PersistedMainWindowState, PersistedPreviewWindowState,
-        PersistedState, PersistedWindowPosition, PersistedWindowSize, StateRuntime, load_state,
-        persist_state,
+        PersistedState, PersistedStickyNote, PersistedStickyPreferences, PersistedWindowPosition,
+        PersistedWindowSize, StateRuntime, load_state, persist_state, remember_sticky_preferences,
+        set_sticky_notes, state,
     };
+    use crate::services::word_split::{JoinSeparator, SplitGranularity};
     use crate::windows::main::tabs::{SymbolCategoryId, TabId};
     use tempfile::tempdir;
 
@@ -695,12 +747,106 @@ mod tests {
             r#"[{"item_id":1,"color":3900150},{"item_id":2,"color":"Yellow"},{"item_id":3}]"#,
         )
         .expect("便签状态读取失败");
-        assert_eq!(notes[0].color, Some(0x3B82F6));
-        assert_eq!(notes[1].color, None);
-        assert_eq!(notes[2].color, None);
+        assert_eq!(notes[0].preferences.color, Some(0x3B82F6));
+        assert_eq!(notes[1].preferences.color, None);
+        assert_eq!(notes[2].preferences.color, None);
         let json = serde_json::to_string(&notes[0]).unwrap();
         let loaded: super::PersistedStickyNote = serde_json::from_str(&json).unwrap();
-        assert_eq!(loaded.color, Some(0x3B82F6));
+        assert_eq!(loaded.preferences.color, Some(0x3B82F6));
+    }
+
+    #[test]
+    fn released_sticky_note_fields_keep_their_values_and_default_split_preferences() {
+        let loaded: PersistedState = serde_json::from_str(
+            r#"{"sticky_notes":[{"item_id":1,"x":120.0,"y":240.0,"width":340.0,
+                "height":260.0,"color":3900150,"topmost":false,"collapsed":true,
+                "opacity":0.65,"split":true}]}"#,
+        )
+        .expect("已发布便签状态读取失败");
+        let note = &loaded.sticky_notes[0];
+        assert_eq!(note.preferences.color, Some(0x3B82F6));
+        assert!(!note.preferences.topmost);
+        assert_eq!(note.preferences.opacity, 0.65);
+        assert_eq!(note.preferences.granularity, SplitGranularity::Word);
+        assert!(!note.preferences.include_symbols);
+        assert_eq!(note.preferences.separator, JoinSeparator::Smart);
+        assert!(note.collapsed && note.split);
+        assert_eq!(
+            (note.x, note.y, note.width, note.height),
+            (120.0, 240.0, 340.0, 260.0)
+        );
+        assert_eq!(
+            loaded.sticky_preferences,
+            PersistedStickyPreferences::default()
+        );
+
+        let json = serde_json::to_value(note).expect("便签状态序列化失败");
+        assert_eq!(json["color"], 3900150);
+        assert_eq!(json["topmost"], false);
+        assert_eq!(json["opacity"].as_f64().unwrap() as f32, 0.65);
+        assert!(json.get("preferences").is_none());
+    }
+
+    #[test]
+    fn sticky_preferences_restore_valid_color_and_opacity() {
+        for (opacity, expected) in [
+            (0.0, 0.3),
+            (0.65, 0.65),
+            (2.0, 1.0),
+            (f32::NAN, 1.0),
+            (f32::INFINITY, 1.0),
+        ] {
+            let note = PersistedStickyNote::new(
+                1,
+                PersistedStickyPreferences {
+                    color: Some(0x100_0000),
+                    opacity,
+                    ..Default::default()
+                },
+            );
+            assert_eq!(note.preferences.color, None);
+            assert_eq!(note.preferences.opacity, expected);
+        }
+    }
+
+    #[gpui::test]
+    fn sticky_preferences_survive_note_changes_closing_and_reload(cx: &mut gpui::TestAppContext) {
+        let directory = tempdir().expect("无法创建临时目录");
+        let path = directory.path().join("state.json");
+        cx.update(|cx| {
+            StateRuntime::install(&path, cx);
+            let mut note = PersistedStickyNote::new(1, state(cx).sticky_preferences);
+            let other = PersistedStickyNote::new(2, PersistedStickyPreferences::default());
+            set_sticky_notes(vec![note.clone(), other.clone()], cx);
+            note.preferences = PersistedStickyPreferences {
+                color: Some(0x3B82F6),
+                topmost: false,
+                opacity: 0.65,
+                granularity: SplitGranularity::Character,
+                include_symbols: true,
+                separator: JoinSeparator::Newline,
+            };
+            remember_sticky_preferences(note.clone(), cx);
+
+            let saved = load_state(&path);
+            assert_eq!(saved.sticky_preferences, note.preferences);
+            assert_eq!(saved.sticky_notes, vec![note.clone(), other.clone()]);
+            let new_note = PersistedStickyNote::new(3, saved.sticky_preferences);
+            assert_eq!(new_note.preferences, note.preferences);
+            assert!(!new_note.collapsed && !new_note.split);
+
+            // 移动另一张便签不能覆盖最近调整的偏好。
+            let mut moved = other;
+            moved.x = 200.0;
+            set_sticky_notes(vec![note.clone(), moved], cx);
+            assert_eq!(load_state(&path).sticky_preferences, note.preferences);
+
+            set_sticky_notes(Vec::new(), cx);
+            StateRuntime::reload(&path, cx);
+            assert!(state(cx).sticky_notes.is_empty());
+            assert_eq!(state(cx).sticky_preferences, note.preferences);
+            assert_eq!(load_state(&path).sticky_preferences, note.preferences);
+        });
     }
 
     #[test]

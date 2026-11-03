@@ -10,6 +10,7 @@ use icu_segmenter::{
     options::{WordBreakInvariantOptions, WordType},
 };
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use unicode_segmentation::UnicodeSegmentation;
 
 /// 单次拆分最多生成的词块数量；界面按行虚拟化渲染，上限只用于限制内存和分词耗时。
@@ -40,14 +41,14 @@ pub(crate) struct Token {
     pub(crate) line: usize,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) enum SplitGranularity {
     #[default]
     Word,
     Character,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) enum JoinSeparator {
     /// 中日文之间直接拼接，其余词块之间补空格。
     #[default]

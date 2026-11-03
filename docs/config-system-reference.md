@@ -20,11 +20,13 @@
 | 文件 | 保存内容 |
 | --- | --- |
 | `config.json` | 用户设置 |
-| `state.json` | 窗口位置和尺寸、当前标签页、表情与符号最近使用记录、图库排序等恢复状态 |
+| `state.json` | 窗口位置和尺寸、当前标签页、表情与符号最近使用记录、图库排序、便签与最近使用的便签偏好等恢复状态 |
 | `qcclip.sqlite3` | 剪贴板内容、格式、历史、收藏、标签和备注 |
 | `config.updates.json` | 更新检查时间、最新版本和已通知版本，由更新服务单独管理 |
 
 搜索输入、滚动位置、加载任务和图像缓存等临时状态由窗口维护，不属于配置文件。
+
+`state.json` 的 `sticky_preferences` 保存最近调整的便签颜色（`color`，为空时跟随主题）、置顶开关（`topmost`）、不透明度（`opacity`，范围 0.3～1.0），以及拆词粒度（`granularity`）、保留符号开关（`include_symbols`）和拼接方式（`separator`）。调整后立即保存，新建普通便签或通过“拆词”打开新便签时继承这些偏好；关闭全部便签后仍保留。`sticky_notes` 同时记录各张便签自己的这些选项，重启时分别恢复；窗口位置、尺寸、折叠和拆词界面状态仍按便签保存。
 
 跨设备同步设置由独立的 [services/sync/config.rs](../src/services/sync/config.rs) 管理，不写入 `config.json` 或 `state.json`。Windows 上的设备身份、配对、发送序号、连接及设备策略和 WebDAV 凭据统一通过 DPAPI 保护，保存于 `%LOCALAPPDATA%/QcClipDevice/sync.bin`，不使用 Windows 凭据管理器，不随内容导入或数据目录迁移覆盖。清理日志 `sync-cache-*.json` 仅保存待回收对象的随机标识。配置语义见[同步使用说明](sync-guide.md)。
 

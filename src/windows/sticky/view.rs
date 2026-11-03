@@ -28,7 +28,7 @@ use crate::{
     domain::clipboard::{ClipboardItemId, FormatPreview},
     i18n,
     services::word_split::{self, JoinSeparator, SplitGranularity, SplitResult, TokenKind},
-    state_runtime::PersistedStickyNote,
+    state_runtime::{self, PersistedStickyNote, PersistedStickyPreferences},
     ui::{
         html::{self as html_preview, HtmlDocument},
         icon,
@@ -96,11 +96,8 @@ pub(super) struct StickyNote {
     modes: Vec<(StickyMode, FormatPreview)>,
     mode_index: usize,
     text: String,
-    /// 用户选择的便签颜色；为空时跟随主题。
-    color: Option<u32>,
-    topmost: bool,
+    preferences: PersistedStickyPreferences,
     collapsed: bool,
-    opacity: f32,
     /// 展开状态下的窗口尺寸，折叠成胶囊后用于恢复。
     expanded_size: gpui::Size<f32>,
     /// 按创建时请求的尺寸换算后的窗口位置；无边框窗口实际外框比请求值多出缩放边框。
@@ -131,9 +128,6 @@ pub(super) struct StickyNote {
     split: Option<SplitView>,
     token_scroll: UniformListScrollHandle,
     char_widths: CharWidths,
-    granularity: SplitGranularity,
-    include_symbols: bool,
-    separator: JoinSeparator,
     header_drag_start: Option<Point<Pixels>>,
     toast: Option<SharedString>,
     flash: bool,
@@ -205,10 +199,8 @@ impl StickyNote {
             modes: data.modes,
             mode_index: 0,
             text,
-            color: note.color,
-            topmost: note.topmost,
+            preferences: note.preferences,
             collapsed: note.collapsed,
-            opacity: note.opacity.clamp(0.3, 1.0),
             expanded_size,
             bounds: requested,
             frame_offset,
@@ -231,9 +223,6 @@ impl StickyNote {
             split: None,
             token_scroll: UniformListScrollHandle::new(),
             char_widths: CharWidths::default(),
-            granularity: SplitGranularity::default(),
-            include_symbols: false,
-            separator: JoinSeparator::default(),
             header_drag_start: None,
             toast: None,
             flash: false,
@@ -267,10 +256,8 @@ impl StickyNote {
             y: f32::from(self.bounds.origin.y),
             width: self.expanded_size.width,
             height: self.expanded_size.height,
-            color: self.color,
-            topmost: self.topmost,
+            preferences: self.preferences,
             collapsed: self.collapsed,
-            opacity: self.opacity,
             split: self.split.is_some(),
         }
     }
@@ -315,6 +302,10 @@ impl StickyNote {
             cx.background_executor().timer(PERSIST_DELAY).await;
             cx.update(StickyService::persist);
         }));
+    }
+
+    fn remember_preferences(&self, cx: &mut Context<Self>) {
+        state_runtime::remember_sticky_preferences(self.persisted(), cx);
     }
 
     fn show_toast(&mut self, key: &str, cx: &mut Context<Self>) {
@@ -515,23 +506,26 @@ impl StickyNote {
     }
 
     fn toggle_topmost(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.topmost = !self.topmost;
-        if let Err(error) = crate::platform::window::set_window_topmost(window, self.topmost) {
+        self.preferences.topmost = !self.preferences.topmost;
+        if let Err(error) =
+            crate::platform::window::set_window_topmost(window, self.preferences.topmost)
+        {
             tracing::error!("切换便签置顶失败：{error}");
         }
-        self.schedule_persist(cx);
+        self.remember_preferences(cx);
         cx.notify();
     }
 
     fn set_color(&mut self, color: Option<u32>, cx: &mut Context<Self>) {
-        self.color = color;
-        self.schedule_persist(cx);
+        self.preferences.color = color;
+        self.remember_preferences(cx);
         cx.notify();
     }
 
     /// 打开颜色选择窗口；选中后便签整体配色按该颜色重新生成。
     fn pick_color(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let initial = self
+            .preferences
             .color
             .unwrap_or_else(|| hsla_to_rgb(Paper::resolve(None, cx).accent));
         let view = cx.entity().downgrade();
@@ -558,11 +552,13 @@ impl StickyNote {
     }
 
     fn set_opacity(&mut self, opacity: f32, window: &mut Window, cx: &mut Context<Self>) {
-        self.opacity = opacity.clamp(0.3, 1.0);
-        if let Err(error) = crate::platform::window::set_window_opacity(window, self.opacity) {
+        self.preferences.opacity = opacity.clamp(0.3, 1.0);
+        if let Err(error) =
+            crate::platform::window::set_window_opacity(window, self.preferences.opacity)
+        {
             tracing::error!("设置便签透明度失败：{error}");
         }
-        self.schedule_persist(cx);
+        self.remember_preferences(cx);
         cx.notify();
     }
 
@@ -680,7 +676,7 @@ impl StickyNote {
             .selection
             .selected_indices()
             .filter_map(|index| split.result.tokens.get(index));
-        let text = word_split::join_tokens(tokens, self.separator);
+        let text = word_split::join_tokens(tokens, self.preferences.separator);
         if text.is_empty() {
             return;
         }
@@ -728,7 +724,11 @@ impl StickyNote {
     // ---- 拆词 ----
 
     fn enter_split(&mut self) {
-        let result = word_split::split(&self.text, self.granularity, self.include_symbols);
+        let result = word_split::split(
+            &self.text,
+            self.preferences.granularity,
+            self.preferences.include_symbols,
+        );
         let selection = TokenSelection::new(result.tokens.len());
         self.split = Some(SplitView {
             result,
@@ -775,6 +775,7 @@ impl StickyNote {
         if self.split.is_some() {
             self.enter_split();
         }
+        self.remember_preferences(cx);
         cx.notify();
     }
 
@@ -918,7 +919,7 @@ impl StickyNote {
             ));
         }
         items.push(MenuItem::separator());
-        let current_opacity = (self.opacity * 100.0).round() as u8;
+        let current_opacity = (self.preferences.opacity * 100.0).round() as u8;
         let opacities = OPACITY_LEVELS
             .iter()
             .map(|level| {
@@ -942,7 +943,7 @@ impl StickyNote {
             translator.translate("sticky.topmost"),
         )
         .with_icon(MenuIcon::svg("pin.svg"));
-        items.push(if self.topmost {
+        items.push(if self.preferences.topmost {
             topmost.checked()
         } else {
             topmost
@@ -1078,8 +1079,12 @@ impl StickyNote {
         ));
         buttons.push(header_button(
             "sticky-topmost",
-            if self.topmost { "pinned-filled" } else { "pin" },
-            self.topmost,
+            if self.preferences.topmost {
+                "pinned-filled"
+            } else {
+                "pin"
+            },
+            self.preferences.topmost,
             paper,
             translator.translate("sticky.topmost"),
             cx.listener(|this, _, window, cx| this.toggle_topmost(window, cx)),
@@ -1675,7 +1680,7 @@ impl StickyNote {
             "sticky-token-rows",
             row_count,
             cx.processor(move |this, range: Range<usize>, _, cx| {
-                let paper = Paper::resolve(this.color, cx);
+                let paper = Paper::resolve(this.preferences.color, cx);
                 range
                     .filter_map(|row| rows.get(row).cloned())
                     .map(|tokens| {
@@ -1823,7 +1828,7 @@ impl StickyNote {
         let selected_count = split.selection.selected_count();
         let total = split.selection.len();
         let has_selection = selected_count > 0;
-        let separator_label = translator.translate(separator_label_key(self.separator));
+        let separator_label = translator.translate(separator_label_key(self.preferences.separator));
         // 拆词工具栏默认一行：设置项在左，选择与复制粘贴靠右；窗口较窄时操作组整体换到第二行。
         let settings = div()
             .flex_none()
@@ -1835,17 +1840,17 @@ impl StickyNote {
                     (
                         "sticky-split-word",
                         translator.translate("sticky.split.word"),
-                        self.granularity == SplitGranularity::Word,
+                        self.preferences.granularity == SplitGranularity::Word,
                     ),
                     (
                         "sticky-split-char",
                         translator.translate("sticky.split.char"),
-                        self.granularity == SplitGranularity::Character,
+                        self.preferences.granularity == SplitGranularity::Character,
                     ),
                 ],
                 paper,
                 cx.listener(|this, index: &usize, _, cx| {
-                    this.granularity = if *index == 0 {
+                    this.preferences.granularity = if *index == 0 {
                         SplitGranularity::Word
                     } else {
                         SplitGranularity::Character
@@ -1856,11 +1861,11 @@ impl StickyNote {
             .child(header_button(
                 "sticky-split-symbols",
                 "quote",
-                self.include_symbols,
+                self.preferences.include_symbols,
                 paper,
                 translator.translate("sticky.split.symbols"),
                 cx.listener(|this, _, _, cx| {
-                    this.include_symbols = !this.include_symbols;
+                    this.preferences.include_symbols = !this.preferences.include_symbols;
                     this.resplit(cx);
                 }),
             ))
@@ -1883,7 +1888,8 @@ impl StickyNote {
                     move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx)
                 })
                 .on_click(cx.listener(|this, _, _, cx| {
-                    this.separator = next_separator(this.separator);
+                    this.preferences.separator = next_separator(this.preferences.separator);
+                    this.remember_preferences(cx);
                     cx.notify();
                 })),
             );
@@ -2004,7 +2010,7 @@ impl StickyNote {
 
 impl Render for StickyNote {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let paper = Paper::resolve(self.color, cx);
+        let paper = Paper::resolve(self.preferences.color, cx);
         let background = crate::window_material::tinted_background_element(paper.tint, cx);
         let header = self.render_header(paper, cx);
         let body = (!self.collapsed).then(|| {
