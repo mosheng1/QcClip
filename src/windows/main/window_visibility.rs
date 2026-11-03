@@ -85,7 +85,9 @@ pub(crate) fn apply_imported_window_state(cx: &mut App) {
     });
 
     let result = window.update(cx, |_, window, cx| {
-        let logical_size = persisted.restored_size();
+        let clipboard = config_runtime::clipboard_config(cx);
+        let logical_size = persisted
+            .restored_layout_size(clipboard.list_layout.effective(clipboard.window_position));
         let logical_size = size(px(logical_size.width), px(logical_size.height));
         // Window::resize 在 Windows 上异步调整原生窗口，不能与下面的同步客户区定位并用，
         // 否则异步尺寸更新可能覆盖贴边窗口的尺寸，导致隐藏时露出过多内容。
@@ -393,7 +395,10 @@ pub(crate) fn refresh_window_position(cx: &mut App) {
             )
         });
     let Some(window) = window else { return };
-    let restored = state_runtime::state(cx).main_window.restored_size();
+    let clipboard = config_runtime::clipboard_config(cx);
+    let restored = state_runtime::state(cx)
+        .main_window
+        .restored_layout_size(clipboard.list_layout.effective(clipboard.window_position));
     cx.update_global::<MainWindowService, _>(|service, _| {
         service.window_state.disable_edge_mode();
         service.window_state.set_panel_attachment(None);
@@ -1470,8 +1475,8 @@ fn normal_bounds_for_position(
                 y: remembered.y,
             }
         };
-        let width = logical_size.0.max(1.0);
-        let height = logical_size.1.max(1.0);
+        let width = logical_size.0.max(1.0).min(screen.width.max(1.0));
+        let height = logical_size.1.max(1.0).min(screen.height.max(1.0));
         let logical_bounds = platform_window::LogicalClientBounds {
             left: clamp_position(position.x, screen.x, screen.x + screen.width, width),
             top: clamp_position(position.y, screen.y, screen.y + screen.height, height),
@@ -1532,14 +1537,14 @@ fn positioned_bounds(
     } else if position.is_screen_edge() {
         logical_size.0.max(1.0).min((screen.width / 2.0).max(1.0))
     } else {
-        logical_size.0.max(1.0)
+        logical_size.0.max(1.0).min(screen.width.max(1.0))
     };
     let height = if position.is_screen_edge() && !position.uses_horizontal_list() {
         screen.height.max(1.0)
     } else if position.is_screen_edge() {
         logical_size.1.max(1.0).min((screen.height / 2.0).max(1.0))
     } else {
-        logical_size.1.max(1.0)
+        logical_size.1.max(1.0).min(screen.height.max(1.0))
     };
     let screen_right = screen.x + screen.width;
     let screen_bottom = screen.y + screen.height;
@@ -2265,6 +2270,32 @@ mod tests {
         // 隐藏时只有指针离开触发区才解除禁止。
         assert!(edge_reveal_suppression_for(true, false, true));
         assert!(!edge_reveal_suppression_for(false, false, true));
+    }
+
+    #[test]
+    fn oversized_split_window_fits_small_displays() {
+        let screen = platform_window::LogicalDisplayBounds {
+            x: -800.0,
+            y: 0.0,
+            width: 800.0,
+            height: 600.0,
+        };
+        for position in [
+            ClipboardWindowPosition::MouseCenter,
+            ClipboardWindowPosition::MouseNearby,
+            ClipboardWindowPosition::ScreenCenter,
+        ] {
+            let bounds = positioned_bounds(
+                (1000.0, 900.0),
+                position,
+                screen,
+                Point { x: -10.0, y: 580.0 },
+            );
+            assert_eq!(bounds.width, screen.width);
+            assert_eq!(bounds.height, screen.height);
+            assert_eq!(bounds.left, screen.x);
+            assert_eq!(bounds.top, screen.y);
+        }
     }
 
     #[test]

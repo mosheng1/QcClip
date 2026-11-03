@@ -2,6 +2,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 mod clipboard_formats;
 mod item_display;
+mod list_layout;
 pub mod load;
 mod notification;
 mod preview_information;
@@ -11,6 +12,7 @@ pub use clipboard_formats::ClipboardFormatConfig;
 pub use item_display::{
     ItemDisplayConfig, ItemDisplayField, ItemDisplayPreset, ItemRegionVisibility,
 };
+pub use list_layout::ClipboardListLayout;
 pub use notification::{NotificationConfig, NotificationKind, NotificationPosition};
 pub use preview_information::{PreviewInformationConfig, PreviewInformationField};
 pub use tab_bar::{TabBarButton, TabBarButtonGroup, TabBarLayout, TabBarSection};
@@ -877,6 +879,7 @@ pub struct ClipboardConfig {
     pub tags_multi_select: bool,
     pub confirm_favorite_removal: bool,
     pub window_position: ClipboardWindowPosition,
+    pub list_layout: ClipboardListLayout,
     pub edge_hide: bool,
     pub edge_hide_show_edge: bool,
     pub search_engines: Vec<SearchEngine>,
@@ -1136,6 +1139,7 @@ impl Default for ClipboardConfig {
             tags_multi_select: true,
             confirm_favorite_removal: true,
             window_position: ClipboardWindowPosition::default(),
+            list_layout: ClipboardListLayout::default(),
             edge_hide: false,
             edge_hide_show_edge: true,
             search_engines: Vec::new(),

@@ -245,8 +245,16 @@ pub fn run() {
             #[cfg(target_os = "windows")]
             crate::services::tray::TrayService::install(cx);
 
+            let clipboard = crate::config_runtime::clipboard_config(cx);
+            let state = crate::state_runtime::state(cx);
+            let layout = clipboard.list_layout.effective(clipboard.window_position);
             let (window_width, window_height) =
-                initial_window_size(&crate::state_runtime::state(cx).main_window);
+                if layout == crate::config::ClipboardListLayout::Single {
+                    initial_window_size(&state.main_window)
+                } else {
+                    let size = state.main_window.restored_layout_size(layout);
+                    (size.width, size.height)
+                };
             let default_bounds =
                 Bounds::centered(None, size(px(window_width), px(window_height)), cx);
             let startup_edge = if crate::config_runtime::clipboard_config(cx).edge_hide {

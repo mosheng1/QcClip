@@ -9,8 +9,8 @@ use gpui_component::{ActiveTheme as _, Sizable, input::Input};
 
 use crate::{
     config::{
-        ClipboardDisplayPriority, ClipboardPreviewPriority, ClipboardWindowPosition,
-        TitlebarPosition,
+        ClipboardDisplayPriority, ClipboardListLayout, ClipboardPreviewPriority,
+        ClipboardWindowPosition, TitlebarPosition,
     },
     config_runtime, i18n,
     ui::{hover_icon, titlebar_button},
@@ -24,6 +24,7 @@ const NEW_TEXT_ACTION: &str = "main.more.new_text";
 const SETTINGS_ACTION: &str = "main.more.settings";
 const CLEAR_UNPINNED_HISTORY_ACTION: &str = "main.more.clear-unpinned-history";
 const CLEAR_ALL_HISTORY_ACTION: &str = "main.more.clear-all-history";
+const LIST_LAYOUT_ACTION_PREFIX: &str = "main.more.list-layout.";
 const WINDOW_POSITION_ACTION_PREFIX: &str = "main.more.window-position.";
 const TITLEBAR_POSITION_ACTION_PREFIX: &str = "main.more.titlebar-position.";
 const DISPLAY_PRIORITY_ACTION_PREFIX: &str = "main.more.display-priority.";
@@ -441,6 +442,27 @@ fn build_more_menu(cx: &gpui::App) -> MenuModel {
     let appearance = config_runtime::appearance_config(cx);
     let clipboard = config_runtime::clipboard_config(cx);
     let horizontal_list = clipboard.window_position.uses_horizontal_list();
+    let list_layout_items = ClipboardListLayout::ALL
+        .into_iter()
+        .map(|layout| {
+            let item = MenuItem::action(
+                MenuActionId::new(format!("{LIST_LAYOUT_ACTION_PREFIX}{}", layout.code())),
+                translator.translate(layout.label_key()),
+            );
+            let item = if layout != ClipboardListLayout::Single
+                && clipboard.window_position.is_screen_edge()
+            {
+                item.disabled()
+            } else {
+                item
+            };
+            if layout == clipboard.list_layout {
+                item.checked()
+            } else {
+                item
+            }
+        })
+        .collect();
     let window_position_items = ClipboardWindowPosition::ALL
         .into_iter()
         .map(|window_position| {
@@ -518,6 +540,11 @@ fn build_more_menu(cx: &gpui::App) -> MenuModel {
 
     MenuModel::new(vec![
         MenuItem::submenu(
+            translator.translate("settings.clipboard.list_layout"),
+            list_layout_items,
+        )
+        .with_icon(MenuIcon::svg("app-window.svg")),
+        MenuItem::submenu(
             translator.translate("settings.clipboard.window_position"),
             window_position_items,
         )
@@ -581,6 +608,22 @@ fn handle_more_menu_action(action: MenuActionId, cx: &mut gpui::App) {
         return;
     }
 
+    if let Some(code) = action.as_str().strip_prefix(LIST_LAYOUT_ACTION_PREFIX) {
+        if let Some(layout) = ClipboardListLayout::ALL
+            .into_iter()
+            .find(|layout| layout.code() == code)
+        {
+            let mut clipboard = config_runtime::clipboard_config(cx);
+            if layout != ClipboardListLayout::Single && clipboard.window_position.is_screen_edge() {
+                return;
+            }
+            clipboard.list_layout = layout;
+            if let Err(error) = config_runtime::set_clipboard_config(clipboard, cx) {
+                tracing::error!("保存列表布局失败：{error}");
+            }
+        }
+        return;
+    }
     if let Some(code) = action.as_str().strip_prefix(PREVIEW_PRIORITY_ACTION_PREFIX) {
         let Some(priority) = ClipboardPreviewPriority::ALL
             .into_iter()

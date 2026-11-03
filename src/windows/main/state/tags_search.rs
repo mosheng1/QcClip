@@ -244,6 +244,18 @@ impl MainWindow {
         if self.is_gallery_active() {
             self.clear_gallery_resources();
         }
+        if self.split_panes.is_some() {
+            if tab_id == TabId::Emoji {
+                self.cancel_split_previews(cx);
+                self.active_tab = tab_id;
+                self.persist_state(cx);
+                cx.notify();
+            } else {
+                self.activate_split_pane(tab_id, cx);
+            }
+            return;
+        }
+        self.cancel_split_previews(cx);
         self.cancel_hover_preview(cx);
         self.list_smooth_scroll.reset();
         self.emoji_smooth_scroll.reset();
@@ -615,6 +627,14 @@ impl MainWindow {
     }
 
     pub(crate) fn prepare_window_shown(&mut self, cx: &mut Context<Self>) {
+        if let Some(panes) = self.split_panes.clone() {
+            for pane in panes {
+                pane.update(cx, |pane, cx| {
+                    pane.prepare_window_shown(cx);
+                    cx.notify();
+                });
+            }
+        }
         let clipboard = crate::config_runtime::clipboard_config(cx);
         if clipboard.auto_scroll_to_top && self.active_tab != TabId::Emoji {
             // 显示动画首帧时窗口仍是折叠高度，延迟的 scroll_to_item 会按过小的视口对齐首项底部，

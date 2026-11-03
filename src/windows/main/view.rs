@@ -1,11 +1,11 @@
 use gpui::{
-    AnyElement, App, Context, InteractiveElement, IntoElement, ParentElement, Render, Styled,
-    Window, div,
+    AnyElement, App, Context, InteractiveElement, IntoElement, ParentElement, Render,
+    StatefulInteractiveElement, Styled, Window, div,
 };
 use gpui_component::ActiveTheme as _;
 
 use crate::{
-    config::{ListItemHeight, TitlebarPosition},
+    config::{ClipboardListLayout, ListItemHeight, TitlebarPosition},
     config_runtime,
     ui::scale::ui_rem,
 };
@@ -40,6 +40,10 @@ fn effective_titlebar_position(
 
 impl Render for MainWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.is_list_pane {
+            return self.render_list_pane(window, cx);
+        }
+        self.sync_split_layout(cx);
         let blocking_operation = MainWindowService::blocking_operation(cx);
         let is_blocked = blocking_operation.is_some();
         if is_blocked {
@@ -54,7 +58,9 @@ impl Render for MainWindow {
         let appearance = config_runtime::appearance_config(cx);
         let layout = &appearance.tab_bar;
         let tabs = super::tabs::ordered_tabs(layout);
-        if !layout.is_visible(self.active_tab.layout_button()) {
+        let active_page_visible = layout.is_visible(self.active_tab.layout_button())
+            || (self.split_panes.is_some() && self.active_tab != TabId::Emoji);
+        if !active_page_visible {
             let fallback = tabs.first().map(|tab| tab.id).unwrap_or(TabId::Clipboard);
             self.select_tab(fallback, cx);
         }
@@ -153,7 +159,7 @@ impl Render for MainWindow {
         );
         let titlebar_position =
             effective_titlebar_position(appearance.titlebar_position, horizontal);
-        let sidebar_layout = !horizontal && is_sidebar_layout(window);
+        let sidebar_layout = !horizontal && self.split_panes.is_none() && is_sidebar_layout(window);
         if !sidebar_layout || !self.tags_panel_open {
             self.finish_tags_panel_resize(cx);
         }
@@ -169,41 +175,43 @@ impl Render for MainWindow {
                 super::tabs::SymbolCategoryId::Emoji => emoji_picker::render(self, window, cx),
             }
         } else {
-            div()
-                .flex_1()
-                .min_w_0()
-                .min_h_0()
-                .flex()
-                .flex_col()
-                .child(clipboard_list::render(
-                    self.active_tab,
-                    self.can_reorder_items(),
-                    self.selected_item_id,
-                    &self.multi_selected_item_ids,
-                    &self.list_status,
-                    &self.list_scroll_handle,
-                    &mut self.list_heatmap,
-                    &self.heat_scrollbar,
-                    &mut self.adaptive_item_heights,
-                    &mut self.list_layout_cache,
-                    self.list_layout_generation,
-                    self.query_generation,
-                    self.total_item_count,
-                    &self.list_order_ids,
-                    &self.loaded_items,
-                    &self.loaded_html_images,
-                    &self.file_list_views,
-                    self.floating_toolbar_bottom,
-                    self.floating_toolbar_drag.is_some(),
-                    window,
-                    cx,
-                ))
-                .child(multi_selection_bar::render(
-                    self.multi_selected_item_ids.len(),
-                    self.active_tab,
-                    cx,
-                ))
-                .into_any_element()
+            self.sync_split_filters(cx);
+            if let Some(panes) = self.split_panes.clone() {
+                let mut content = div().flex_1().min_w_0().min_h_0().flex();
+                content = if self.split_layout(cx) == ClipboardListLayout::SideBySide {
+                    content.flex_row()
+                } else {
+                    content.flex_col()
+                };
+                for (pane, tab) in panes.into_iter().zip([TabId::Clipboard, TabId::Favorites]) {
+                    content = content.child(
+                        div()
+                            .id(("main-list-pane", tab as usize))
+                            .flex_1()
+                            .min_w_0()
+                            .min_h_0()
+                            .overflow_hidden()
+                            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                                if *hovered && this.can_follow_mouse_hover() {
+                                    this.activate_split_pane(tab, cx);
+                                }
+                            }))
+                            .on_mouse_move(cx.listener(move |this, _, _, cx| {
+                                if this.can_follow_mouse_hover() {
+                                    this.activate_split_pane(tab, cx);
+                                }
+                            }))
+                            .capture_any_mouse_down(cx.listener(move |this, _, _, cx| {
+                                this.keyboard_selection_mouse_move_sequence = None;
+                                this.activate_split_pane(tab, cx);
+                            }))
+                            .child(pane),
+                    );
+                }
+                content.into_any_element()
+            } else {
+                self.render_clipboard_content(window, cx)
+            }
         };
         let titlebar =
             title_bar::render(self, window, cx, titlebar_position, horizontal).into_any_element();
@@ -312,7 +320,150 @@ impl Render for MainWindow {
                 );
         }
 
-        root
+        root.into_any_element()
+    }
+}
+
+impl MainWindow {
+    fn render_clipboard_content(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(clipboard_list::render(
+                self.active_tab,
+                self.can_reorder_items(),
+                self.selected_item_id,
+                &self.multi_selected_item_ids,
+                &self.list_status,
+                &self.list_scroll_handle,
+                &mut self.list_heatmap,
+                &self.heat_scrollbar,
+                &mut self.adaptive_item_heights,
+                &mut self.list_layout_cache,
+                self.list_layout_generation,
+                self.query_generation,
+                self.total_item_count,
+                &self.list_order_ids,
+                &self.loaded_items,
+                &self.loaded_html_images,
+                &self.file_list_views,
+                self.floating_toolbar_bottom,
+                self.floating_toolbar_drag.is_some(),
+                window,
+                cx,
+            ))
+            .child(multi_selection_bar::render(
+                self.multi_selected_item_ids.len(),
+                self.active_tab,
+                cx,
+            ))
+            .into_any_element()
+    }
+
+    fn render_list_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let blocked = MainWindowService::blocking_operation(cx).is_some();
+        if blocked {
+            self.cancel_hover_preview(cx);
+            self.floating_toolbar_drag = None;
+            self.cancel_reorder_preview();
+            self.heat_scrollbar = Default::default();
+        }
+        self.list_smooth_scroll.set_axis(gpui::Axis::Vertical);
+        self.advance_scroll_animation(
+            window,
+            !blocked
+                && config_runtime::animation_enabled(
+                    cx,
+                    crate::config::AnimationKind::SmoothScroll,
+                ),
+        );
+        self.cleanup_image_cache(window);
+        self.cleanup_file_list_cache(window, cx);
+        let appearance = config_runtime::appearance_config(cx);
+        let clipboard = config_runtime::clipboard_config(cx);
+        let width = self.list_scroll_handle.bounds().size.width;
+        self.prepare_adaptive_height_cache(
+            AdaptiveHeightCacheKey {
+                viewport_width: width,
+                rem_size: window.rem_size(),
+                font_metrics: crate::ui::fonts::AppFontMetrics::from_window(window, cx),
+                list_item_style: appearance.list_item_style,
+                card_item_gap: appearance.card_item_gap,
+                adaptive_max_lines: appearance.adaptive_max_lines,
+                only_show_notes: appearance.only_show_notes,
+                show_info_row: appearance.item_display.shows_info_row(),
+                display_priority: clipboard.display_priority,
+                query_generation: self.query_generation,
+            },
+            appearance.list_item_height == ListItemHeight::Adaptive,
+        );
+        let theme = cx.theme().colors;
+        let translator = crate::i18n::translator(cx);
+        let active = self.pane_active;
+        let title = translator.translate(if self.active_tab == TabId::Favorites {
+            "main.tab.favorites"
+        } else {
+            "main.tab.clipboard"
+        });
+        let pane = div().size_full().flex().flex_col();
+        let pane = if clipboard.list_layout == ClipboardListLayout::SideBySide {
+            pane.border_l_1()
+        } else {
+            pane.border_t_1()
+        };
+        pane.border_color(theme.border)
+            .child(
+                div()
+                    .h(ui_rem(32.0))
+                    .flex_none()
+                    .px(ui_rem(12.0))
+                    .flex()
+                    .items_center()
+                    .gap(ui_rem(8.0))
+                    .border_t_2()
+                    .border_b_1()
+                    .border_color(if active { theme.primary } else { theme.border })
+                    .bg(if active {
+                        theme.secondary
+                    } else {
+                        theme.background
+                    })
+                    .text_size(ui_rem(12.0))
+                    .text_color(if active {
+                        theme.primary
+                    } else {
+                        theme.muted_foreground
+                    })
+                    .child(crate::ui::icon(
+                        if self.active_tab == TabId::Favorites {
+                            "star"
+                        } else {
+                            "clipboard"
+                        },
+                        14.0,
+                        if active {
+                            theme.primary
+                        } else {
+                            theme.muted_foreground
+                        },
+                    ))
+                    .child(title)
+                    .child(div().flex_1().child(self.total_item_count.to_string()))
+                    .children(active.then(|| {
+                        div()
+                            .text_size(ui_rem(10.0))
+                            .child(translator.translate("main.list.active"))
+                    })),
+            )
+            .child(self.render_clipboard_content(window, cx))
+            .into_any_element()
     }
 }
 

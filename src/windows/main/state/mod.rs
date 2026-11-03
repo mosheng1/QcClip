@@ -4,6 +4,7 @@ mod heatmap;
 mod history;
 mod list;
 mod selection;
+mod split;
 mod sync;
 mod tab_bar;
 mod tags_search;
@@ -188,6 +189,10 @@ pub struct MainWindow {
     pub(crate) multi_selected_item_ids: Vec<HistoryItemId>,
     pub list_status: ListStatus,
     pub active_tab: TabId,
+    pub(crate) split_panes: Option<[Entity<MainWindow>; 2]>,
+    pub(crate) is_list_pane: bool,
+    pub(crate) pane_active: bool,
+    pub(super) pane_peer: Option<gpui::WeakEntity<MainWindow>>,
     pub symbol_category: SymbolCategoryId,
     pub(crate) emoji_category: EmojiCategoryId,
     pub(crate) symbol_search_query: String,
@@ -407,6 +412,34 @@ impl MainWindow {
         clipboard_write_suppressor: ClipboardWriteSuppressor,
         cx: &mut Context<Self>,
     ) -> Self {
+        Self::with_preview_service(
+            history_repository,
+            favorite_repository,
+            tag_repository,
+            capture_service,
+            custom_text_service,
+            paste_service,
+            ImagePreviewService::new(raw_blob_store),
+            image_library,
+            clipboard_monitor,
+            clipboard_write_suppressor,
+            cx,
+        )
+    }
+
+    fn with_preview_service(
+        history_repository: HistoryRepository,
+        favorite_repository: FavoriteRepository,
+        tag_repository: TagRepository,
+        capture_service: CaptureService,
+        custom_text_service: CustomTextService,
+        paste_service: PasteService,
+        image_preview_service: ImagePreviewService,
+        image_library: crate::services::image_library::ImageLibraryService,
+        clipboard_monitor: Option<ClipboardMonitor>,
+        clipboard_write_suppressor: ClipboardWriteSuppressor,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let persisted_state = state_runtime::state(cx);
         let tags_panel_width = persisted_state.main_window.restored_tags_panel_width();
         let clipboard_listener_enabled = clipboard_monitor.is_some();
@@ -415,6 +448,10 @@ impl MainWindow {
             selected_item_id: None,
             list_status: ListStatus::Loading,
             active_tab: persisted_state.main_window.active_tab,
+            split_panes: None,
+            is_list_pane: false,
+            pane_active: true,
+            pane_peer: None,
             symbol_category: persisted_state.main_window.symbol_category,
             emoji_category: EmojiCategoryId::Recent,
             symbol_search_query: String::new(),
@@ -510,7 +547,7 @@ impl MainWindow {
             capture_service,
             custom_text_service,
             paste_service,
-            image_preview_service: ImagePreviewService::new(raw_blob_store),
+            image_preview_service,
             image_library,
             gallery_sort: persisted_state.main_window.gallery_sort,
             gallery_groups: Vec::new(),

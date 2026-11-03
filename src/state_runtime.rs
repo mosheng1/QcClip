@@ -13,6 +13,7 @@ use thiserror::Error;
 use tracing::warn;
 
 use crate::{
+    config::ClipboardListLayout,
     services::word_split::{JoinSeparator, SplitGranularity},
     windows::main::tabs::{SymbolCategoryId, TabId},
 };
@@ -112,8 +113,10 @@ pub(crate) struct PersistedMainWindowState {
     pub(crate) last_search_engine_template: Option<String>,
     /// 普通窗口的记忆位置；窗口处于贴边状态时不代表当前窗口位置。
     pub(crate) normal_position: Option<PersistedWindowPosition>,
-    /// 普通窗口和贴边窗口共用的客户区逻辑尺寸。
+    /// 单栏窗口的客户区逻辑尺寸，保留旧版本的尺寸记忆。
     pub(crate) size: Option<PersistedWindowSize>,
+    /// 左右双栏与上下双栏分别记忆尺寸，单栏沿用原有尺寸。
+    pub(crate) split_sizes: [Option<PersistedWindowSize>; 2],
     /// 按左、右、上、下分别保存边缘面板的宽度或高度。
     pub(crate) edge_panel_sizes: [f32; 4],
     /// 侧边标签面板的宽度，使用未经过界面缩放的逻辑像素。
@@ -265,6 +268,7 @@ impl Default for PersistedMainWindowState {
             last_search_engine_template: None,
             normal_position: None,
             size: None,
+            split_sizes: [None; 2],
             edge_panel_sizes: [360.0, 360.0, 260.0, 260.0],
             tags_panel_width: Self::DEFAULT_TAGS_PANEL_WIDTH,
             edge: None,
@@ -293,6 +297,29 @@ impl PersistedMainWindowState {
         self.size
             .filter(|size| size.is_valid())
             .unwrap_or(PersistedWindowSize::DEFAULT)
+    }
+
+    pub(crate) fn restored_layout_size(&self, layout: ClipboardListLayout) -> PersistedWindowSize {
+        let (index, fallback) = match layout {
+            ClipboardListLayout::Single => return self.restored_size(),
+            ClipboardListLayout::SideBySide => (
+                0,
+                PersistedWindowSize {
+                    width: 860.0,
+                    height: 560.0,
+                },
+            ),
+            ClipboardListLayout::Stacked => (
+                1,
+                PersistedWindowSize {
+                    width: 420.0,
+                    height: 760.0,
+                },
+            ),
+        };
+        self.split_sizes[index]
+            .filter(|size| size.is_valid())
+            .unwrap_or(fallback)
     }
 
     pub(crate) fn restored_edge_panel_size(&self, side: PersistedEdgeSide) -> f32 {
@@ -492,10 +519,16 @@ where
     }
     let app: &App = Borrow::borrow(&*cx);
     let mut state = state(app);
-    if state.main_window.size == Some(size) {
+    let clipboard = crate::config_runtime::clipboard_config(app);
+    let stored = match clipboard.list_layout.effective(clipboard.window_position) {
+        ClipboardListLayout::Single => &mut state.main_window.size,
+        ClipboardListLayout::SideBySide => &mut state.main_window.split_sizes[0],
+        ClipboardListLayout::Stacked => &mut state.main_window.split_sizes[1],
+    };
+    if *stored == Some(size) {
         return;
     }
-    state.main_window.size = Some(size);
+    *stored = Some(size);
     if let Err(error) = set_state(state, cx) {
         tracing::error!("保存主窗口大小失败：{error}");
     }
@@ -722,6 +755,7 @@ mod tests {
                     width: 480.0,
                     height: 640.0,
                 }),
+                split_sizes: [None; 2],
                 edge_panel_sizes: [420.0, 480.0, 280.0, 320.0],
                 tags_panel_width: 240.0,
                 edge: None,

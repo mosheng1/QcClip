@@ -12,7 +12,10 @@ use super::super::{
 };
 use crate::ui::{hover_icon, icon};
 use crate::{
-    config::{ClipboardConfig, ClipboardMouseBehavior, ClipboardWindowPosition, SearchEngine},
+    config::{
+        ClipboardConfig, ClipboardListLayout, ClipboardMouseBehavior, ClipboardWindowPosition,
+        SearchEngine,
+    },
     config_runtime, i18n,
     windows::menu::{DropdownItem, DropdownItemId},
 };
@@ -137,6 +140,45 @@ impl SettingsWindowView {
                         save_error.clone(),
                         cx,
                     );
+                }
+            },
+            cx,
+        );
+        let list_layout_selector = settings_dropdown(
+            "settings-clipboard-list-layout-select",
+            clipboard.list_layout.code(),
+            ClipboardListLayout::ALL
+                .into_iter()
+                .map(|layout| {
+                    let item = DropdownItem::option(
+                        DropdownItemId::new(layout.code()),
+                        translator.translate(layout.label_key()),
+                    )
+                    .selected(layout == clipboard.list_layout);
+                    if layout != ClipboardListLayout::Single
+                        && clipboard.window_position.is_screen_edge()
+                    {
+                        item.disabled()
+                    } else {
+                        item
+                    }
+                })
+                .collect(),
+            {
+                let view = view.clone();
+                let save_error = save_error.clone();
+                move |action_id, cx| {
+                    if let Some(layout) = ClipboardListLayout::ALL
+                        .into_iter()
+                        .find(|layout| layout.code() == action_id.as_str())
+                    {
+                        persist_clipboard_change(
+                            view.clone(),
+                            move |clipboard| clipboard.list_layout = layout,
+                            save_error.clone(),
+                            cx,
+                        );
+                    }
                 }
             },
             cx,
@@ -376,6 +418,18 @@ impl SettingsWindowView {
                             .into(),
                     ),
                     window_position_selector,
+                ),
+            )
+            .child(
+                self.setting_row(
+                    theme,
+                    translator.translate("settings.clipboard.list_layout"),
+                    Some(
+                        translator
+                            .translate("settings.clipboard.list_layout.description")
+                            .into(),
+                    ),
+                    list_layout_selector,
                 ),
             )
             .child(
@@ -914,6 +968,7 @@ pub(super) fn persist_clipboard_change<F>(
 fn reset_main_window_fields(clipboard: &mut ClipboardConfig) {
     let default = ClipboardConfig::default();
     clipboard.window_position = default.window_position;
+    clipboard.list_layout = default.list_layout;
     clipboard.edge_hide = default.edge_hide;
     clipboard.edge_hide_show_edge = default.edge_hide_show_edge;
     clipboard.auto_scroll_to_top = default.auto_scroll_to_top;

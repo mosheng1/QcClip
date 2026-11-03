@@ -875,6 +875,12 @@ impl MainWindow {
         event: crate::services::paste::PastedItem,
         cx: &mut Context<Self>,
     ) {
+        if let Some(panes) = self.split_panes.clone() {
+            for pane in panes {
+                pane.update(cx, |pane, cx| pane.apply_pasted_item(event, cx));
+            }
+            return;
+        }
         use crate::services::paste::PasteOrderTarget;
 
         let (record, order_target) = match self.active_tab {
@@ -1245,6 +1251,14 @@ impl MainWindow {
         history_id: HistoryItemId,
         cx: &mut Context<Self>,
     ) {
+        if let Some(panes) = self.split_panes.clone() {
+            for pane in panes {
+                pane.update(cx, |pane, cx| {
+                    pane.refresh_captured_history_item(history_id, cx)
+                });
+            }
+            return;
+        }
         match self.active_tab {
             TabId::Emoji => {}
             TabId::Favorites => self.refresh_history(cx),
@@ -1260,6 +1274,12 @@ impl MainWindow {
     }
 
     pub(crate) fn refresh_saved_item(&mut self, item_id: ClipboardItemId, cx: &mut Context<Self>) {
+        if let Some(panes) = self.split_panes.clone() {
+            for pane in panes {
+                pane.update(cx, |pane, cx| pane.refresh_saved_item(item_id, cx));
+            }
+            return;
+        }
         if self.active_tab == TabId::Emoji {
             return;
         }

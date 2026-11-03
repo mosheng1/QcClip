@@ -114,7 +114,9 @@ impl ConfigRuntime {
         if previous.clipboard.edge_hide_show_edge != config.clipboard.edge_hide_show_edge {
             crate::windows::main::MainWindowService::refresh_edge_hide_position(cx);
         }
-        if previous.clipboard.window_position != config.clipboard.window_position {
+        if previous.clipboard.window_position != config.clipboard.window_position
+            || previous.clipboard.list_layout != config.clipboard.list_layout
+        {
             crate::windows::main::MainWindowService::refresh_window_position(cx);
         }
         if previous.clipboard.hover_preview_enabled && !config.clipboard.hover_preview_enabled {
@@ -777,7 +779,7 @@ pub(crate) fn set_clipboard_config(
     if current.edge_hide_show_edge != edge_hide_show_edge {
         crate::windows::main::MainWindowService::refresh_edge_hide_position(cx);
     }
-    if current.window_position != window_position {
+    if current.window_position != window_position || current.list_layout != clipboard.list_layout {
         crate::windows::main::MainWindowService::refresh_window_position(cx);
     }
     if (current.hover_preview_enabled && !hover_preview_enabled)
