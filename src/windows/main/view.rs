@@ -1,6 +1,6 @@
 use gpui::{
-    AnyElement, App, Context, InteractiveElement, IntoElement, ParentElement, Render,
-    StatefulInteractiveElement, Styled, Window, div,
+    AnyElement, App, Context, Entity, InteractiveElement, IntoElement, MouseButton, ParentElement,
+    Render, StatefulInteractiveElement, Styled, Window, div, px,
 };
 use gpui_component::ActiveTheme as _;
 
@@ -177,38 +177,7 @@ impl Render for MainWindow {
         } else {
             self.sync_split_filters(cx);
             if let Some(panes) = self.split_panes.clone() {
-                let mut content = div().flex_1().min_w_0().min_h_0().flex();
-                content = if self.split_layout(cx) == ClipboardListLayout::SideBySide {
-                    content.flex_row()
-                } else {
-                    content.flex_col()
-                };
-                for (pane, tab) in panes.into_iter().zip([TabId::Clipboard, TabId::Favorites]) {
-                    content = content.child(
-                        div()
-                            .id(("main-list-pane", tab as usize))
-                            .flex_1()
-                            .min_w_0()
-                            .min_h_0()
-                            .overflow_hidden()
-                            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                                if *hovered && this.can_follow_mouse_hover() {
-                                    this.activate_split_pane(tab, cx);
-                                }
-                            }))
-                            .on_mouse_move(cx.listener(move |this, _, _, cx| {
-                                if this.can_follow_mouse_hover() {
-                                    this.activate_split_pane(tab, cx);
-                                }
-                            }))
-                            .capture_any_mouse_down(cx.listener(move |this, _, _, cx| {
-                                this.keyboard_selection_mouse_move_sequence = None;
-                                this.activate_split_pane(tab, cx);
-                            }))
-                            .child(pane),
-                    );
-                }
-                content.into_any_element()
+                self.render_split_content(panes, window, cx)
             } else {
                 self.render_clipboard_content(window, cx)
             }
@@ -325,6 +294,143 @@ impl Render for MainWindow {
 }
 
 impl MainWindow {
+    fn render_split_content(
+        &mut self,
+        panes: [Entity<MainWindow>; 2],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let side_by_side = self.split_layout(cx) == ClipboardListLayout::SideBySide;
+        let ratio = self.split_ratio(cx);
+        let resizing = self.split_resize.is_some();
+        let theme = cx.theme().colors;
+        let divider_size = px(6.0 * crate::ui::scale::window_scale(window));
+        let mut content = div()
+            .id("main-split-content")
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .relative()
+            .flex()
+            .on_prepaint(
+                cx.listener(|this, prepaint: &gpui::InteractivityPrepaint, _, _| {
+                    this.split_content_bounds = Some(prepaint.bounds);
+                }),
+            )
+            .on_mouse_move_all({
+                let main = cx.entity().downgrade();
+                move |event: &gpui::MouseMoveEvent, phase, _, _, cx| {
+                    if phase == gpui::DispatchPhase::Capture {
+                        let _ = main.update(cx, |this, cx| {
+                            if this.split_resize.is_some() {
+                                if event.dragging() {
+                                    this.update_split_resize(event.position, cx);
+                                } else {
+                                    this.finish_split_resize(cx);
+                                }
+                                cx.stop_propagation();
+                            }
+                        });
+                    }
+                }
+            })
+            .on_mouse_up_all({
+                let main = cx.entity().downgrade();
+                move |event, phase, _, _, cx| {
+                    if phase == gpui::DispatchPhase::Capture && event.button == MouseButton::Left {
+                        let _ = main.update(cx, |this, cx| {
+                            if this.split_resize.is_some() {
+                                this.update_split_resize(event.position, cx);
+                                this.finish_split_resize(cx);
+                                cx.stop_propagation();
+                            }
+                        });
+                    }
+                }
+            });
+        content = if side_by_side {
+            content.flex_row()
+        } else {
+            content.flex_col()
+        };
+        let mut divider = div()
+            .id("main-split-divider")
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(theme.border)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    this.begin_split_resize(event.position, divider_size, cx);
+                    if event.click_count == 2 {
+                        this.reset_split_ratio(cx);
+                    }
+                }),
+            );
+        let grip = div().rounded_full().bg(theme.muted_foreground);
+        divider = if side_by_side {
+            divider
+                .w(divider_size)
+                .h_full()
+                .cursor_col_resize()
+                .child(grip.w(ui_rem(2.0)).h(ui_rem(24.0)))
+        } else {
+            divider
+                .h(divider_size)
+                .w_full()
+                .cursor_row_resize()
+                .child(grip.h(ui_rem(2.0)).w(ui_rem(24.0)))
+        };
+        let mut divider = Some(divider);
+        for (index, (pane, tab)) in panes
+            .into_iter()
+            .zip([TabId::Clipboard, TabId::Favorites])
+            .enumerate()
+        {
+            if index == 1 {
+                content = content.children(divider.take());
+            }
+            content = content.child(
+                div()
+                    .id(("main-list-pane", tab as usize))
+                    .flex_1()
+                    .flex_grow(if index == 0 { ratio } else { 1.0 - ratio })
+                    .min_w_0()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                        if *hovered && this.can_follow_mouse_hover() {
+                            this.activate_split_pane(tab, cx);
+                        }
+                    }))
+                    .on_mouse_move(cx.listener(move |this, _, _, cx| {
+                        if this.can_follow_mouse_hover() {
+                            this.activate_split_pane(tab, cx);
+                        }
+                    }))
+                    .capture_any_mouse_down(cx.listener(move |this, _, _, cx| {
+                        this.keyboard_selection_mouse_move_sequence = None;
+                        this.activate_split_pane(tab, cx);
+                    }))
+                    .child(pane),
+            );
+        }
+        if resizing {
+            // 布局变化也会触发悬停，拖动期间遮挡列表，避免误选条目或弹出预览。
+            let overlay = div().absolute().inset_0().occlude();
+            content = content.child(if side_by_side {
+                overlay.cursor_col_resize()
+            } else {
+                overlay.cursor_row_resize()
+            });
+        }
+        content.into_any_element()
+    }
+
     fn render_clipboard_content(
         &mut self,
         window: &mut Window,

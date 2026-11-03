@@ -187,6 +187,8 @@ impl MainWindow {
     }
 
     pub fn reload_after_data_import(&mut self, cx: &mut Context<Self>) {
+        self.split_resize = None;
+        self.split_content_bounds = None;
         self.split_panes = None;
         self.stop_clipboard_listener();
         let persisted_state = state_runtime::state(cx).main_window;

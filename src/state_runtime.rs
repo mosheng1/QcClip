@@ -117,6 +117,8 @@ pub(crate) struct PersistedMainWindowState {
     pub(crate) size: Option<PersistedWindowSize>,
     /// 左右双栏与上下双栏分别记忆尺寸，单栏沿用原有尺寸。
     pub(crate) split_sizes: [Option<PersistedWindowSize>; 2],
+    /// 左右、上下双栏中剪贴板列表占用的比例，分别记忆。
+    pub(crate) split_ratios: [f32; 2],
     /// 按左、右、上、下分别保存边缘面板的宽度或高度。
     pub(crate) edge_panel_sizes: [f32; 4],
     /// 侧边标签面板的宽度，使用未经过界面缩放的逻辑像素。
@@ -269,6 +271,7 @@ impl Default for PersistedMainWindowState {
             normal_position: None,
             size: None,
             split_sizes: [None; 2],
+            split_ratios: [Self::DEFAULT_SPLIT_RATIO; 2],
             edge_panel_sizes: [360.0, 360.0, 260.0, 260.0],
             tags_panel_width: Self::DEFAULT_TAGS_PANEL_WIDTH,
             edge: None,
@@ -280,6 +283,9 @@ impl Default for PersistedMainWindowState {
 }
 
 impl PersistedMainWindowState {
+    pub(crate) const DEFAULT_SPLIT_RATIO: f32 = 0.5;
+    pub(crate) const MIN_SPLIT_RATIO: f32 = 0.2;
+    pub(crate) const MAX_SPLIT_RATIO: f32 = 0.8;
     pub(crate) const DEFAULT_TAGS_PANEL_WIDTH: f32 = 184.0;
     pub(crate) const MIN_TAGS_PANEL_WIDTH: f32 = 120.0;
     pub(crate) const MAX_TAGS_PANEL_WIDTH: f32 = 360.0;
@@ -320,6 +326,20 @@ impl PersistedMainWindowState {
         self.split_sizes[index]
             .filter(|size| size.is_valid())
             .unwrap_or(fallback)
+    }
+
+    pub(crate) fn restored_split_ratio(&self, layout: ClipboardListLayout) -> f32 {
+        let index = match layout {
+            ClipboardListLayout::Single => return Self::DEFAULT_SPLIT_RATIO,
+            ClipboardListLayout::SideBySide => 0,
+            ClipboardListLayout::Stacked => 1,
+        };
+        let ratio = self.split_ratios[index];
+        if ratio.is_finite() {
+            ratio.clamp(Self::MIN_SPLIT_RATIO, Self::MAX_SPLIT_RATIO)
+        } else {
+            Self::DEFAULT_SPLIT_RATIO
+        }
     }
 
     pub(crate) fn restored_edge_panel_size(&self, side: PersistedEdgeSide) -> f32 {
@@ -756,6 +776,7 @@ mod tests {
                     height: 640.0,
                 }),
                 split_sizes: [None; 2],
+                split_ratios: [0.6, 0.4],
                 edge_panel_sizes: [420.0, 480.0, 280.0, 320.0],
                 tags_panel_width: 240.0,
                 edge: None,

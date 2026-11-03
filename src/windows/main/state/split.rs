@@ -1,8 +1,21 @@
 use super::*;
 use crate::config::ClipboardListLayout;
+use crate::state_runtime::PersistedMainWindowState;
 
 #[cfg(test)]
 mod tests;
+
+const CENTER_SNAP_THRESHOLD: f32 = 0.01;
+const CENTER_RELEASE_THRESHOLD: f32 = 0.015;
+
+#[derive(Clone, Copy)]
+pub(crate) struct SplitResize {
+    layout: ClipboardListLayout,
+    start: Pixels,
+    start_ratio: f32,
+    ratio: f32,
+    available: Pixels,
+}
 
 impl MainWindow {
     pub(crate) fn split_layout(&self, cx: &App) -> ClipboardListLayout {
@@ -11,7 +24,15 @@ impl MainWindow {
     }
 
     pub(crate) fn sync_split_layout(&mut self, cx: &mut Context<Self>) {
-        let split = self.split_layout(cx) != ClipboardListLayout::Single;
+        let layout = self.split_layout(cx);
+        if self.split_resize.is_some_and(|resize| {
+            resize.layout != layout
+                || self.active_tab == TabId::Emoji
+                || MainWindowService::blocking_operation(cx).is_some()
+        }) {
+            self.finish_split_resize(cx);
+        }
+        let split = layout != ClipboardListLayout::Single;
         if split && self.split_panes.is_none() {
             let panes = [TabId::Clipboard, TabId::Favorites].map(|tab| {
                 cx.new(|cx| {
@@ -55,7 +76,123 @@ impl MainWindow {
         } else if !split && self.split_panes.is_some() {
             self.cancel_split_previews(cx);
             self.split_panes = None;
+            self.split_content_bounds = None;
             self.refresh_history(cx);
+        }
+    }
+
+    pub(crate) fn split_ratio(&self, cx: &App) -> f32 {
+        let layout = self.split_layout(cx);
+        self.split_resize
+            .filter(|resize| resize.layout == layout)
+            .map(|resize| resize.ratio)
+            .unwrap_or_else(|| {
+                state_runtime::state(cx)
+                    .main_window
+                    .restored_split_ratio(layout)
+            })
+    }
+
+    pub(crate) fn begin_split_resize(
+        &mut self,
+        position: Point<Pixels>,
+        divider_size: Pixels,
+        cx: &mut Context<Self>,
+    ) {
+        let layout = self.split_layout(cx);
+        if layout == ClipboardListLayout::Single
+            || self.split_panes.is_none()
+            || self.active_tab == TabId::Emoji
+            || MainWindowService::blocking_operation(cx).is_some()
+        {
+            return;
+        }
+        let Some(bounds) = self.split_content_bounds else {
+            return;
+        };
+        let (start, available) = if layout == ClipboardListLayout::SideBySide {
+            (position.x, bounds.size.width - divider_size)
+        } else {
+            (position.y, bounds.size.height - divider_size)
+        };
+        if available <= px(0.0) {
+            return;
+        }
+        let ratio = self.split_ratio(cx);
+        self.window_drag_start = None;
+        self.cancel_hover_preview(cx);
+        self.cancel_split_previews(cx);
+        self.split_resize = Some(SplitResize {
+            layout,
+            start,
+            start_ratio: ratio,
+            ratio,
+            available,
+        });
+        cx.notify();
+    }
+
+    pub(crate) fn update_split_resize(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(resize) = self.split_resize.as_mut() else {
+            return;
+        };
+        let position = if resize.layout == ClipboardListLayout::SideBySide {
+            position.x
+        } else {
+            position.y
+        };
+        let ratio = (resize.start_ratio
+            + f32::from(position - resize.start) / f32::from(resize.available))
+        .clamp(
+            PersistedMainWindowState::MIN_SPLIT_RATIO,
+            PersistedMainWindowState::MAX_SPLIT_RATIO,
+        );
+        let center = PersistedMainWindowState::DEFAULT_SPLIT_RATIO;
+        // 吸附后稍微扩大脱离范围，避免鼠标在阈值附近时分隔条反复跳动。
+        let threshold = if resize.ratio == center {
+            CENTER_RELEASE_THRESHOLD
+        } else {
+            CENTER_SNAP_THRESHOLD
+        };
+        let ratio = if (ratio - center).abs() <= threshold {
+            center
+        } else {
+            ratio
+        };
+        if resize.ratio != ratio {
+            resize.ratio = ratio;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn finish_split_resize(&mut self, cx: &mut Context<Self>) {
+        if let Some(resize) = self.split_resize.take() {
+            self.save_split_ratio(resize.layout, resize.ratio, cx);
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn reset_split_ratio(&mut self, cx: &mut Context<Self>) {
+        let ratio = PersistedMainWindowState::DEFAULT_SPLIT_RATIO;
+        if let Some(resize) = self.split_resize.as_mut() {
+            resize.start_ratio = ratio;
+            resize.ratio = ratio;
+        } else {
+            self.save_split_ratio(self.split_layout(cx), ratio, cx);
+        }
+        cx.notify();
+    }
+
+    fn save_split_ratio(&self, layout: ClipboardListLayout, ratio: f32, cx: &mut Context<Self>) {
+        let index = match layout {
+            ClipboardListLayout::Single => return,
+            ClipboardListLayout::SideBySide => 0,
+            ClipboardListLayout::Stacked => 1,
+        };
+        let mut state = state_runtime::state(cx);
+        state.main_window.split_ratios[index] = ratio;
+        if let Err(error) = state_runtime::set_state(state, cx) {
+            tracing::error!("保存主窗口分栏比例失败：{error}");
         }
     }
 
@@ -99,6 +236,7 @@ impl MainWindow {
     pub(crate) fn activate_split_pane(&mut self, tab: TabId, cx: &mut Context<Self>) {
         if tab == TabId::Emoji
             || self.active_tab == tab
+            || self.split_resize.is_some()
             || MainWindowService::blocking_operation(cx).is_some()
         {
             return;

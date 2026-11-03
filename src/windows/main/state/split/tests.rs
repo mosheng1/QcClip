@@ -3,6 +3,7 @@ use crate::{
     config::ClipboardWindowPosition,
     services::{database::Database, image_library::ImageLibraryService},
 };
+use gpui::BorrowAppContext as _;
 
 struct Fixture {
     directory: tempfile::TempDir,
@@ -94,6 +95,337 @@ impl Fixture {
         self.main.update(cx, |main, cx| main.sync_split_layout(cx));
         cx.run_until_parked();
     }
+
+    fn open_window(&self, cx: &mut gpui::TestAppContext) -> gpui::AnyWindowHandle {
+        let main = self.main.clone();
+        cx.update(MenuService::install);
+        #[cfg(target_os = "windows")]
+        cx.update(|cx| {
+            crate::platform::drag_preview::DragPreviewService::install(cx);
+            crate::platform::external_drag::ExternalDragService::install(cx);
+        });
+        let window = cx.open_window(gpui::size(px(860.0), px(560.0)), |window, cx| {
+            gpui_component::Root::new(main.clone(), window, cx)
+        });
+        cx.update(|cx| {
+            MainWindowService::set_main_view(main, cx);
+            cx.update_global::<MainWindowService, _>(|service, _| {
+                service.window = Some(window.into());
+                service.window_state.set_visibility(true);
+            });
+        });
+        draw_window(window.into(), cx);
+        window.into()
+    }
+}
+
+fn draw_window(window: gpui::AnyWindowHandle, cx: &mut gpui::TestAppContext) {
+    for _ in 0..3 {
+        cx.update_window(window, |_, window, cx| {
+            window.refresh();
+            window.draw(cx).clear(cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+    }
+}
+
+#[test]
+fn split_ratios_default_for_old_state_and_validate_saved_values() {
+    use state_runtime::PersistedMainWindowState;
+    let old: PersistedMainWindowState = serde_json::from_str("{}").unwrap();
+    for layout in [
+        ClipboardListLayout::SideBySide,
+        ClipboardListLayout::Stacked,
+    ] {
+        assert_eq!(old.restored_split_ratio(layout), 0.5);
+    }
+    let state = PersistedMainWindowState {
+        split_ratios: [-1.0, 2.0],
+        ..Default::default()
+    };
+    assert_eq!(
+        state.restored_split_ratio(ClipboardListLayout::SideBySide),
+        0.2
+    );
+    assert_eq!(
+        state.restored_split_ratio(ClipboardListLayout::Stacked),
+        0.8
+    );
+    let state = PersistedMainWindowState {
+        split_ratios: [f32::NAN, f32::INFINITY],
+        ..Default::default()
+    };
+    assert_eq!(
+        state.restored_split_ratio(ClipboardListLayout::SideBySide),
+        0.5
+    );
+    assert_eq!(
+        state.restored_split_ratio(ClipboardListLayout::Stacked),
+        0.5
+    );
+}
+
+#[gpui::test]
+fn dragging_split_divider_resizes_both_orientations_and_persists_on_release(
+    cx: &mut gpui::TestAppContext,
+) {
+    let fixture = Fixture::new(cx);
+    let window = fixture.open_window(cx);
+    fixture.main.update(cx, |main, cx| main.persist_state(cx));
+    let state_path = fixture.directory.path().join("state.json");
+    for (layout, target) in [
+        (ClipboardListLayout::SideBySide, 0.65),
+        (ClipboardListLayout::Stacked, 0.35),
+    ] {
+        fixture.change_layout(layout, ClipboardWindowPosition::Remember, cx);
+        draw_window(window, cx);
+        let panes = fixture.panes(cx);
+        let active = fixture.main.read_with(cx, |main, _| main.active_tab);
+        let selections = panes.each_ref().map(|pane| {
+            pane.update(cx, |pane, _| {
+                pane.selected_item_id = pane.list_order_ids.last().copied();
+                pane.selected_item_id
+            })
+        });
+        let before = std::fs::read(&state_path).unwrap();
+        let start = fixture
+            .main
+            .read_with(cx, |main, _| main.split_content_bounds.unwrap().center());
+        let mut visual = gpui::VisualTestContext::from_window(window, cx);
+        visual.simulate_mouse_down(start, gpui::MouseButton::Left, Modifiers::default());
+        let available = fixture.main.read_with(cx, |main, _| {
+            assert!(main.window_drag_start.is_none());
+            main.split_resize.unwrap().available
+        });
+        let mut end = start;
+        if layout == ClipboardListLayout::SideBySide {
+            end.x += available * (target - 0.5);
+        } else {
+            end.y += available * (target - 0.5);
+        }
+        visual.simulate_mouse_move(end, Some(gpui::MouseButton::Left), Modifiers::default());
+        draw_window(window, cx);
+        fixture.main.read_with(cx, |main, cx| {
+            assert!((main.split_ratio(cx) - target).abs() < 0.001);
+            assert_eq!(main.active_tab, active);
+            assert!(main.window_drag_start.is_none());
+        });
+        assert_eq!(std::fs::read(&state_path).unwrap(), before);
+        let bounds = panes
+            .each_ref()
+            .map(|pane| pane.read_with(cx, |pane, _| pane.list_scroll_handle.bounds()));
+        let spacing = if layout == ClipboardListLayout::SideBySide {
+            bounds[1].origin.x - bounds[0].origin.x
+        } else {
+            bounds[1].origin.y - bounds[0].origin.y
+        };
+        assert!((f32::from(spacing - px(6.0)) / f32::from(available) - target).abs() < 0.01);
+        for (index, pane) in panes.iter().enumerate() {
+            assert_eq!(
+                pane.read_with(cx, |pane, _| pane.selected_item_id),
+                selections[index]
+            );
+        }
+        visual.simulate_mouse_up(end, gpui::MouseButton::Left, Modifiers::default());
+        fixture
+            .main
+            .read_with(cx, |main, _| assert!(main.split_resize.is_none()));
+        let saved: state_runtime::PersistedState =
+            serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+        assert!((saved.main_window.restored_split_ratio(layout) - target).abs() < 0.001);
+        visual.simulate_resize(gpui::size(px(1000.0), px(700.0)));
+        draw_window(window, cx);
+        fixture.main.read_with(cx, |main, cx| {
+            assert!((main.split_ratio(cx) - target).abs() < 0.001);
+        });
+    }
+    cx.update(|cx| state_runtime::StateRuntime::install(state_path.clone(), cx));
+    fixture.change_layout(
+        ClipboardListLayout::SideBySide,
+        ClipboardWindowPosition::Remember,
+        cx,
+    );
+    draw_window(window, cx);
+    let start = fixture.main.read_with(cx, |main, cx| {
+        assert!((main.split_ratio(cx) - 0.65).abs() < 0.001);
+        let bounds = main.split_content_bounds.unwrap();
+        gpui::point(
+            bounds.origin.x + (bounds.size.width - px(6.0)) * main.split_ratio(cx) + px(3.0),
+            bounds.center().y,
+        )
+    });
+    let mut visual = gpui::VisualTestContext::from_window(window, cx);
+    visual.simulate_event(gpui::MouseDownEvent {
+        position: start,
+        button: gpui::MouseButton::Left,
+        modifiers: Modifiers::default(),
+        click_count: 2,
+        first_mouse: false,
+    });
+    visual.simulate_mouse_up(start, gpui::MouseButton::Left, Modifiers::default());
+    let saved: state_runtime::PersistedState =
+        serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+    assert_eq!(saved.main_window.split_ratios[0], 0.5);
+    assert!((saved.main_window.split_ratios[1] - 0.35).abs() < 0.001);
+    fixture.change_layout(
+        ClipboardListLayout::Stacked,
+        ClipboardWindowPosition::ScreenLeftCenter,
+        cx,
+    );
+    fixture.change_layout(
+        ClipboardListLayout::Stacked,
+        ClipboardWindowPosition::Remember,
+        cx,
+    );
+    fixture.main.read_with(cx, |main, cx| {
+        assert!((main.split_ratio(cx) - 0.35).abs() < 0.001);
+    });
+}
+
+#[gpui::test]
+fn split_divider_snaps_to_center_with_a_release_buffer_and_saves_exactly_half(
+    cx: &mut gpui::TestAppContext,
+) {
+    let fixture = Fixture::new(cx);
+    cx.update(|cx| {
+        let mut state = state_runtime::state(cx);
+        state.main_window.split_ratios = [0.6, 0.4];
+        state_runtime::set_state(state, cx).unwrap();
+    });
+    let window = fixture.open_window(cx);
+    for layout in [
+        ClipboardListLayout::SideBySide,
+        ClipboardListLayout::Stacked,
+    ] {
+        fixture.change_layout(layout, ClipboardWindowPosition::Remember, cx);
+        draw_window(window, cx);
+        let (start, start_ratio) = fixture.main.read_with(cx, |main, cx| {
+            let bounds = main.split_content_bounds.unwrap();
+            let ratio = main.split_ratio(cx);
+            let mut position = bounds.center();
+            if layout == ClipboardListLayout::SideBySide {
+                position.x = bounds.origin.x + (bounds.size.width - px(6.0)) * ratio + px(3.0);
+            } else {
+                position.y = bounds.origin.y + (bounds.size.height - px(6.0)) * ratio + px(3.0);
+            }
+            (position, ratio)
+        });
+        let mut visual = gpui::VisualTestContext::from_window(window, cx);
+        visual.simulate_mouse_down(start, gpui::MouseButton::Left, Modifiers::default());
+        let available = fixture
+            .main
+            .read_with(cx, |main, _| main.split_resize.unwrap().available);
+        let mut end = start;
+        for (target, expected) in [
+            (0.60, 0.60),
+            (0.511, 0.511),
+            (0.509, 0.5),
+            (0.514, 0.5),
+            (0.516, 0.516),
+            (0.509, 0.5),
+            (0.486, 0.5),
+            (0.484, 0.484),
+            (0.489, 0.489),
+            (0.491, 0.5),
+        ] {
+            if layout == ClipboardListLayout::SideBySide {
+                end.x = start.x + available * (target - start_ratio);
+            } else {
+                end.y = start.y + available * (target - start_ratio);
+            }
+            visual.simulate_mouse_move(end, Some(gpui::MouseButton::Left), Modifiers::default());
+            fixture.main.read_with(cx, |main, cx| {
+                assert!((main.split_ratio(cx) - expected).abs() < 0.0001);
+            });
+        }
+        draw_window(window, cx);
+        let bounds = fixture
+            .panes(cx)
+            .each_ref()
+            .map(|pane| pane.read_with(cx, |pane, _| pane.list_scroll_handle.bounds()));
+        let spacing = if layout == ClipboardListLayout::SideBySide {
+            bounds[1].origin.x - bounds[0].origin.x
+        } else {
+            bounds[1].origin.y - bounds[0].origin.y
+        };
+        assert!(f32::from(spacing - px(6.0) - available * 0.5).abs() < 1.0);
+        visual.simulate_mouse_up(end, gpui::MouseButton::Left, Modifiers::default());
+        let saved: state_runtime::PersistedState = serde_json::from_slice(
+            &std::fs::read(fixture.directory.path().join("state.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(saved.main_window.restored_split_ratio(layout), 0.5);
+    }
+}
+
+#[gpui::test]
+fn split_resize_releases_outside_the_window_and_recovers_a_missing_mouse_up(
+    cx: &mut gpui::TestAppContext,
+) {
+    let fixture = Fixture::new(cx);
+    let window = fixture.open_window(cx);
+    let start = fixture
+        .main
+        .read_with(cx, |main, _| main.split_content_bounds.unwrap().center());
+    let mut visual = gpui::VisualTestContext::from_window(window, cx);
+    visual.simulate_mouse_down(start, gpui::MouseButton::Left, Modifiers::default());
+    let outside = gpui::point(px(-100.0), px(-100.0));
+    visual.simulate_mouse_move(outside, Some(gpui::MouseButton::Left), Modifiers::default());
+    visual.simulate_mouse_up(outside, gpui::MouseButton::Left, Modifiers::default());
+    fixture.main.read_with(cx, |main, cx| {
+        assert!(main.split_resize.is_none());
+        assert_eq!(main.split_ratio(cx), 0.2);
+    });
+    draw_window(window, cx);
+    let start = fixture.main.read_with(cx, |main, _| {
+        let bounds = main.split_content_bounds.unwrap();
+        gpui::point(
+            bounds.origin.x + (bounds.size.width - px(6.0)) * 0.2 + px(3.0),
+            bounds.center().y,
+        )
+    });
+    visual.simulate_mouse_down(start, gpui::MouseButton::Left, Modifiers::default());
+    let outside = gpui::point(px(2000.0), start.y);
+    visual.simulate_mouse_move(outside, Some(gpui::MouseButton::Left), Modifiers::default());
+    visual.simulate_mouse_move(outside, None, Modifiers::default());
+    fixture.main.read_with(cx, |main, cx| {
+        assert!(main.split_resize.is_none());
+        assert_eq!(main.split_ratio(cx), 0.8);
+        assert_eq!(state_runtime::state(cx).main_window.split_ratios[0], 0.8);
+        assert!(main.window_drag_start.is_none());
+    });
+}
+
+#[gpui::test]
+fn split_resize_clamps_and_layout_changes_finish_the_original_orientation(
+    cx: &mut gpui::TestAppContext,
+) {
+    let fixture = Fixture::new(cx);
+    fixture.main.update(cx, |main, cx| {
+        main.split_content_bounds = Some(gpui::Bounds::new(
+            gpui::point(px(0.0), px(0.0)),
+            gpui::size(px(1006.0), px(506.0)),
+        ));
+        let start = gpui::point(px(503.0), px(253.0));
+        main.begin_split_resize(start, px(6.0), cx);
+        main.update_split_resize(gpui::point(px(-500.0), start.y), cx);
+        assert_eq!(main.split_ratio(cx), 0.2);
+        main.update_split_resize(gpui::point(px(2000.0), start.y), cx);
+        assert_eq!(main.split_ratio(cx), 0.8);
+        main.activate_split_pane(TabId::Favorites, cx);
+        assert_eq!(main.active_tab, TabId::Clipboard);
+    });
+    fixture.change_layout(
+        ClipboardListLayout::Stacked,
+        ClipboardWindowPosition::Remember,
+        cx,
+    );
+    fixture.main.read_with(cx, |main, cx| {
+        assert!(main.split_resize.is_none());
+        assert_eq!(main.split_ratio(cx), 0.5);
+        assert_eq!(state_runtime::state(cx).main_window.split_ratios[0], 0.8);
+    });
 }
 
 #[gpui::test]
@@ -327,7 +659,6 @@ fn layout_sizes_are_saved_independently_and_old_state_keeps_its_single_size(
 fn rendered_panes_follow_orientation_and_mouse_and_keyboard_target_the_active_list(
     cx: &mut gpui::TestAppContext,
 ) {
-    use gpui::BorrowAppContext as _;
     let fixture = Fixture::new(cx);
     let main = fixture.main.clone();
     cx.update(MenuService::install);
