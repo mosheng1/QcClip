@@ -64,10 +64,7 @@ pub(crate) enum GlobalMouseEvent {
 #[cfg(target_os = "windows")]
 mod windows_input {
     use std::{
-        sync::{
-            Arc, Mutex, OnceLock,
-            atomic::{AtomicIsize, Ordering},
-        },
+        sync::{Arc, Mutex, OnceLock, mpsc},
         thread,
         time::Duration,
     };
@@ -84,53 +81,107 @@ mod windows_input {
     use super::{GlobalMouseEvent, PointerButtons, PointerRegionWatch, PointerSnapshot};
 
     static INPUT_STATE: OnceLock<Arc<Mutex<InputState>>> = OnceLock::new();
-    static SCROLL_COMPAT_HOOK: AtomicIsize = AtomicIsize::new(0);
+    static SCROLL_COMPAT_HOOK: Mutex<Option<ScrollCompatHookThread>> = Mutex::new(None);
     static CURRENT_TRIGGER_KEY: Mutex<Option<TriggerKey>> = Mutex::new(None);
     static SHORTCUT_SIMULATION_LOCK: Mutex<()> = Mutex::new(());
     const PHYSICAL_KEY_COUNT: usize = raw_input::Key::Unidentified as usize + 1;
     static PHYSICAL_KEY_STATE: OnceLock<Mutex<PhysicalKeySnapshot>> = OnceLock::new();
 
+    /// 运行低级鼠标钩子的专用线程。
+    ///
+    /// 低级钩子回调在安装线程的消息循环中执行，系统会等待回调返回后才继续分发鼠标事件。
+    /// 放在独立线程里，避免 GPUI 主线程繁忙时拖慢全系统鼠标，或因超时被系统静默移除钩子。
+    struct ScrollCompatHookThread {
+        thread_id: u32,
+        handle: thread::JoinHandle<Result<(), String>>,
+    }
+
     pub(crate) fn set_inactive_window_scroll_compatibility(enabled: bool) -> Result<(), String> {
-        use windows::Win32::UI::WindowsAndMessaging::{
-            HHOOK, SetWindowsHookExW, UnhookWindowsHookEx, WH_MOUSE_LL,
+        use windows::Win32::{
+            Foundation::{LPARAM, WPARAM},
+            UI::WindowsAndMessaging::{PostThreadMessageW, WM_QUIT},
         };
 
+        let mut current = match SCROLL_COMPAT_HOOK.lock() {
+            Ok(current) => current,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         if enabled {
-            if SCROLL_COMPAT_HOOK.load(Ordering::Acquire) != 0 {
-                return Ok(());
+            if current.is_none() {
+                *current = Some(spawn_scroll_compat_hook_thread()?);
             }
-            // SAFETY: 钩子回调为静态函数，只转发鼠标位于本进程非前台窗口上的滚轮消息。
-            let hook = unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(scroll_compat_hook), None, 0) }
-                .map_err(|error| format!("安装非焦点窗口滚轮兼容钩子失败：{error}"))?;
-            let previous = SCROLL_COMPAT_HOOK.compare_exchange(
-                0,
-                hook.0 as isize,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            );
-            if previous.is_err() {
-                // SAFETY: hook 是本次成功创建但未保存的钩子句柄。
+            return Ok(());
+        }
+
+        let Some(hook_thread) = current.take() else {
+            return Ok(());
+        };
+        // SAFETY: thread_id 来自仍在运行的钩子线程，且该线程已创建消息队列。
+        if let Err(error) =
+            unsafe { PostThreadMessageW(hook_thread.thread_id, WM_QUIT, WPARAM(0), LPARAM(0)) }
+        {
+            *current = Some(hook_thread);
+            return Err(format!("通知非焦点窗口滚轮兼容线程退出失败：{error}"));
+        }
+        hook_thread
+            .handle
+            .join()
+            .map_err(|_| "非焦点窗口滚轮兼容线程异常退出".to_owned())?
+    }
+
+    fn spawn_scroll_compat_hook_thread() -> Result<ScrollCompatHookThread, String> {
+        use windows::Win32::{
+            System::Threading::GetCurrentThreadId,
+            UI::WindowsAndMessaging::{
+                GetMessageW, MSG, PM_NOREMOVE, PeekMessageW, SetWindowsHookExW,
+                UnhookWindowsHookEx, WH_MOUSE_LL,
+            },
+        };
+
+        let (ready_sender, ready_receiver) = mpsc::channel::<Result<u32, String>>();
+        let handle = thread::Builder::new()
+            .name("qcclip-scroll-compat-hook".to_owned())
+            .spawn(move || {
+                let mut message = MSG::default();
+                // SAFETY: 预先创建本线程消息队列，确保之后能收到 PostThreadMessageW 发来的 WM_QUIT。
                 unsafe {
-                    let _ = UnhookWindowsHookEx(hook);
+                    let _ = PeekMessageW(&mut message, None, 0, 0, PM_NOREMOVE);
                 }
+                // SAFETY: 钩子回调为静态函数，只转发鼠标位于本进程非前台窗口上的滚轮消息。
+                let hook = match unsafe {
+                    SetWindowsHookExW(WH_MOUSE_LL, Some(scroll_compat_hook), None, 0)
+                } {
+                    Ok(hook) => hook,
+                    Err(error) => {
+                        let error = format!("安装非焦点窗口滚轮兼容钩子失败：{error}");
+                        let _ = ready_sender.send(Err(error.clone()));
+                        return Err(error);
+                    }
+                };
+                // SAFETY: 仅查询当前线程 ID。
+                let _ = ready_sender.send(Ok(unsafe { GetCurrentThreadId() }));
+
+                // 消息循环负责驱动钩子回调，收到 WM_QUIT 时返回 0，出错时返回 -1。
+                // SAFETY: message 为本线程栈上的有效 MSG。
+                while unsafe { GetMessageW(&mut message, None, 0, 0) }.0 > 0 {}
+
+                // SAFETY: hook 由本线程创建，且只在此处释放一次。
+                unsafe { UnhookWindowsHookEx(hook) }
+                    .map_err(|error| format!("卸载非焦点窗口滚轮兼容钩子失败：{error}"))
+            })
+            .map_err(|error| format!("无法启动非焦点窗口滚轮兼容线程：{error}"))?;
+
+        match ready_receiver.recv() {
+            Ok(Ok(thread_id)) => Ok(ScrollCompatHookThread { thread_id, handle }),
+            Ok(Err(error)) => {
+                let _ = handle.join();
+                Err(error)
             }
-        } else {
-            let hook = SCROLL_COMPAT_HOOK.load(Ordering::Acquire);
-            if hook != 0 {
-                // SAFETY: 句柄由上方 SetWindowsHookExW 创建，且只会在此处释放一次。
-                unsafe {
-                    UnhookWindowsHookEx(HHOOK(hook as *mut _))
-                        .map_err(|error| format!("卸载非焦点窗口滚轮兼容钩子失败：{error}"))?;
-                }
-                let _ = SCROLL_COMPAT_HOOK.compare_exchange(
-                    hook,
-                    0,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                );
+            Err(_) => {
+                let _ = handle.join();
+                Err("非焦点窗口滚轮兼容线程启动前异常退出".to_owned())
             }
         }
-        Ok(())
     }
 
     unsafe extern "system" fn scroll_compat_hook(

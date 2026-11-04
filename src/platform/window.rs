@@ -3200,7 +3200,8 @@ fn configure_borderless_popup(window: &Window, mouse_passthrough: bool) {
     use windows::Win32::UI::WindowsAndMessaging::{
         GWL_EXSTYLE, GWL_STYLE, GetWindowLongPtrW, HWND_TOPMOST, SWP_FRAMECHANGED, SWP_NOACTIVATE,
         SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SetWindowLongPtrW, SetWindowPos,
-        WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP, WS_VISIBLE,
+        WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
+        WS_POPUP, WS_VISIBLE,
     };
 
     let Ok(handle) = HasWindowHandle::window_handle(window) else {
@@ -3259,7 +3260,9 @@ fn configure_borderless_popup(window: &Window, mouse_passthrough: bool) {
             | WS_EX_TOOLWINDOW.0 as isize
             | WS_EX_NOACTIVATE.0 as isize
             | if mouse_passthrough {
-                WS_EX_LAYERED.0 as isize
+                // HTTRANSPARENT 只对同线程的命中测试生效；WS_EX_LAYERED + WS_EX_TRANSPARENT
+                // 让窗口对所有线程的命中测试（包括滚轮兼容钩子线程的 WindowFromPoint）都透明。
+                WS_EX_LAYERED.0 as isize | WS_EX_TRANSPARENT.0 as isize
             } else {
                 0
             })
