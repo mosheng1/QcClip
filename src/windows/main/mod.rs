@@ -112,7 +112,13 @@ impl MainWindowService {
                     input::GlobalMouseEvent::MouseUp {
                         position,
                         left_pressed,
-                    } if !left_pressed => window_drag::handle_mouse_up(position, cx),
+                    } if !left_pressed => {
+                        if let Some(view) = cx.global::<Self>().main_view.clone() {
+                            view.update(cx, |main, cx| main.finish_split_resize(cx));
+                        }
+                        window_drag::handle_mouse_up(position, cx);
+                        Self::request_pointer_check(cx);
+                    }
                     input::GlobalMouseEvent::MouseUp { .. } => {}
                 });
             }
@@ -464,6 +470,9 @@ impl MainWindowService {
             return;
         };
         if visible {
+            let main_view = main_view
+                .read_with(cx, |view, cx| view.active_list_entity(cx))
+                .unwrap_or(main_view);
             let into_main_input = crate::services::focus::input_window_is_foreground();
             let started = main_view.update(cx, |view, cx| {
                 view.paste_selected_item_as_plain_text(into_main_input, cx)
@@ -484,6 +493,9 @@ impl MainWindowService {
             .try_global::<Self>()
             .and_then(|service| service.main_view.clone());
         if let Some(main_view) = main_view {
+            let main_view = main_view
+                .read_with(cx, |view, cx| view.active_list_entity(cx))
+                .unwrap_or(main_view);
             let into_main_input = Self::is_logically_visible(cx)
                 && crate::services::focus::input_window_is_foreground();
             main_view.update(cx, |view, cx| {
@@ -649,6 +661,7 @@ impl MainWindowService {
         };
         main_view.update(cx, |main_window, cx| {
             main_window.cancel_hover_preview(cx);
+            main_window.cancel_split_previews(cx);
         });
     }
 
@@ -834,6 +847,20 @@ pub(crate) fn dispatch_session_shortcut(id: SessionShortcutId, cx: &mut App) {
         .and_then(|service| Some((service.window?, service.main_view.clone()?)))
     else {
         return;
+    };
+    let list_action = !matches!(
+        id,
+        SessionShortcutId::PreviousTab
+            | SessionShortcutId::NextTab
+            | SessionShortcutId::ToggleWindowFixed
+            | SessionShortcutId::FocusSearch
+    );
+    let main_view = if list_action {
+        main_view
+            .read_with(cx, |main, cx| main.active_list_entity(cx))
+            .unwrap_or(main_view)
+    } else {
+        main_view
     };
     let favorite_removal =
         main_view.read_with(cx, |main, _| main.favorite_removal_target_for_shortcut(id));

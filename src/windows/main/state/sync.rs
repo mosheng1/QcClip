@@ -31,6 +31,15 @@ impl MainWindow {
         changes: Vec<ReceivedChange>,
         cx: &mut Context<Self>,
     ) {
+        if let Some(panes) = self.split_panes.clone() {
+            for pane in panes {
+                pane.update(cx, |pane, cx| {
+                    pane.receive_sync_changes(changes.clone(), cx)
+                });
+            }
+            self.refresh_tags(cx);
+            return;
+        }
         for change in changes {
             self.sync_changes
                 .entry(change.item_id)

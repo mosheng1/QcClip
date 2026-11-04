@@ -114,7 +114,10 @@ impl ConfigRuntime {
         if previous.clipboard.edge_hide_show_edge != config.clipboard.edge_hide_show_edge {
             crate::windows::main::MainWindowService::refresh_edge_hide_position(cx);
         }
-        if previous.clipboard.window_position != config.clipboard.window_position {
+        if previous.clipboard.window_position != config.clipboard.window_position
+            || previous.clipboard.effective_list_layout()
+                != config.clipboard.effective_list_layout()
+        {
             crate::windows::main::MainWindowService::refresh_window_position(cx);
         }
         if previous.clipboard.hover_preview_enabled && !config.clipboard.hover_preview_enabled {
@@ -758,6 +761,7 @@ pub(crate) fn set_clipboard_config(
     let edge_hide = clipboard.edge_hide;
     let edge_hide_show_edge = clipboard.edge_hide_show_edge;
     let window_position = clipboard.window_position;
+    let list_layout_changed = current.effective_list_layout() != clipboard.effective_list_layout();
     let hover_preview_enabled = clipboard.hover_preview_enabled;
     let preview_types = clipboard.preview_types.clone();
     if window_position.uses_horizontal_list() && next.appearance.titlebar_position.is_vertical() {
@@ -777,7 +781,7 @@ pub(crate) fn set_clipboard_config(
     if current.edge_hide_show_edge != edge_hide_show_edge {
         crate::windows::main::MainWindowService::refresh_edge_hide_position(cx);
     }
-    if current.window_position != window_position {
+    if current.window_position != window_position || list_layout_changed {
         crate::windows::main::MainWindowService::refresh_window_position(cx);
     }
     if (current.hover_preview_enabled && !hover_preview_enabled)

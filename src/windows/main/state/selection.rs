@@ -203,6 +203,20 @@ impl MainWindow {
     }
 
     pub(crate) fn move_tab(&mut self, direction: isize, cx: &mut Context<Self>) {
+        if self.split_panes.is_some() && self.active_tab != TabId::Emoji {
+            self.keyboard_selection_mouse_move_sequence =
+                crate::platform::input::pointer_snapshot()
+                    .map(|snapshot| snapshot.mouse_move_sequence);
+            self.activate_split_pane(
+                if self.active_tab == TabId::Clipboard {
+                    TabId::Favorites
+                } else {
+                    TabId::Clipboard
+                },
+                cx,
+            );
+            return;
+        }
         let layout = crate::config_runtime::appearance_config(cx).tab_bar;
         let tabs = super::super::tabs::ordered_tabs(&layout);
         if tabs.is_empty() {

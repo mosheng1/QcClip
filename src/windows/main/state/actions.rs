@@ -409,8 +409,21 @@ impl MainWindow {
         } else {
             "删除剪贴板历史"
         };
+        let refresh_peer = self.pane_peer.is_some();
         let task = cx.background_spawn(async move {
-            match source_tab {
+            let item_ids = if refresh_peer {
+                let rows = match source_tab {
+                    TabId::Favorites => {
+                        favorite_repository.item_ids_for_favorite_ids(&selected_ids)
+                    }
+                    _ => history_repository.item_ids_for_history_ids(&selected_ids),
+                }
+                .map_err(|error| error.to_string())?;
+                rows.into_values().collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
+            let removed = match source_tab {
                 TabId::Clipboard => history_repository
                     .delete_many(&selected_ids)
                     .map_err(|error| error.to_string()),
@@ -421,17 +434,19 @@ impl MainWindow {
                     Ok(removed)
                 }
                 TabId::Emoji => Ok(0),
-            }
+            }?;
+            Ok::<_, String>((removed, item_ids))
         });
         cx.spawn(async move |this, cx| {
             match task.await {
-                Ok(removed_count) => {
+                Ok((removed_count, item_ids)) => {
                     if removed_count < expected_count {
                         tracing::warn!(
                             "{action}时部分所选内容已不存在：选择 {expected_count} 项，处理 {removed_count} 项"
                         );
                     }
                     this.update(cx, |this, cx| {
+                        this.refresh_peer_items(&item_ids, cx);
                         if this.active_tab == source_tab {
                             if !this.apply_removed_list_items(&selected_ids_for_ui) {
                                 this.refresh_history(cx);
@@ -478,6 +493,7 @@ impl MainWindow {
                                 repository,
                                 move |cx| {
                                     main_window.update(cx, |this, cx| {
+                                        this.refresh_peer_items(&[item_id], cx);
                                         this.refresh_list_item_for_tab(source_tab, history_id, cx);
                                     })
                                 },
@@ -543,6 +559,7 @@ impl MainWindow {
                         cx.spawn(async move |cx| match save_task.await {
                             Ok(()) => {
                                 save_window.update(cx, |this, cx| {
+                                    this.refresh_peer_items(&[item_id], cx);
                                     this.refresh_list_item_for_tab(source_tab, history_id, cx);
                                 });
                             }
@@ -561,6 +578,7 @@ impl MainWindow {
                         cx.spawn(async move |cx| match restore_task.await {
                             Ok(()) => {
                                 restore_window.update(cx, |this, cx| {
+                                    this.refresh_peer_items(&[item_id], cx);
                                     this.refresh_list_item_for_tab(source_tab, history_id, cx);
                                 });
                             }
@@ -619,7 +637,9 @@ impl MainWindow {
             cx.spawn(async move |cx| match save_task.await {
                 Ok(history_id) => {
                     main_window.update(cx, |this, cx| {
-                        if this.active_tab == TabId::Clipboard {
+                        if this.split_panes.is_some() {
+                            this.refresh_captured_history_item(history_id, cx);
+                        } else if this.active_tab == TabId::Clipboard {
                             this.refresh_new_list_item(history_id, cx);
                         } else {
                             this.refresh_history(cx);
@@ -810,6 +830,7 @@ impl MainWindow {
             Ok(true) => {
                 if let Some(this) = this.upgrade() {
                     this.update(cx, |this, cx| {
+                        this.refresh_peer_items(&[item_id], cx);
                         if source_tab == TabId::Clipboard {
                             this.refresh_loaded_list_item(source_tab, list_item_id, cx);
                         } else {
@@ -881,6 +902,7 @@ impl MainWindow {
             Ok(true) => {
                 if let Some(this) = this.upgrade() {
                     this.update(cx, |this, cx| {
+                        this.refresh_peer_items(&[item_id], cx);
                         if let Some(list_item_id) = list_item_id {
                             if source_tab == TabId::Clipboard {
                                 this.refresh_loaded_list_item(source_tab, list_item_id, cx);
@@ -907,14 +929,28 @@ impl MainWindow {
     ) {
         let source_tab = self.active_tab;
         let favorite_repository = self.favorite_repository.clone();
-        let remove_task =
-            cx.background_spawn(
-                async move { favorite_repository.remove_from_favorites(favorite_id) },
-            );
+        let refresh_peer = self.pane_peer.is_some();
+        let remove_task = cx.background_spawn(async move {
+            let item_id = if refresh_peer {
+                favorite_repository
+                    .item_ids_for_favorite_ids(&[favorite_id])
+                    .map_err(|error| error.to_string())?
+                    .remove(&favorite_id)
+            } else {
+                None
+            };
+            let removed = favorite_repository
+                .remove_from_favorites(favorite_id)
+                .map_err(|error| error.to_string())?;
+            Ok::<_, String>((removed, item_id))
+        });
         cx.spawn(async move |this, cx| match remove_task.await {
-            Ok(true) => {
+            Ok((true, item_id)) => {
                 if let Some(this) = this.upgrade() {
                     this.update(cx, |this, cx| {
+                        if let Some(item_id) = item_id {
+                            this.refresh_peer_items(&[item_id], cx);
+                        }
                         if source_tab == TabId::Clipboard {
                             this.refresh_loaded_list_item(source_tab, list_item_id, cx);
                         } else {
@@ -927,7 +963,7 @@ impl MainWindow {
                     });
                 }
             }
-            Ok(false) => tracing::error!("未找到要取消收藏的收藏：{favorite_id}"),
+            Ok((false, _)) => tracing::error!("未找到要取消收藏的收藏：{favorite_id}"),
             Err(error) => tracing::error!("取消收藏失败：{error}"),
         })
         .detach();
@@ -948,6 +984,7 @@ impl MainWindow {
             Ok(true) => {
                 if let Some(this) = this.upgrade() {
                     this.update(cx, |this, cx| {
+                        this.refresh_peer_items(&[item_id], cx);
                         if source_tab == TabId::Clipboard {
                             this.refresh_loaded_list_item(source_tab, list_item_id, cx);
                         } else {
@@ -967,11 +1004,28 @@ impl MainWindow {
     pub fn delete_item(&mut self, history_id: HistoryItemId, cx: &mut Context<Self>) {
         let source_tab = self.active_tab;
         let history_repository = self.history_repository.clone();
-        let delete_task = cx.background_spawn(async move { history_repository.delete(history_id) });
+        let refresh_peer = self.pane_peer.is_some();
+        let delete_task = cx.background_spawn(async move {
+            let item_id = if refresh_peer {
+                history_repository
+                    .item_ids_for_history_ids(&[history_id])
+                    .map_err(|error| error.to_string())?
+                    .remove(&history_id)
+            } else {
+                None
+            };
+            let deleted = history_repository
+                .delete(history_id)
+                .map_err(|error| error.to_string())?;
+            Ok::<_, String>((deleted, item_id))
+        });
         cx.spawn(async move |this, cx| match delete_task.await {
-            Ok(true) => {
+            Ok((true, item_id)) => {
                 if let Some(this) = this.upgrade() {
                     this.update(cx, |this, cx| {
+                        if let Some(item_id) = item_id {
+                            this.refresh_peer_items(&[item_id], cx);
+                        }
                         if this.active_tab == source_tab {
                             if !this.apply_removed_list_items(&[history_id]) {
                                 this.refresh_history(cx);
@@ -984,7 +1038,7 @@ impl MainWindow {
                     });
                 }
             }
-            Ok(false) => tracing::error!("未找到要删除的剪贴板历史：{history_id}"),
+            Ok((false, _)) => tracing::error!("未找到要删除的剪贴板历史：{history_id}"),
             Err(error) => tracing::error!("剪贴板历史删除失败：{error}"),
         })
         .detach();

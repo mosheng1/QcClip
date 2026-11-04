@@ -34,6 +34,12 @@ where
         let _ = main_window.update(cx, |main, _| {
             main.window_drag_start = None;
         });
+        if let Some(owner) = cx
+            .try_global::<MainWindowService>()
+            .and_then(|service| service.main_view.clone())
+        {
+            owner.update(cx, |main, _| main.window_drag_start = None);
+        }
     })
 }
 
@@ -256,7 +262,10 @@ pub(crate) fn restore_persisted_edge(
         return Ok(None);
     };
 
-    let restored_size = crate::state_runtime::state(cx).main_window.restored_size();
+    let clipboard = config_runtime::clipboard_config(cx);
+    let restored_size = crate::state_runtime::state(cx)
+        .main_window
+        .restored_layout_size(clipboard.effective_list_layout());
     let logical_size = (restored_size.width, restored_size.height);
     let (bounds, side) = persisted_edge_bounds(persisted, logical_size, display);
 
@@ -347,7 +356,10 @@ pub(crate) fn startup_edge_bounds(
 ) -> Option<(gpui::Bounds<gpui::Pixels>, gpui::DisplayId)> {
     let state = crate::state_runtime::state(cx);
     let persisted = state.main_window.edge?;
-    let logical_size = state.main_window.restored_size();
+    let clipboard = config_runtime::clipboard_config(cx);
+    let logical_size = state
+        .main_window
+        .restored_layout_size(clipboard.effective_list_layout());
     let cursor = platform_window::physical_cursor_position()
         .or_else(|| crate::platform::input::pointer_snapshot().map(|snapshot| snapshot.position));
     let display = platform_window::display_for_key(cx, persisted.display_key).or_else(|| {

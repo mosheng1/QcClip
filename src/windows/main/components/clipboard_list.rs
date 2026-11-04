@@ -110,6 +110,7 @@ const EDIT_NOTE_ACTION: &str = "edit-note";
 
 #[derive(Clone)]
 struct ListItemDrag {
+    source_tab: TabId,
     history_id: HistoryItemId,
     is_pinned: bool,
     selected: bool,
@@ -532,9 +533,8 @@ fn render_rows(
 ) -> AnyElement {
     let translator = i18n::translator(cx);
     let hover_allowed = window.is_window_hovered() && MenuService::hover_animation_allowed(cx);
-    let horizontal = config_runtime::clipboard_config(cx)
-        .window_position
-        .uses_horizontal_list();
+    let clipboard_config = config_runtime::clipboard_config(cx);
+    let horizontal = clipboard_config.window_position.uses_horizontal_list();
     let item_display = config_runtime::appearance_config(cx).item_display;
     let show_horizontal_header = horizontal && horizontal_header_enabled(&item_display);
     let viewport_height = scroll_handle.bounds().size.height;
@@ -551,7 +551,17 @@ fn render_rows(
     } else {
         metrics
     };
-    let viewport_width = window.viewport_size().width;
+    let measured_width = scroll_handle.bounds().size.width;
+    let viewport_width = if measured_width > px(0.0) {
+        measured_width
+    } else {
+        let clipboard = config_runtime::clipboard_config(cx);
+        if clipboard.effective_list_layout() == crate::config::ClipboardListLayout::SideBySide {
+            window.viewport_size().width / 2.0
+        } else {
+            window.viewport_size().width
+        }
+    };
     let list_width = if horizontal {
         metrics.horizontal_item_width()
     } else {
@@ -888,6 +898,9 @@ fn render_rows(
         .min_h_0()
         .w_full()
         .on_drop(cx.listener(|this, drag: &ListItemDrag, _, cx| {
+            if drag.source_tab != this.active_tab {
+                return;
+            }
             #[cfg(target_os = "windows")]
             DragPreviewService::hide(cx);
             #[cfg(target_os = "windows")]
@@ -943,10 +956,14 @@ fn render_rows(
                 this.vertical_scrollbar(scroll_handle)
             }
         });
-    let list_container = if horizontal {
+    let list_container = if horizontal
+        || clipboard_config.effective_list_layout() != crate::config::ClipboardListLayout::Single
+    {
         let entity = cx.entity();
         gpui_component::ElementExt::on_prepaint(list_container, move |bounds, _, cx| {
-            if bounds.size.height != viewport_height {
+            if (horizontal && bounds.size.height != viewport_height)
+                || (!horizontal && bounds.size.width != viewport_width)
+            {
                 entity.update(cx, |_, cx| cx.notify());
             }
         })
@@ -2726,7 +2743,10 @@ fn render_row(
         })
         .can_drop(move |dragged, _, _| {
             if let Some(drag) = dragged.downcast_ref::<ListItemDrag>() {
-                return can_reorder && !drag.is_multi() && drag.is_pinned == target_is_pinned;
+                return can_reorder
+                    && drag.source_tab == active_tab
+                    && !drag.is_multi()
+                    && drag.is_pinned == target_is_pinned;
             }
             dragged
                 .downcast_ref::<TagDrag>()
@@ -2746,6 +2766,7 @@ fn render_row(
     let preview_size = Rc::new(Cell::new(None));
     if can_reorder {
         let drag_data = ListItemDrag {
+            source_tab: active_tab,
             history_id: row_id,
             is_pinned: target_is_pinned,
             selected,
@@ -2901,7 +2922,7 @@ fn render_row(
                     let Some(drag) = event.dragged_item().downcast_ref::<ListItemDrag>() else {
                         return;
                     };
-                    if drag.is_multi() {
+                    if drag.source_tab != this.active_tab || drag.is_multi() {
                         return;
                     }
                     if !event.bounds.contains(&window.mouse_position()) {
@@ -2934,6 +2955,9 @@ fn render_row(
                 },
             ))
             .on_drop(cx.listener(move |this, drag: &ListItemDrag, _, cx| {
+                if drag.source_tab != this.active_tab {
+                    return;
+                }
                 #[cfg(target_os = "windows")]
                 DragPreviewService::hide(cx);
                 #[cfg(target_os = "windows")]
@@ -3659,6 +3683,9 @@ fn render_placeholder_row(
 ) -> AnyElement {
     let surface = div()
         .on_drop(cx.listener(|this, drag: &ListItemDrag, _, cx| {
+            if drag.source_tab != this.active_tab {
+                return;
+            }
             cx.stop_propagation();
             #[cfg(target_os = "windows")]
             DragPreviewService::hide(cx);

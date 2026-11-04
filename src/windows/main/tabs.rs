@@ -173,7 +173,7 @@ impl FilterId {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct FilterSelection {
     selected: HashSet<FilterId>,
     hovered: Option<FilterId>,

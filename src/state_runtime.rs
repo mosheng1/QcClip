@@ -13,6 +13,7 @@ use thiserror::Error;
 use tracing::warn;
 
 use crate::{
+    config::{ClipboardListLayout, ClipboardWindowPosition},
     services::word_split::{JoinSeparator, SplitGranularity},
     windows::main::tabs::{SymbolCategoryId, TabId},
 };
@@ -112,8 +113,14 @@ pub(crate) struct PersistedMainWindowState {
     pub(crate) last_search_engine_template: Option<String>,
     /// 普通窗口的记忆位置；窗口处于贴边状态时不代表当前窗口位置。
     pub(crate) normal_position: Option<PersistedWindowPosition>,
-    /// 普通窗口和贴边窗口共用的客户区逻辑尺寸。
+    /// 单栏窗口的客户区逻辑尺寸，保留旧版本的尺寸记忆。
     pub(crate) size: Option<PersistedWindowSize>,
+    /// 左右双栏与上下双栏分别记忆尺寸，单栏沿用原有尺寸。
+    pub(crate) split_sizes: [Option<PersistedWindowSize>; 2],
+    /// 左右、上下双栏中剪贴板列表占用的比例，分别记忆。
+    pub(crate) split_ratios: [f32; 2],
+    /// 左右贴边、上下贴边各自记忆两种双栏方向的比例。
+    pub(crate) edge_split_ratios: [[f32; 2]; 2],
     /// 按左、右、上、下分别保存边缘面板的宽度或高度。
     pub(crate) edge_panel_sizes: [f32; 4],
     /// 侧边标签面板的宽度，使用未经过界面缩放的逻辑像素。
@@ -265,6 +272,9 @@ impl Default for PersistedMainWindowState {
             last_search_engine_template: None,
             normal_position: None,
             size: None,
+            split_sizes: [None; 2],
+            split_ratios: [Self::DEFAULT_SPLIT_RATIO; 2],
+            edge_split_ratios: [[Self::DEFAULT_SPLIT_RATIO; 2]; 2],
             edge_panel_sizes: [360.0, 360.0, 260.0, 260.0],
             tags_panel_width: Self::DEFAULT_TAGS_PANEL_WIDTH,
             edge: None,
@@ -276,6 +286,9 @@ impl Default for PersistedMainWindowState {
 }
 
 impl PersistedMainWindowState {
+    pub(crate) const DEFAULT_SPLIT_RATIO: f32 = 0.5;
+    pub(crate) const MIN_SPLIT_RATIO: f32 = 0.2;
+    pub(crate) const MAX_SPLIT_RATIO: f32 = 0.8;
     pub(crate) const DEFAULT_TAGS_PANEL_WIDTH: f32 = 184.0;
     pub(crate) const MIN_TAGS_PANEL_WIDTH: f32 = 120.0;
     pub(crate) const MAX_TAGS_PANEL_WIDTH: f32 = 360.0;
@@ -293,6 +306,56 @@ impl PersistedMainWindowState {
         self.size
             .filter(|size| size.is_valid())
             .unwrap_or(PersistedWindowSize::DEFAULT)
+    }
+
+    pub(crate) fn restored_layout_size(&self, layout: ClipboardListLayout) -> PersistedWindowSize {
+        let (index, fallback) = match layout {
+            ClipboardListLayout::Single => return self.restored_size(),
+            ClipboardListLayout::SideBySide => (
+                0,
+                PersistedWindowSize {
+                    width: 860.0,
+                    height: 560.0,
+                },
+            ),
+            ClipboardListLayout::Stacked => (
+                1,
+                PersistedWindowSize {
+                    width: 420.0,
+                    height: 760.0,
+                },
+            ),
+        };
+        self.split_sizes[index]
+            .filter(|size| size.is_valid())
+            .unwrap_or(fallback)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn restored_split_ratio(&self, layout: ClipboardListLayout) -> f32 {
+        self.restored_list_ratio(layout, ClipboardWindowPosition::Remember)
+    }
+
+    pub(crate) fn restored_list_ratio(
+        &self,
+        layout: ClipboardListLayout,
+        position: ClipboardWindowPosition,
+    ) -> f32 {
+        let index = match layout {
+            ClipboardListLayout::Single => return Self::DEFAULT_SPLIT_RATIO,
+            ClipboardListLayout::SideBySide => 0,
+            ClipboardListLayout::Stacked => 1,
+        };
+        let ratios = position
+            .edge_layout_index()
+            .map(|edge| &self.edge_split_ratios[edge])
+            .unwrap_or(&self.split_ratios);
+        let ratio = ratios[index];
+        if ratio.is_finite() {
+            ratio.clamp(Self::MIN_SPLIT_RATIO, Self::MAX_SPLIT_RATIO)
+        } else {
+            Self::DEFAULT_SPLIT_RATIO
+        }
     }
 
     pub(crate) fn restored_edge_panel_size(&self, side: PersistedEdgeSide) -> f32 {
@@ -492,10 +555,16 @@ where
     }
     let app: &App = Borrow::borrow(&*cx);
     let mut state = state(app);
-    if state.main_window.size == Some(size) {
+    let clipboard = crate::config_runtime::clipboard_config(app);
+    let stored = match clipboard.effective_list_layout() {
+        ClipboardListLayout::Single => &mut state.main_window.size,
+        ClipboardListLayout::SideBySide => &mut state.main_window.split_sizes[0],
+        ClipboardListLayout::Stacked => &mut state.main_window.split_sizes[1],
+    };
+    if *stored == Some(size) {
         return;
     }
-    state.main_window.size = Some(size);
+    *stored = Some(size);
     if let Err(error) = set_state(state, cx) {
         tracing::error!("保存主窗口大小失败：{error}");
     }
@@ -722,6 +791,9 @@ mod tests {
                     width: 480.0,
                     height: 640.0,
                 }),
+                split_sizes: [None; 2],
+                split_ratios: [0.6, 0.4],
+                edge_split_ratios: [[0.3, 0.7], [0.65, 0.35]],
                 edge_panel_sizes: [420.0, 480.0, 280.0, 320.0],
                 tags_panel_width: 240.0,
                 edge: None,

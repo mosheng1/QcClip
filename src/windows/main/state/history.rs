@@ -14,6 +14,7 @@ impl MainWindow {
         data_root: &std::path::Path,
         cx: &mut Context<Self>,
     ) {
+        self.split_panes = None;
         self.sync_refresh_task = None;
         self.sync_changes.clear();
         crate::services::sync::SyncService::replace_data(database.clone(), blob_store.clone(), cx);
@@ -106,6 +107,18 @@ impl MainWindow {
                         });
                         if let Some(this) = this.upgrade() {
                             this.update(cx, |this, cx| {
+                                if let Some(panes) = this.split_panes.clone() {
+                                    for pane in panes {
+                                        pane.update(cx, |pane, cx| {
+                                            if pane.active_tab == TabId::Clipboard {
+                                                pane.refresh_captured_history_item(history_id, cx);
+                                            } else if store_result.formats_changed {
+                                                pane.refresh_history(cx);
+                                            }
+                                        });
+                                    }
+                                    return;
+                                }
                                 if this.active_tab == TabId::Clipboard {
                                     if policy.retention_days.is_some() || policy.max_items.is_some() {
                                         this.refresh_list_item(history_id, cx);
@@ -174,6 +187,9 @@ impl MainWindow {
     }
 
     pub fn reload_after_data_import(&mut self, cx: &mut Context<Self>) {
+        self.split_resize = None;
+        self.split_content_bounds = None;
+        self.split_panes = None;
         self.stop_clipboard_listener();
         let persisted_state = state_runtime::state(cx).main_window;
         self.active_tab = persisted_state.active_tab;
@@ -204,6 +220,13 @@ impl MainWindow {
     }
 
     pub fn refresh_history(&mut self, cx: &mut Context<Self>) {
+        if self.split_panes.is_some() {
+            self.refresh_split_panes(cx);
+            if self.active_tab != TabId::Emoji {
+                cx.notify();
+                return;
+            }
+        }
         self.query_generation = self.query_generation.wrapping_add(1);
         // 丢弃上一次刷新任务。任务拥有后台查询句柄，丢弃后会取消仍在排队的查询，
         // 防止连续切换列表或筛选时过期查询挤占后台执行器。
