@@ -423,7 +423,7 @@ impl MenuWindowView {
             .when(!item.centered, |view| {
                 view.child(div().flex_1().min_w(gpui::rems(12.0 / 13.0)))
             })
-            .when(checked, |view| {
+            .when(!item.centered, |view| {
                 view.child(
                     div()
                         .flex_none()
@@ -432,12 +432,14 @@ impl MenuWindowView {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .child(hover_icon_path(
-                            icon_group.clone(),
-                            "assets/icons/check.svg",
-                            12.0,
-                            foreground,
-                        )),
+                        .when(checked, |view| {
+                            view.child(hover_icon_path(
+                                icon_group.clone(),
+                                "assets/icons/check.svg",
+                                12.0,
+                                foreground,
+                            ))
+                        }),
                 )
             })
             .when(has_children, |view| {
@@ -456,9 +458,6 @@ impl MenuWindowView {
                             foreground,
                         )),
                 )
-            })
-            .when(!has_children && !checked && !item.centered, |view| {
-                view.pr(gpui::rems(8.0 / 13.0))
             })
             .into_any_element()
     }
