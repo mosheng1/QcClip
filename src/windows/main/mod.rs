@@ -112,7 +112,13 @@ impl MainWindowService {
                     input::GlobalMouseEvent::MouseUp {
                         position,
                         left_pressed,
-                    } if !left_pressed => window_drag::handle_mouse_up(position, cx),
+                    } if !left_pressed => {
+                        if let Some(view) = cx.global::<Self>().main_view.clone() {
+                            view.update(cx, |main, cx| main.finish_split_resize(cx));
+                        }
+                        window_drag::handle_mouse_up(position, cx);
+                        Self::request_pointer_check(cx);
+                    }
                     input::GlobalMouseEvent::MouseUp { .. } => {}
                 });
             }

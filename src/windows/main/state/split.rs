@@ -1,5 +1,5 @@
 use super::*;
-use crate::config::ClipboardListLayout;
+use crate::config::{ClipboardListLayout, ClipboardWindowPosition};
 use crate::state_runtime::PersistedMainWindowState;
 
 #[cfg(test)]
@@ -11,6 +11,7 @@ const CENTER_RELEASE_THRESHOLD: f32 = 0.015;
 #[derive(Clone, Copy)]
 pub(crate) struct SplitResize {
     layout: ClipboardListLayout,
+    position: ClipboardWindowPosition,
     start: Pixels,
     start_ratio: f32,
     ratio: f32,
@@ -20,13 +21,15 @@ pub(crate) struct SplitResize {
 impl MainWindow {
     pub(crate) fn split_layout(&self, cx: &App) -> ClipboardListLayout {
         let clipboard = crate::config_runtime::clipboard_config(cx);
-        clipboard.list_layout.effective(clipboard.window_position)
+        clipboard.effective_list_layout()
     }
 
     pub(crate) fn sync_split_layout(&mut self, cx: &mut Context<Self>) {
         let layout = self.split_layout(cx);
+        let position = crate::config_runtime::clipboard_config(cx).window_position;
         if self.split_resize.is_some_and(|resize| {
             resize.layout != layout
+                || resize.position.edge_layout_index() != position.edge_layout_index()
                 || self.active_tab == TabId::Emoji
                 || MainWindowService::blocking_operation(cx).is_some()
         }) {
@@ -87,9 +90,10 @@ impl MainWindow {
             .filter(|resize| resize.layout == layout)
             .map(|resize| resize.ratio)
             .unwrap_or_else(|| {
-                state_runtime::state(cx)
-                    .main_window
-                    .restored_split_ratio(layout)
+                state_runtime::state(cx).main_window.restored_list_ratio(
+                    layout,
+                    crate::config_runtime::clipboard_config(cx).window_position,
+                )
             })
     }
 
@@ -124,6 +128,7 @@ impl MainWindow {
         self.cancel_split_previews(cx);
         self.split_resize = Some(SplitResize {
             layout,
+            position: crate::config_runtime::clipboard_config(cx).window_position,
             start,
             start_ratio: ratio,
             ratio,
@@ -167,7 +172,7 @@ impl MainWindow {
 
     pub(crate) fn finish_split_resize(&mut self, cx: &mut Context<Self>) {
         if let Some(resize) = self.split_resize.take() {
-            self.save_split_ratio(resize.layout, resize.ratio, cx);
+            self.save_split_ratio(resize.layout, resize.position, resize.ratio, cx);
             cx.notify();
         }
     }
@@ -178,19 +183,34 @@ impl MainWindow {
             resize.start_ratio = ratio;
             resize.ratio = ratio;
         } else {
-            self.save_split_ratio(self.split_layout(cx), ratio, cx);
+            self.save_split_ratio(
+                self.split_layout(cx),
+                crate::config_runtime::clipboard_config(cx).window_position,
+                ratio,
+                cx,
+            );
         }
         cx.notify();
     }
 
-    fn save_split_ratio(&self, layout: ClipboardListLayout, ratio: f32, cx: &mut Context<Self>) {
+    fn save_split_ratio(
+        &self,
+        layout: ClipboardListLayout,
+        position: ClipboardWindowPosition,
+        ratio: f32,
+        cx: &mut Context<Self>,
+    ) {
         let index = match layout {
             ClipboardListLayout::Single => return,
             ClipboardListLayout::SideBySide => 0,
             ClipboardListLayout::Stacked => 1,
         };
         let mut state = state_runtime::state(cx);
-        state.main_window.split_ratios[index] = ratio;
+        if let Some(edge) = position.edge_layout_index() {
+            state.main_window.edge_split_ratios[edge][index] = ratio;
+        } else {
+            state.main_window.split_ratios[index] = ratio;
+        }
         if let Err(error) = state_runtime::set_state(state, cx) {
             tracing::error!("保存主窗口分栏比例失败：{error}");
         }
@@ -267,6 +287,16 @@ impl MainWindow {
             TabId::Emoji => return None,
         };
         self.split_panes.as_ref().map(|panes| panes[index].clone())
+    }
+
+    pub(crate) fn list_pointer_interaction_active(&self, cx: &App) -> bool {
+        self.split_resize.is_some()
+            || self.heat_scrollbar.drag_origin.is_some()
+            || self.split_panes.as_ref().is_some_and(|panes| {
+                panes
+                    .iter()
+                    .any(|pane| pane.read(cx).heat_scrollbar.drag_origin.is_some())
+            })
     }
 
     pub(crate) fn cancel_split_previews(&self, cx: &mut Context<Self>) {

@@ -74,30 +74,7 @@ impl Render for MainWindow {
         }
         let clipboard = config_runtime::clipboard_config(cx);
         let horizontal = clipboard.window_position.uses_horizontal_list();
-        self.list_smooth_scroll.set_axis(if horizontal {
-            gpui::Axis::Horizontal
-        } else {
-            gpui::Axis::Vertical
-        });
-        if self
-            .list_layout_cache
-            .as_ref()
-            .is_some_and(|cache| cache.key.horizontal != horizontal)
-        {
-            self.cancel_reorder_preview();
-            self.list_layout_cache = None;
-            self.list_scroll_handle
-                .set_offset(gpui::point(gpui::px(0.0), gpui::px(0.0)));
-            self.heat_scrollbar = Default::default();
-            if let Some(index) = self
-                .selected_item_id
-                .and_then(|id| self.list_order_positions.get(&id))
-                .copied()
-            {
-                self.list_scroll_handle
-                    .scroll_to_item(index, gpui::ScrollStrategy::Nearest);
-            }
-        }
+        self.sync_list_axis(horizontal);
         let mut filters_changed = self.filters.retain_visible(layout);
         if is_blocked || !clipboard.filter_hover_switch {
             filters_changed |= self.filters.clear_hovered();
@@ -294,6 +271,33 @@ impl Render for MainWindow {
 }
 
 impl MainWindow {
+    fn sync_list_axis(&mut self, horizontal: bool) {
+        self.list_smooth_scroll.set_axis(if horizontal {
+            gpui::Axis::Horizontal
+        } else {
+            gpui::Axis::Vertical
+        });
+        if self
+            .list_layout_cache
+            .as_ref()
+            .is_some_and(|cache| cache.key.horizontal != horizontal)
+        {
+            self.cancel_reorder_preview();
+            self.list_layout_cache = None;
+            self.list_scroll_handle
+                .set_offset(gpui::point(px(0.0), px(0.0)));
+            self.heat_scrollbar = Default::default();
+            if let Some(index) = self
+                .selected_item_id
+                .and_then(|id| self.list_order_positions.get(&id))
+                .copied()
+            {
+                self.list_scroll_handle
+                    .scroll_to_item(index, gpui::ScrollStrategy::Nearest);
+            }
+        }
+    }
+
     fn render_split_content(
         &mut self,
         panes: [Entity<MainWindow>; 2],
@@ -481,7 +485,11 @@ impl MainWindow {
             self.cancel_reorder_preview();
             self.heat_scrollbar = Default::default();
         }
-        self.list_smooth_scroll.set_axis(gpui::Axis::Vertical);
+        self.sync_list_axis(
+            config_runtime::clipboard_config(cx)
+                .window_position
+                .uses_horizontal_list(),
+        );
         self.advance_scroll_animation(
             window,
             !blocked

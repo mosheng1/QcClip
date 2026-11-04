@@ -146,22 +146,15 @@ impl SettingsWindowView {
         );
         let list_layout_selector = settings_dropdown(
             "settings-clipboard-list-layout-select",
-            clipboard.list_layout.code(),
+            clipboard.effective_list_layout().code(),
             ClipboardListLayout::ALL
                 .into_iter()
                 .map(|layout| {
-                    let item = DropdownItem::option(
+                    DropdownItem::option(
                         DropdownItemId::new(layout.code()),
                         translator.translate(layout.label_key()),
                     )
-                    .selected(layout == clipboard.list_layout);
-                    if layout != ClipboardListLayout::Single
-                        && clipboard.window_position.is_screen_edge()
-                    {
-                        item.disabled()
-                    } else {
-                        item
-                    }
+                    .selected(layout == clipboard.effective_list_layout())
                 })
                 .collect(),
             {
@@ -174,7 +167,7 @@ impl SettingsWindowView {
                     {
                         persist_clipboard_change(
                             view.clone(),
-                            move |clipboard| clipboard.list_layout = layout,
+                            move |clipboard| clipboard.set_list_layout(layout),
                             save_error.clone(),
                             cx,
                         );
@@ -969,6 +962,7 @@ fn reset_main_window_fields(clipboard: &mut ClipboardConfig) {
     let default = ClipboardConfig::default();
     clipboard.window_position = default.window_position;
     clipboard.list_layout = default.list_layout;
+    clipboard.edge_list_layouts = default.edge_list_layouts;
     clipboard.edge_hide = default.edge_hide;
     clipboard.edge_hide_show_edge = default.edge_hide_show_edge;
     clipboard.auto_scroll_to_top = default.auto_scroll_to_top;

@@ -247,7 +247,7 @@ pub fn run() {
 
             let clipboard = crate::config_runtime::clipboard_config(cx);
             let state = crate::state_runtime::state(cx);
-            let layout = clipboard.list_layout.effective(clipboard.window_position);
+            let layout = clipboard.effective_list_layout();
             let (window_width, window_height) =
                 if layout == crate::config::ClipboardListLayout::Single {
                     initial_window_size(&state.main_window)

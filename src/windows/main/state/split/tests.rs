@@ -31,6 +31,7 @@ impl Fixture {
         let mut config = crate::config::AppConfig::default();
         config.clipboard.list_layout = ClipboardListLayout::SideBySide;
         config.clipboard.clear_tags_on_tab_switch = true;
+        config.clipboard.hover_preview_enabled = false;
         std::fs::write(
             root.join("config.json"),
             serde_json::to_vec(&config).unwrap(),
@@ -41,6 +42,7 @@ impl Fixture {
             crate::i18n::install(Locale::zh_cn(), cx);
             crate::config_runtime::ConfigRuntime::install(root.join("config.json"), cx);
             state_runtime::StateRuntime::install(root.join("state.json"), cx);
+            crate::window_material::install(cx);
             PreviewWindowService::install(ImagePreviewService::new(blobs.clone()), cx);
             cx.set_global(MainWindowService::default());
         });
@@ -86,8 +88,8 @@ impl Fixture {
                 clipboard: crate::config_runtime::clipboard_config(cx),
                 ..Default::default()
             };
-            config.clipboard.list_layout = layout;
             config.clipboard.window_position = position;
+            config.clipboard.set_list_layout(layout);
             let path = self.directory.path().join("config.json");
             std::fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
             crate::config_runtime::ConfigRuntime::reload(path, cx);
@@ -565,7 +567,9 @@ fn favorite_changes_update_peer_without_resetting_its_scroll(cx: &mut gpui::Test
 }
 
 #[gpui::test]
-fn split_orientation_reuses_panes_and_edge_position_suspends_them(cx: &mut gpui::TestAppContext) {
+fn split_orientation_and_edge_positions_reuse_panes_until_single_is_selected(
+    cx: &mut gpui::TestAppContext,
+) {
     let fixture = Fixture::new(cx);
     let panes = fixture.panes(cx);
     fixture.change_layout(
@@ -577,6 +581,12 @@ fn split_orientation_reuses_panes_and_edge_position_suspends_them(cx: &mut gpui:
     fixture.change_layout(
         ClipboardListLayout::Stacked,
         ClipboardWindowPosition::ScreenLeftCenter,
+        cx,
+    );
+    assert_eq!(fixture.panes(cx), panes);
+    fixture.change_layout(
+        ClipboardListLayout::Single,
+        ClipboardWindowPosition::ScreenRightCenter,
         cx,
     );
     fixture.main.read_with(cx, |main, cx| {
@@ -597,6 +607,199 @@ fn split_orientation_reuses_panes_and_edge_position_suspends_them(cx: &mut gpui:
             .main
             .read_with(cx, |main, _| main.split_panes.is_some())
     );
+}
+
+#[gpui::test]
+fn split_ratios_are_independent_for_normal_and_both_edge_groups(cx: &mut gpui::TestAppContext) {
+    let fixture = Fixture::new(cx);
+    for (position, ratio) in [
+        (ClipboardWindowPosition::Remember, 0.6),
+        (ClipboardWindowPosition::ScreenLeftCenter, 0.3),
+        (ClipboardWindowPosition::ScreenTopCenter, 0.7),
+    ] {
+        fixture.change_layout(ClipboardListLayout::SideBySide, position, cx);
+        fixture.main.update(cx, |main, cx| {
+            let start_ratio = main.split_ratio(cx);
+            main.split_content_bounds = Some(gpui::Bounds::new(
+                gpui::point(px(0.0), px(0.0)),
+                gpui::size(px(1006.0), px(506.0)),
+            ));
+            main.begin_split_resize(gpui::point(px(500.0), px(250.0)), px(6.0), cx);
+            main.update_split_resize(
+                gpui::point(px(500.0 + 1000.0 * (ratio - start_ratio)), px(250.0)),
+                cx,
+            );
+            main.finish_split_resize(cx);
+            assert!((main.split_ratio(cx) - ratio).abs() < 0.001);
+        });
+    }
+    let path = fixture.directory.path().join("state.json");
+    cx.update(|cx| state_runtime::StateRuntime::install(path, cx));
+    for (position, ratio) in [
+        (ClipboardWindowPosition::Remember, 0.6),
+        (ClipboardWindowPosition::ScreenRightCenter, 0.3),
+        (ClipboardWindowPosition::ScreenBottomCenter, 0.7),
+    ] {
+        fixture.change_layout(ClipboardListLayout::SideBySide, position, cx);
+        fixture.main.read_with(cx, |main, cx| {
+            assert!((main.split_ratio(cx) - ratio).abs() < 0.001);
+        });
+    }
+    fixture.main.update(cx, |main, cx| {
+        main.begin_split_resize(gpui::point(px(500.0), px(250.0)), px(6.0), cx);
+        main.update_split_resize(gpui::point(px(450.0), px(250.0)), cx);
+    });
+    fixture.change_layout(
+        ClipboardListLayout::SideBySide,
+        ClipboardWindowPosition::ScreenLeftCenter,
+        cx,
+    );
+    fixture.main.read_with(cx, |main, cx| {
+        assert!(main.split_resize.is_none());
+        assert!((main.split_ratio(cx) - 0.3).abs() < 0.001);
+        assert!(
+            (state_runtime::state(cx).main_window.edge_split_ratios[1][0] - 0.65).abs() < 0.001
+        );
+    });
+    let old: state_runtime::PersistedMainWindowState = serde_json::from_str("{}").unwrap();
+    assert_eq!(
+        old.restored_list_ratio(
+            ClipboardListLayout::Stacked,
+            ClipboardWindowPosition::ScreenLeftCenter
+        ),
+        0.5
+    );
+}
+
+#[gpui::test]
+fn all_screen_edges_render_split_panes_with_the_correct_scroll_axis_and_shared_filters(
+    cx: &mut gpui::TestAppContext,
+) {
+    let fixture = Fixture::new(cx);
+    let window = fixture.open_window(cx);
+    let service = fixture
+        .main
+        .read_with(cx, |main, _| main.custom_text_service.clone());
+    for index in 0..30 {
+        service
+            .create_manual_text_and_favorite(&format!("贴边内容 {index}"))
+            .unwrap();
+    }
+    for position in [
+        ClipboardWindowPosition::ScreenLeftCenter,
+        ClipboardWindowPosition::ScreenRightCenter,
+        ClipboardWindowPosition::ScreenTopCenter,
+        ClipboardWindowPosition::ScreenBottomCenter,
+    ] {
+        let horizontal = position.uses_horizontal_list();
+        let layout = if horizontal {
+            ClipboardListLayout::SideBySide
+        } else {
+            ClipboardListLayout::Stacked
+        };
+        fixture.change_layout(layout, position, cx);
+        let mut visual = gpui::VisualTestContext::from_window(window, cx);
+        visual.simulate_resize(if horizontal {
+            gpui::size(px(1200.0), px(300.0))
+        } else {
+            gpui::size(px(380.0), px(900.0))
+        });
+        fixture.main.update(cx, |main, cx| {
+            main.search_query = "贴边内容".to_owned();
+            main.refresh_history(cx);
+        });
+        cx.run_until_parked();
+        draw_window(window, cx);
+        let panes = fixture.panes(cx);
+        let bounds = panes.each_ref().map(|pane| {
+            pane.read_with(cx, |pane, _| {
+                assert_eq!(pane.total_item_count, 30);
+                assert_eq!(
+                    pane.list_layout_cache.as_ref().unwrap().key.horizontal,
+                    horizontal
+                );
+                assert_eq!(pane.history_query().search.as_deref(), Some("贴边内容"));
+                pane.list_scroll_handle.bounds()
+            })
+        });
+        if horizontal {
+            assert_eq!(bounds[0].origin.y, bounds[1].origin.y);
+            assert!(bounds[1].origin.x > bounds[0].origin.x);
+        } else {
+            assert_eq!(bounds[0].origin.x, bounds[1].origin.x);
+            assert!(bounds[1].origin.y > bounds[0].origin.y);
+        }
+        let before = panes[1].read_with(cx, |pane, _| pane.list_scroll_handle.offset());
+        visual.simulate_mouse_move(bounds[0].center(), None, Modifiers::default());
+        panes[0].update(cx, |pane, _| {
+            pane.list_scroll_handle
+                .as_ref()
+                .set_offset(gpui::point(px(0.0), px(0.0)));
+        });
+        visual.simulate_event(ScrollWheelEvent {
+            position: bounds[0].center(),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.0), px(-80.0))),
+            modifiers: Modifiers::default(),
+            touch_phase: gpui::TouchPhase::Started,
+        });
+        panes[0].read_with(cx, |pane, _| {
+            let offset = pane.list_scroll_handle.offset();
+            assert!(if horizontal { offset.x } else { offset.y } < px(0.0));
+            assert_eq!(if horizontal { offset.y } else { offset.x }, px(0.0));
+        });
+        assert_eq!(
+            panes[1].read_with(cx, |pane, _| pane.list_scroll_handle.offset()),
+            before
+        );
+        fixture.main.update(cx, |main, cx| {
+            main.activate_split_pane(TabId::Clipboard, cx)
+        });
+        visual.simulate_mouse_move(bounds[1].center(), None, Modifiers::default());
+        fixture.main.update(cx, |main, cx| {
+            assert_eq!(main.active_tab, TabId::Favorites);
+            main.move_tab(-1, cx);
+            assert_eq!(main.active_tab, TabId::Clipboard);
+            assert_eq!(main.active_list_entity(cx), Some(panes[0].clone()));
+        });
+        let start = fixture
+            .main
+            .read_with(cx, |main, _| main.split_content_bounds.unwrap().center());
+        visual.simulate_mouse_down(start, gpui::MouseButton::Left, Modifiers::default());
+        fixture.main.read_with(cx, |main, cx| {
+            assert!(main.list_pointer_interaction_active(cx))
+        });
+        let mut end = start;
+        if horizontal {
+            end.x += px(45.0);
+        } else {
+            end.y += px(45.0);
+        }
+        visual.simulate_mouse_move(end, Some(gpui::MouseButton::Left), Modifiers::default());
+        visual.simulate_mouse_up(end, gpui::MouseButton::Left, Modifiers::default());
+        fixture.main.read_with(cx, |main, cx| {
+            assert!(!main.list_pointer_interaction_active(cx))
+        });
+        panes[1].update(cx, |pane, _| {
+            pane.heat_scrollbar.drag_origin = Some((end, 0.5))
+        });
+        fixture.main.read_with(cx, |main, cx| {
+            assert!(main.list_pointer_interaction_active(cx))
+        });
+        panes[1].update(cx, |pane, _| pane.heat_scrollbar.drag_origin = None);
+        fixture.main.update(cx, |main, cx| {
+            main.search_query.clear();
+            main.refresh_history(cx);
+        });
+        cx.run_until_parked();
+        // 下一种定位从均分开始，测试分隔条命中位置。
+        fixture
+            .main
+            .update(cx, |main, cx| main.reset_split_ratio(cx));
+    }
+    // 在释放临时数据库和文本文件前关闭窗口，避免收尾绘制继续请求文件。
+    cx.update_window(window, |_, window, _| window.remove_window())
+        .unwrap();
+    cx.run_until_parked();
 }
 
 #[gpui::test]

@@ -556,9 +556,7 @@ fn render_rows(
         measured_width
     } else {
         let clipboard = config_runtime::clipboard_config(cx);
-        if clipboard.list_layout.effective(clipboard.window_position)
-            == crate::config::ClipboardListLayout::SideBySide
-        {
+        if clipboard.effective_list_layout() == crate::config::ClipboardListLayout::SideBySide {
             window.viewport_size().width / 2.0
         } else {
             window.viewport_size().width
@@ -959,10 +957,7 @@ fn render_rows(
             }
         });
     let list_container = if horizontal
-        || clipboard_config
-            .list_layout
-            .effective(clipboard_config.window_position)
-            != crate::config::ClipboardListLayout::Single
+        || clipboard_config.effective_list_layout() != crate::config::ClipboardListLayout::Single
     {
         let entity = cx.entity();
         gpui_component::ElementExt::on_prepaint(list_container, move |bounds, _, cx| {

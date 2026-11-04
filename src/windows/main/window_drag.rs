@@ -265,7 +265,7 @@ pub(crate) fn restore_persisted_edge(
     let clipboard = config_runtime::clipboard_config(cx);
     let restored_size = crate::state_runtime::state(cx)
         .main_window
-        .restored_layout_size(clipboard.list_layout.effective(clipboard.window_position));
+        .restored_layout_size(clipboard.effective_list_layout());
     let logical_size = (restored_size.width, restored_size.height);
     let (bounds, side) = persisted_edge_bounds(persisted, logical_size, display);
 
@@ -359,7 +359,7 @@ pub(crate) fn startup_edge_bounds(
     let clipboard = config_runtime::clipboard_config(cx);
     let logical_size = state
         .main_window
-        .restored_layout_size(clipboard.list_layout.effective(clipboard.window_position));
+        .restored_layout_size(clipboard.effective_list_layout());
     let cursor = platform_window::physical_cursor_position()
         .or_else(|| crate::platform::input::pointer_snapshot().map(|snapshot| snapshot.position));
     let display = platform_window::display_for_key(cx, persisted.display_key).or_else(|| {

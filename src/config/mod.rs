@@ -880,6 +880,8 @@ pub struct ClipboardConfig {
     pub confirm_favorite_removal: bool,
     pub window_position: ClipboardWindowPosition,
     pub list_layout: ClipboardListLayout,
+    /// 左右贴边、上下贴边分别记忆布局。
+    pub edge_list_layouts: [ClipboardListLayout; 2],
     pub edge_hide: bool,
     pub edge_hide_show_edge: bool,
     pub search_engines: Vec<SearchEngine>,
@@ -1140,6 +1142,10 @@ impl Default for ClipboardConfig {
             confirm_favorite_removal: true,
             window_position: ClipboardWindowPosition::default(),
             list_layout: ClipboardListLayout::default(),
+            edge_list_layouts: [
+                ClipboardListLayout::Stacked,
+                ClipboardListLayout::SideBySide,
+            ],
             edge_hide: false,
             edge_hide_show_edge: true,
             search_engines: Vec::new(),

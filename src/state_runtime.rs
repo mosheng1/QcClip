@@ -13,7 +13,7 @@ use thiserror::Error;
 use tracing::warn;
 
 use crate::{
-    config::ClipboardListLayout,
+    config::{ClipboardListLayout, ClipboardWindowPosition},
     services::word_split::{JoinSeparator, SplitGranularity},
     windows::main::tabs::{SymbolCategoryId, TabId},
 };
@@ -119,6 +119,8 @@ pub(crate) struct PersistedMainWindowState {
     pub(crate) split_sizes: [Option<PersistedWindowSize>; 2],
     /// 左右、上下双栏中剪贴板列表占用的比例，分别记忆。
     pub(crate) split_ratios: [f32; 2],
+    /// 左右贴边、上下贴边各自记忆两种双栏方向的比例。
+    pub(crate) edge_split_ratios: [[f32; 2]; 2],
     /// 按左、右、上、下分别保存边缘面板的宽度或高度。
     pub(crate) edge_panel_sizes: [f32; 4],
     /// 侧边标签面板的宽度，使用未经过界面缩放的逻辑像素。
@@ -272,6 +274,7 @@ impl Default for PersistedMainWindowState {
             size: None,
             split_sizes: [None; 2],
             split_ratios: [Self::DEFAULT_SPLIT_RATIO; 2],
+            edge_split_ratios: [[Self::DEFAULT_SPLIT_RATIO; 2]; 2],
             edge_panel_sizes: [360.0, 360.0, 260.0, 260.0],
             tags_panel_width: Self::DEFAULT_TAGS_PANEL_WIDTH,
             edge: None,
@@ -328,13 +331,26 @@ impl PersistedMainWindowState {
             .unwrap_or(fallback)
     }
 
+    #[cfg(test)]
     pub(crate) fn restored_split_ratio(&self, layout: ClipboardListLayout) -> f32 {
+        self.restored_list_ratio(layout, ClipboardWindowPosition::Remember)
+    }
+
+    pub(crate) fn restored_list_ratio(
+        &self,
+        layout: ClipboardListLayout,
+        position: ClipboardWindowPosition,
+    ) -> f32 {
         let index = match layout {
             ClipboardListLayout::Single => return Self::DEFAULT_SPLIT_RATIO,
             ClipboardListLayout::SideBySide => 0,
             ClipboardListLayout::Stacked => 1,
         };
-        let ratio = self.split_ratios[index];
+        let ratios = position
+            .edge_layout_index()
+            .map(|edge| &self.edge_split_ratios[edge])
+            .unwrap_or(&self.split_ratios);
+        let ratio = ratios[index];
         if ratio.is_finite() {
             ratio.clamp(Self::MIN_SPLIT_RATIO, Self::MAX_SPLIT_RATIO)
         } else {
@@ -540,7 +556,7 @@ where
     let app: &App = Borrow::borrow(&*cx);
     let mut state = state(app);
     let clipboard = crate::config_runtime::clipboard_config(app);
-    let stored = match clipboard.list_layout.effective(clipboard.window_position) {
+    let stored = match clipboard.effective_list_layout() {
         ClipboardListLayout::Single => &mut state.main_window.size,
         ClipboardListLayout::SideBySide => &mut state.main_window.split_sizes[0],
         ClipboardListLayout::Stacked => &mut state.main_window.split_sizes[1],
@@ -777,6 +793,7 @@ mod tests {
                 }),
                 split_sizes: [None; 2],
                 split_ratios: [0.6, 0.4],
+                edge_split_ratios: [[0.3, 0.7], [0.65, 0.35]],
                 edge_panel_sizes: [420.0, 480.0, 280.0, 320.0],
                 tags_panel_width: 240.0,
                 edge: None,

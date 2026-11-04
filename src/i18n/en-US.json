@@ -3,7 +3,7 @@
   "settings.clipboard.list_layout.single": "Single pane",
   "settings.clipboard.list_layout.side_by_side": "Side by side",
   "settings.clipboard.list_layout.stacked": "Stacked",
-  "settings.clipboard.list_layout.description": "Both panes share search and filters and scroll independently. Hover over a pane or use Left/Right to activate it. Screen edge positions always use a single pane.",
+  "settings.clipboard.list_layout.description": "Both panes share search and filters and scroll independently. Hover over a pane or use the tab switching shortcuts to activate it. Normal, left/right edge, and top/bottom edge windows remember separate layouts. Left/right edges default to stacked panes; top/bottom edges default to side by side panes.",
   "main.list.active": "Active pane",
   "main.heatmap.region": "Items {start}–{end}",
   "main.heatmap.summary": "{total} pastes · Peak {peak}",

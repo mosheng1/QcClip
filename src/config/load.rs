@@ -702,6 +702,13 @@ fn read_clipboard(object: &Map<String, Value>, warnings: &mut Vec<String>) -> Cl
             default.list_layout,
             warnings,
         ),
+        edge_list_layouts: read_field(
+            object,
+            "edgeListLayouts",
+            "clipboard.edgeListLayouts",
+            default.edge_list_layouts,
+            warnings,
+        ),
         window_position: read_field(
             object,
             "windowPosition",

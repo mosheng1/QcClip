@@ -449,14 +449,7 @@ fn build_more_menu(cx: &gpui::App) -> MenuModel {
                 MenuActionId::new(format!("{LIST_LAYOUT_ACTION_PREFIX}{}", layout.code())),
                 translator.translate(layout.label_key()),
             );
-            let item = if layout != ClipboardListLayout::Single
-                && clipboard.window_position.is_screen_edge()
-            {
-                item.disabled()
-            } else {
-                item
-            };
-            if layout == clipboard.list_layout {
+            if layout == clipboard.effective_list_layout() {
                 item.checked()
             } else {
                 item
@@ -614,10 +607,7 @@ fn handle_more_menu_action(action: MenuActionId, cx: &mut gpui::App) {
             .find(|layout| layout.code() == code)
         {
             let mut clipboard = config_runtime::clipboard_config(cx);
-            if layout != ClipboardListLayout::Single && clipboard.window_position.is_screen_edge() {
-                return;
-            }
-            clipboard.list_layout = layout;
+            clipboard.set_list_layout(layout);
             if let Err(error) = config_runtime::set_clipboard_config(clipboard, cx) {
                 tracing::error!("保存列表布局失败：{error}");
             }

@@ -86,8 +86,7 @@ pub(crate) fn apply_imported_window_state(cx: &mut App) {
 
     let result = window.update(cx, |_, window, cx| {
         let clipboard = config_runtime::clipboard_config(cx);
-        let logical_size = persisted
-            .restored_layout_size(clipboard.list_layout.effective(clipboard.window_position));
+        let logical_size = persisted.restored_layout_size(clipboard.effective_list_layout());
         let logical_size = size(px(logical_size.width), px(logical_size.height));
         // Window::resize 在 Windows 上异步调整原生窗口，不能与下面的同步客户区定位并用，
         // 否则异步尺寸更新可能覆盖贴边窗口的尺寸，导致隐藏时露出过多内容。
@@ -398,7 +397,7 @@ pub(crate) fn refresh_window_position(cx: &mut App) {
     let clipboard = config_runtime::clipboard_config(cx);
     let restored = state_runtime::state(cx)
         .main_window
-        .restored_layout_size(clipboard.list_layout.effective(clipboard.window_position));
+        .restored_layout_size(clipboard.effective_list_layout());
     cx.update_global::<MainWindowService, _>(|service, _| {
         service.window_state.disable_edge_mode();
         service.window_state.set_panel_attachment(None);
@@ -1803,11 +1802,11 @@ pub(crate) fn handle_mouse_move(position: Point<f32>, cx: &mut App) {
         return;
     }
 
-    let scrollbar_pressed = cx.read_global::<MainWindowService, _>(|service, cx| {
+    let interaction_active = cx.read_global::<MainWindowService, _>(|service, cx| {
         service
             .main_view
             .as_ref()
-            .is_some_and(|view| view.read(cx).heat_scrollbar.drag_origin.is_some())
+            .is_some_and(|view| view.read(cx).list_pointer_interaction_active(cx))
     });
     if point_in_client_bounds(position, attachment.client_bounds) {
         if mouse_leave_state != window_state::MouseLeaveState::Armed {
@@ -1823,7 +1822,7 @@ pub(crate) fn handle_mouse_move(position: Point<f32>, cx: &mut App) {
         fixed,
         mouse_leave_state,
         menu_is_open,
-        scrollbar_pressed,
+        interaction_active,
     ) {
         let is_resize_hit_test = window.is_some_and(|window| {
             window
@@ -2010,13 +2009,13 @@ fn should_hide_for_pointer(
     fixed: bool,
     mouse_leave_state: window_state::MouseLeaveState,
     menu_is_open: bool,
-    scrollbar_pressed: bool,
+    interaction_active: bool,
 ) -> bool {
     !fixed
         && mouse_leave_state == window_state::MouseLeaveState::Armed
         && !point_in_client_bounds(position, client_bounds)
         && !menu_is_open
-        && !scrollbar_pressed
+        && !interaction_active
 }
 
 #[cfg(test)]

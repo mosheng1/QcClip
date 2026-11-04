@@ -3,7 +3,7 @@
   "settings.clipboard.list_layout.single": "单栏",
   "settings.clipboard.list_layout.side_by_side": "左右双栏",
   "settings.clipboard.list_layout.stacked": "上下双栏",
-  "settings.clipboard.list_layout.description": "双栏共用搜索和筛选，分别滚动。鼠标进入列表或按左右方向键切换当前列表；屏幕边缘定位时自动使用单栏。",
+  "settings.clipboard.list_layout.description": "双栏共用搜索和筛选，分别滚动。鼠标进入列表或使用切换列表快捷键选择当前列表。普通窗口、左右贴边、上下贴边分别记忆布局；左右贴边默认上下双栏，上下贴边默认左右双栏。",
   "main.list.active": "当前列表",
   "main.heatmap.region": "第 {start}–{end} 条",
   "main.heatmap.summary": "粘贴 {total} 次 · 最高 {peak} 次",

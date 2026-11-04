@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::ClipboardWindowPosition;
+use super::{ClipboardConfig, ClipboardWindowPosition};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -13,14 +13,6 @@ pub enum ClipboardListLayout {
 
 impl ClipboardListLayout {
     pub const ALL: [Self; 3] = [Self::Single, Self::SideBySide, Self::Stacked];
-
-    pub const fn effective(self, position: ClipboardWindowPosition) -> Self {
-        if position.is_screen_edge() {
-            Self::Single
-        } else {
-            self
-        }
-    }
 
     pub const fn code(self) -> &'static str {
         match self {
@@ -35,6 +27,34 @@ impl ClipboardListLayout {
             Self::Single => "settings.clipboard.list_layout.single",
             Self::SideBySide => "settings.clipboard.list_layout.side_by_side",
             Self::Stacked => "settings.clipboard.list_layout.stacked",
+        }
+    }
+}
+
+impl ClipboardWindowPosition {
+    /// 左右贴边与上下贴边分别记忆布局和分栏比例。
+    pub const fn edge_layout_index(self) -> Option<usize> {
+        match self {
+            Self::ScreenLeftCenter | Self::ScreenRightCenter => Some(0),
+            Self::ScreenTopCenter | Self::ScreenBottomCenter => Some(1),
+            _ => None,
+        }
+    }
+}
+
+impl ClipboardConfig {
+    pub fn effective_list_layout(&self) -> ClipboardListLayout {
+        self.window_position
+            .edge_layout_index()
+            .map(|index| self.edge_list_layouts[index])
+            .unwrap_or(self.list_layout)
+    }
+
+    pub fn set_list_layout(&mut self, layout: ClipboardListLayout) {
+        if let Some(index) = self.window_position.edge_layout_index() {
+            self.edge_list_layouts[index] = layout;
+        } else {
+            self.list_layout = layout;
         }
     }
 }
@@ -68,18 +88,58 @@ mod tests {
     }
 
     #[test]
-    fn screen_edges_suspend_split_layout_without_changing_preference() {
-        for layout in ClipboardListLayout::ALL {
-            for position in ClipboardWindowPosition::ALL {
-                assert_eq!(
-                    layout.effective(position),
-                    if position.is_screen_edge() {
-                        ClipboardListLayout::Single
-                    } else {
-                        layout
-                    }
-                );
-            }
+    fn screen_edges_default_to_layouts_along_the_edge() {
+        let mut clipboard = ClipboardConfig::default();
+        for position in ClipboardWindowPosition::ALL {
+            clipboard.window_position = position;
+            let expected = match position.edge_layout_index() {
+                Some(0) => ClipboardListLayout::Stacked,
+                Some(1) => ClipboardListLayout::SideBySide,
+                _ => ClipboardListLayout::Single,
+            };
+            assert_eq!(clipboard.effective_list_layout(), expected);
         }
+    }
+
+    #[test]
+    fn normal_and_edge_layout_preferences_are_independent_and_round_trip() {
+        let mut clipboard = ClipboardConfig::default();
+        clipboard.set_list_layout(ClipboardListLayout::SideBySide);
+        clipboard.window_position = ClipboardWindowPosition::ScreenLeftCenter;
+        clipboard.set_list_layout(ClipboardListLayout::Single);
+        clipboard.window_position = ClipboardWindowPosition::ScreenTopCenter;
+        clipboard.set_list_layout(ClipboardListLayout::Stacked);
+        let mut config = super::super::AppConfig::default();
+        config.clipboard = clipboard;
+        let json = serde_json::to_string(&config).unwrap();
+        let mut loaded = super::super::load::from_str(&json)
+            .unwrap()
+            .config
+            .clipboard;
+        for position in ClipboardWindowPosition::ALL {
+            loaded.window_position = position;
+            let expected = match position.edge_layout_index() {
+                Some(0) => ClipboardListLayout::Single,
+                Some(1) => ClipboardListLayout::Stacked,
+                _ => ClipboardListLayout::SideBySide,
+            };
+            assert_eq!(loaded.effective_list_layout(), expected);
+        }
+        let old = super::super::load::from_str(
+            r#"{"clipboard":{"windowPosition":"screen-left-center"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            old.config.clipboard.effective_list_layout(),
+            ClipboardListLayout::Stacked
+        );
+        let invalid =
+            super::super::load::from_str(r#"{"clipboard":{"edgeListLayouts":["invalid"]}}"#)
+                .unwrap();
+        assert_eq!(
+            invalid.config.clipboard.edge_list_layouts,
+            ClipboardConfig::default().edge_list_layouts
+        );
+        assert!(!invalid.warnings.is_empty());
     }
 }
