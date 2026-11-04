@@ -466,11 +466,13 @@ pub(super) fn render(
                         .bottom_0()
                         .w(ui_rem(if expanded { 24.0 } else { 12.0 }))
                 })
-                .bg(rail_background)
-                .backdrop_blur(px(18.0))
-                .when(horizontal, |this| this.border_t_1())
-                .when(!horizontal, |this| this.border_l_1())
-                .border_color(gpui::ColorExt::opacity(&theme.muted_foreground, 0.16))
+                .when(expanded, |this| {
+                    this.bg(rail_background)
+                        .backdrop_blur(px(18.0))
+                        .when(horizontal, |this| this.border_t_1())
+                        .when(!horizontal, |this| this.border_l_1())
+                        .border_color(gpui::ColorExt::opacity(&theme.muted_foreground, 0.16))
+                })
                 .opacity(if visible { 1.0 } else { 0.0 })
                 .when(animations_enabled, |this| {
                     this.transitions(|transitions| {
@@ -531,10 +533,15 @@ pub(super) fn render(
                             let state = &this.heat_scrollbar;
                             let item_offset = |index| this.list_scroll_handle.item_offset(index);
                             let thickness = bounds.size.along(axis.invert()) / 3.0;
+                            let heat_inset = if expanded {
+                                thickness
+                            } else {
+                                bounds.size.along(axis.invert()) - thickness
+                            };
                             let heat_bounds = gpui::Bounds::new(
                                 bounds
                                     .origin
-                                    .apply_along(axis.invert(), |start| start + thickness),
+                                    .apply_along(axis.invert(), |start| start + heat_inset),
                                 bounds.size.apply_along(axis.invert(), |_| thickness),
                             );
                             window.paint_quad(
@@ -584,36 +591,54 @@ pub(super) fn render(
                                     .border_widths(px(scale)),
                                 );
                             }
-                            let thumb = state.thumb_bounds;
+                            let mut thumb = state.thumb_bounds;
+                            if !expanded {
+                                let thumb_thickness = thickness * 1.5;
+                                thumb.origin = thumb.origin.apply_along(axis.invert(), |_| {
+                                    bounds.origin.along(axis.invert())
+                                        + bounds.size.along(axis.invert())
+                                        - thumb_thickness
+                                });
+                                thumb.size =
+                                    thumb.size.apply_along(axis.invert(), |_| thumb_thickness);
+                            }
                             let border = bounds.size.along(axis.invert()) / 12.0;
-                            let radius = bounds.size.along(axis.invert()) / 6.0;
-                            window.paint_quad(
-                                gpui::outline(
-                                    gpui::Bounds::new(
-                                        thumb
-                                            .origin
-                                            .apply_along(axis.invert(), |start| start - border),
-                                        thumb.size.apply_along(axis.invert(), |length| {
-                                            length + border * 2.0
-                                        }),
-                                    ),
-                                    rail_background,
-                                    gpui::BorderStyle::Solid,
+                            let radius = if expanded {
+                                bounds.size.along(axis.invert()) / 6.0
+                            } else {
+                                thumb.size.along(axis.invert()) / 2.0
+                            };
+                            if expanded {
+                                window.paint_quad(
+                                    gpui::outline(
+                                        gpui::Bounds::new(
+                                            thumb
+                                                .origin
+                                                .apply_along(axis.invert(), |start| start - border),
+                                            thumb.size.apply_along(axis.invert(), |length| {
+                                                length + border * 2.0
+                                            }),
+                                        ),
+                                        rail_background,
+                                        gpui::BorderStyle::Solid,
+                                    )
+                                    .border_widths(border)
+                                    .corner_radii(radius + border),
+                                );
+                            }
+                            let thumb_background = if expanded {
+                                gpui::ColorExt::opacity(
+                                    &theme.background,
+                                    if state.dragging { 0.12 } else { 0.28 },
                                 )
-                                .border_widths(border)
-                                .corner_radii(radius + border),
-                            );
+                            } else {
+                                gpui::ColorExt::opacity(&thumb_color, 0.35)
+                            };
                             window.paint_quad(
-                                gpui::fill(
-                                    thumb,
-                                    gpui::ColorExt::opacity(
-                                        &theme.background,
-                                        if state.dragging { 0.12 } else { 0.28 },
-                                    ),
-                                )
-                                .border_widths(border)
-                                .border_color(thumb_color)
-                                .corner_radii(radius),
+                                gpui::fill(thumb, thumb_background)
+                                    .border_widths(border)
+                                    .border_color(thumb_color)
+                                    .corner_radii(radius),
                             );
                         },
                     )
