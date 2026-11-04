@@ -224,6 +224,7 @@
   "main.file.folder": "文件夹",
   "main.file.unknown_size": "大小未知",
   "main.file.loading": "正在加载文件信息…",
+  "main.file.missing": "文件不存在",
   "main.menu.tags": "标签",
   "main.menu.copy": "复制",
   "main.menu.new_text": "新增文本",

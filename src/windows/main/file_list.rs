@@ -29,6 +29,7 @@ pub struct FileListEntry {
     pub name: String,
     pub size: Option<u64>,
     pub is_directory: bool,
+    pub exists: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -253,6 +254,7 @@ impl FileListView {
             }
             let task = cx.background_spawn(async move {
                 let metadata = fs::metadata(&path).ok();
+                let exists = metadata.is_some();
                 let (size, is_directory) = metadata
                     .as_ref()
                     .map(|metadata| {
@@ -267,13 +269,16 @@ impl FileListView {
                     .and_then(|name| name.to_str())
                     .map(str::to_owned)
                     .unwrap_or_else(|| path.to_string_lossy().into_owned());
-                let icon = file_icon_provider::get_file_icon(&path, FILE_ICON_SIZE).ok();
+                let icon = exists
+                    .then(|| file_icon_provider::get_file_icon(&path, FILE_ICON_SIZE).ok())
+                    .flatten();
                 (
                     FileListEntry {
                         path,
                         name,
                         size,
                         is_directory,
+                        exists,
                     },
                     icon,
                 )
@@ -327,7 +332,30 @@ impl FileListView {
                 .into_any_element();
         };
 
-        let icon_element = if let Some(image) = self.entry_icon(index) {
+        let icon_element = if !entry.exists {
+            let icon_name = if entry.is_directory {
+                "folder"
+            } else if entry
+                .path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| {
+                    matches!(
+                        extension.to_ascii_lowercase().as_str(),
+                        "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "svg"
+                    )
+                })
+            {
+                "photo"
+            } else {
+                "file-description"
+            };
+            gpui_component::Icon::empty()
+                .path(format!("assets/icons/{icon_name}.svg"))
+                .size(presentation.icon_size)
+                .text_color(theme.danger)
+                .into_any_element()
+        } else if let Some(image) = self.entry_icon(index) {
             img(image)
                 .size(presentation.icon_size)
                 .object_fit(ObjectFit::Contain)
@@ -344,6 +372,11 @@ impl FileListView {
                 .text_color(theme.foreground)
                 .into_any_element()
         };
+        let name_color = if entry.exists {
+            theme.foreground
+        } else {
+            theme.danger
+        };
         let text = if presentation.show_path {
             let name_row = div()
                 .w_full()
@@ -358,21 +391,29 @@ impl FileListView {
                         .truncate()
                         .text_size(presentation.text_size)
                         .line_height(presentation.line_height)
-                        .text_color(theme.foreground)
+                        .text_color(name_color)
                         .child(entry.name.clone()),
                 )
                 .child(
                     div()
                         .flex_none()
-                        .w(presentation.text_size * 6.0)
+                        .w(presentation.text_size * if entry.exists { 6.0 } else { 8.0 })
                         .flex()
                         .items_center()
                         .justify_end()
                         .truncate()
                         .text_size(presentation.text_size)
                         .line_height(presentation.line_height)
-                        .text_color(theme.muted_foreground)
-                        .child(i18n::file_size(translator, entry.size, entry.is_directory)),
+                        .text_color(if entry.exists {
+                            theme.muted_foreground
+                        } else {
+                            theme.danger
+                        })
+                        .child(if entry.exists {
+                            i18n::file_size(translator, entry.size, entry.is_directory)
+                        } else {
+                            translator.translate("main.file.missing")
+                        }),
                 );
             div()
                 .flex_1()
@@ -388,20 +429,42 @@ impl FileListView {
                         .truncate()
                         .text_size(presentation.text_size)
                         .line_height(presentation.line_height)
-                        .text_color(theme.muted_foreground)
+                        .text_color(if entry.exists {
+                            theme.muted_foreground
+                        } else {
+                            theme.danger
+                        })
                         .child(entry.path.to_string_lossy().into_owned()),
                 )
                 .into_any_element()
         } else {
-            div()
+            let mut name_row = div()
                 .flex_1()
                 .min_w_0()
-                .truncate()
-                .text_size(presentation.text_size)
-                .line_height(presentation.line_height)
-                .text_color(theme.foreground)
-                .child(entry.name.clone())
-                .into_any_element()
+                .flex()
+                .items_center()
+                .gap(presentation.gap)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(presentation.text_size)
+                        .line_height(presentation.line_height)
+                        .text_color(name_color)
+                        .child(entry.name.clone()),
+                );
+            if !entry.exists {
+                name_row = name_row.child(
+                    div()
+                        .flex_none()
+                        .text_size(presentation.text_size)
+                        .line_height(presentation.line_height)
+                        .text_color(theme.danger)
+                        .child(translator.translate("main.file.missing")),
+                );
+            }
+            name_row.into_any_element()
         };
         let row = div()
             .id(("file-entry", index as u64))

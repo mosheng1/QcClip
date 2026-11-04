@@ -224,6 +224,7 @@
   "main.file.folder": "Folder",
   "main.file.unknown_size": "Unknown size",
   "main.file.loading": "Loading file information…",
+  "main.file.missing": "File not found",
   "main.menu.tags": "Tags",
   "main.menu.copy": "Copy",
   "main.menu.new_text": "New text",
