@@ -359,7 +359,7 @@ impl MainWindow {
             .flex()
             .items_center()
             .justify_center()
-            .bg(theme.border)
+            .bg(theme.title_bar)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
@@ -511,63 +511,18 @@ impl MainWindow {
             appearance.list_item_height == ListItemHeight::Adaptive,
         );
         let theme = cx.theme().colors;
-        let translator = crate::i18n::translator(cx);
-        let active = self.pane_active;
-        let title = translator.translate(if self.active_tab == TabId::Favorites {
-            "main.tab.favorites"
-        } else {
-            "main.tab.clipboard"
-        });
-        let pane = div().size_full().flex().flex_col();
-        let pane = if clipboard.list_layout == ClipboardListLayout::SideBySide {
-            pane.border_l_1()
-        } else {
-            pane.border_t_1()
-        };
-        pane.border_color(theme.border)
-            .child(
-                div()
-                    .h(ui_rem(32.0))
-                    .flex_none()
-                    .px(ui_rem(12.0))
-                    .flex()
-                    .items_center()
-                    .gap(ui_rem(8.0))
-                    .border_t_2()
-                    .border_b_1()
-                    .border_color(if active { theme.primary } else { theme.border })
-                    .bg(if active {
-                        theme.secondary
-                    } else {
-                        theme.background
-                    })
-                    .text_size(ui_rem(12.0))
-                    .text_color(if active {
-                        theme.primary
-                    } else {
-                        theme.muted_foreground
-                    })
-                    .child(crate::ui::icon(
-                        if self.active_tab == TabId::Favorites {
-                            "star"
-                        } else {
-                            "clipboard"
-                        },
-                        14.0,
-                        if active {
-                            theme.primary
-                        } else {
-                            theme.muted_foreground
-                        },
-                    ))
-                    .child(title)
-                    .child(div().flex_1().child(self.total_item_count.to_string()))
-                    .children(active.then(|| {
-                        div()
-                            .text_size(ui_rem(10.0))
-                            .child(translator.translate("main.list.active"))
-                    })),
-            )
+        div()
+            .size_full()
+            .min_w_0()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .border_t_2()
+            .border_color(if self.pane_active {
+                theme.primary
+            } else {
+                gpui::transparent_black()
+            })
             .child(self.render_clipboard_content(window, cx))
             .into_any_element()
     }
