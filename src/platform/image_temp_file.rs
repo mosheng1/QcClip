@@ -6,6 +6,7 @@ use std::{
 };
 
 use image::{DynamicImage, ImageFormat};
+use sha2::{Digest, Sha256};
 use tempfile::{Builder, TempPath};
 
 use crate::domain::capture::{FormatKind, FormatRole, classify_format_role};
@@ -14,6 +15,7 @@ use crate::platform::clipboard::ClipboardPayload;
 /// 粘贴到外部程序时临时图片文件需要多存活一段时间，避免目标程序惰性读取时文件已被删除。
 const IMAGE_TEMP_FILE_RETENTION: Duration = Duration::from_secs(30);
 static RETAINED_IMAGE_FILES: Mutex<Vec<RetainedImageFile>> = Mutex::new(Vec::new());
+static OPENED_IMAGE_FILE_LOCK: Mutex<()> = Mutex::new(());
 
 struct RetainedImageFile {
     expires_at: Instant,
@@ -121,6 +123,9 @@ pub(crate) fn opened_files_directory() -> std::path::PathBuf {
 
 /// 清空“使用默认程序打开”遗留的临时文件目录，应用启动时调用。
 pub(crate) fn cleanup_opened_files_directory() {
+    let _guard = OPENED_IMAGE_FILE_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     let directory = opened_files_directory();
     if directory.is_dir()
         && let Err(error) = std::fs::remove_dir_all(&directory)
@@ -129,10 +134,18 @@ pub(crate) fn cleanup_opened_files_directory() {
     }
 }
 
-/// 为“使用默认程序打开”生成临时图片文件，写入 opened_files_directory 持久保留，
-/// 由下一次应用启动统一清理，避免图片查看器尚未关闭时文件被回收。
+/// 为“使用默认程序打开”生成可复用的临时图片文件。
 pub(crate) fn create_openable_image_file(
     payloads: &[ClipboardPayload],
+    item_uuid: &str,
+) -> Result<Option<std::path::PathBuf>, String> {
+    create_openable_image_file_in(payloads, item_uuid, &opened_files_directory())
+}
+
+fn create_openable_image_file_in(
+    payloads: &[ClipboardPayload],
+    item_uuid: &str,
+    directory: &Path,
 ) -> Result<Option<std::path::PathBuf>, String> {
     let has_file_payload = payloads.iter().any(|payload| {
         let kind = FormatKind::from_str(&payload.format_kind).unwrap_or(FormatKind::Unknown);
@@ -150,11 +163,21 @@ pub(crate) fn create_openable_image_file(
     }) else {
         return Ok(None);
     };
+    let item_uuid = uuid::Uuid::parse_str(item_uuid)
+        .map_err(|_| "打开图片失败：剪贴板条目标识无效".to_owned())?
+        .simple()
+        .to_string();
     let image = decode_image(&payload.bytes, &payload.format_key)?;
-    let directory = opened_files_directory();
-    std::fs::create_dir_all(&directory)
+    let _guard = OPENED_IMAGE_FILE_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    std::fs::create_dir_all(directory)
         .map_err(|error| format!("创建打开的临时文件目录失败：{error}"))?;
-    let path = unique_opened_path(&directory);
+    let content_hash = Sha256::digest(&payload.bytes);
+    let path = directory.join(format!("{item_uuid}-{}.png", hex_digest(&content_hash)));
+    if path.is_file() {
+        return Ok(Some(path));
+    }
     let mut file =
         std::fs::File::create(&path).map_err(|error| format!("创建打开的临时图片失败：{error}"))?;
     let result = image
@@ -172,12 +195,47 @@ pub(crate) fn create_openable_image_file(
     Ok(Some(path))
 }
 
-fn unique_opened_path(directory: &Path) -> std::path::PathBuf {
-    loop {
-        let name = format!("{}.png", uuid::Uuid::new_v4().as_simple());
-        let path = directory.join(name);
-        if !path.exists() {
-            return path;
+fn hex_digest(digest: &[u8]) -> String {
+    let mut value = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(value, "{byte:02x}");
+    }
+    value
+}
+
+/// 删除条目关联的打开图片缓存；被外部程序占用时留待启动清理兜底。
+pub(crate) fn remove_openable_image_files(item_uuid: &str) {
+    let Ok(item_uuid) = uuid::Uuid::parse_str(item_uuid) else {
+        tracing::warn!("清理打开图片失败：剪贴板条目标识无效");
+        return;
+    };
+    let _guard = OPENED_IMAGE_FILE_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    remove_openable_image_files_in(&item_uuid, &opened_files_directory());
+}
+
+fn remove_openable_image_files_in(item_uuid: &uuid::Uuid, directory: &Path) {
+    let prefix = format!("{}-", item_uuid.simple());
+    let entries = match std::fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => {
+            tracing::warn!(%error, "读取打开图片缓存目录失败");
+            return;
+        }
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let matches_item = path.is_file()
+            && path.extension().is_some_and(|extension| extension == "png")
+            && path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(&prefix));
+        if matches_item && let Err(error) = std::fs::remove_file(path) {
+            tracing::debug!(%error, "打开图片仍被占用，将在下次启动时重试清理");
         }
     }
 }
@@ -279,7 +337,9 @@ mod tests {
 
     use image::{DynamicImage, ImageFormat};
 
-    use super::ImageTempFile;
+    use crate::platform::clipboard::ClipboardPayload;
+
+    use super::{ImageTempFile, create_openable_image_file_in, remove_openable_image_files_in};
 
     #[test]
     fn image_temp_file_allows_exclusive_read_and_removes_on_drop() {
@@ -299,5 +359,55 @@ mod tests {
         drop(reader);
         drop(file);
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn opened_image_cache_reuses_identical_images_and_cleans_item_versions() {
+        let directory = tempfile::tempdir().expect("创建测试目录失败");
+        let item_uuid = uuid::Uuid::new_v4();
+        let first_payload = image_payload([1, 2, 3, 255]);
+        let first = create_openable_image_file_in(
+            std::slice::from_ref(&first_payload),
+            &item_uuid.to_string(),
+            directory.path(),
+        )
+        .expect("创建图片缓存失败")
+        .expect("应返回图片路径");
+        let repeated = create_openable_image_file_in(
+            std::slice::from_ref(&first_payload),
+            &item_uuid.to_string(),
+            directory.path(),
+        )
+        .expect("重复创建图片缓存失败")
+        .expect("应返回已存在的图片路径");
+        let changed = create_openable_image_file_in(
+            &[image_payload([4, 5, 6, 255])],
+            &item_uuid.to_string(),
+            directory.path(),
+        )
+        .expect("创建新版本图片缓存失败")
+        .expect("应返回新图片路径");
+
+        assert_eq!(first, repeated);
+        assert_ne!(first, changed);
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 2);
+
+        remove_openable_image_files_in(&item_uuid, directory.path());
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+    }
+
+    fn image_payload(pixel: [u8; 4]) -> ClipboardPayload {
+        let mut bytes = Cursor::new(Vec::new());
+        DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(1, 1, pixel.into()))
+            .write_to(&mut bytes, ImageFormat::Png)
+            .expect("生成测试图片失败");
+        ClipboardPayload {
+            format_kind: "image".to_owned(),
+            format_namespace: "mime".to_owned(),
+            format_key: "image/png".to_owned(),
+            format_name: "image/png".to_owned(),
+            native_format_id: None,
+            bytes: bytes.into_inner(),
+        }
     }
 }

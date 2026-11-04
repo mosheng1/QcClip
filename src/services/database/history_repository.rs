@@ -9,6 +9,7 @@ use thiserror::Error;
 
 use crate::config::HistoryConfig;
 use crate::domain::clipboard::{ClipboardItemId, ContentKind, FormatPreview, HistoryItemId};
+use crate::platform::image_temp_file::remove_openable_image_files;
 use crate::services::storage::{RawBlob, RawBlobStore};
 
 use super::{
@@ -445,12 +446,18 @@ impl HistoryRepository {
             transaction.commit()?;
             return Ok(false);
         };
+        let item_uuid: String = transaction.query_row(
+            "SELECT uuid FROM clipboard_items WHERE id = ?1",
+            [item_id],
+            |row| row.get(0),
+        )?;
 
         transaction.execute("DELETE FROM clipboard_history WHERE id = ?1", [history_id])?;
         let cleanup_report =
             cleanup_orphaned_in_transaction(&transaction, &self.blob_store, Some(item_id))?;
         transaction.commit()?;
         log_cleanup_report(Some(history_id), cleanup_report);
+        remove_openable_image_files(&item_uuid);
         Ok(true)
     }
 
@@ -462,15 +469,23 @@ impl HistoryRepository {
         let mut connection = self.database.connect_write()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let mut affected_item_ids = HashSet::new();
+        let mut item_uuids = HashSet::new();
         {
-            let mut statement =
-                transaction.prepare("SELECT item_id FROM clipboard_history WHERE id = ?1")?;
+            let mut statement = transaction.prepare(
+                "SELECT i.id, i.uuid
+                 FROM clipboard_history AS h
+                 JOIN clipboard_items AS i ON i.id = h.item_id
+                 WHERE h.id = ?1",
+            )?;
             for history_id in history_ids {
-                if let Some(item_id) = statement
-                    .query_row([history_id], |row| row.get::<_, i64>(0))
+                if let Some((item_id, item_uuid)) = statement
+                    .query_row([history_id], |row| {
+                        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                    })
                     .optional()?
                 {
                     affected_item_ids.insert(item_id);
+                    item_uuids.insert(item_uuid);
                 }
             }
         }
@@ -488,6 +503,9 @@ impl HistoryRepository {
         )?;
         transaction.commit()?;
         log_cleanup_report(None, cleanup_report);
+        for item_uuid in item_uuids {
+            remove_openable_image_files(&item_uuid);
+        }
         Ok(deleted)
     }
 
@@ -654,6 +672,17 @@ impl HistoryRepository {
         if !Database::maintenance_supported(&transaction)? {
             return Err(super::DatabaseError::UnsupportedRewrite.into());
         }
+        let item_uuids = {
+            let mut statement = transaction.prepare(
+                "SELECT DISTINCT i.uuid
+                 FROM clipboard_history AS h
+                 JOIN clipboard_items AS i ON i.id = h.item_id
+                 WHERE ?1 = 0 OR h.is_pinned = 0",
+            )?;
+            statement
+                .query_map([keep_pinned], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
         let removed = transaction.execute(
             "DELETE FROM clipboard_history WHERE ?1 = 0 OR is_pinned = 0",
             [keep_pinned],
@@ -662,6 +691,9 @@ impl HistoryRepository {
         report.history_items_removed = removed;
         transaction.commit()?;
         log_cleanup_report(None, report);
+        for item_uuid in item_uuids {
+            remove_openable_image_files(&item_uuid);
+        }
         Ok(report)
     }
 
@@ -764,7 +796,7 @@ impl HistoryRepository {
         let mut report = HistoryCleanupReport::default();
         let pending = if let Some((scope, parameters)) = history_scope_condition(policy) {
             let mut statement = transaction.prepare(&format!(
-                "SELECT h.id
+                "SELECT h.id, i.uuid
                  FROM clipboard_history AS h
                  JOIN clipboard_items AS i ON i.id = h.item_id
                  WHERE i.capture_state = 'ready' AND NOT ({scope})
@@ -772,14 +804,14 @@ impl HistoryRepository {
             ))?;
             statement
                 .query_map(params_from_iter(parameters.iter()), |row| {
-                    row.get::<_, i64>(0)
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
                 })?
                 .collect::<Result<Vec<_>, _>>()?
         } else {
             Vec::new()
         };
 
-        for history_id in pending {
+        for (history_id, _) in &pending {
             transaction.execute("DELETE FROM clipboard_history WHERE id = ?1", [history_id])?;
             report.history_items_removed += 1;
         }
@@ -790,6 +822,9 @@ impl HistoryRepository {
         report.orphan_blob_files_removed += cleanup.orphan_blob_files_removed;
         transaction.commit()?;
         log_cleanup_report(None, report);
+        for (_, item_uuid) in pending {
+            remove_openable_image_files(&item_uuid);
+        }
         Ok(report)
     }
 

@@ -469,6 +469,11 @@ impl PasteService {
     /// 使用系统默认程序打开条目：文件类型直接打开路径，图片类型生成临时文件后打开。
     pub fn open_item_with_default(&self, item_id: i64) -> Result<(), PasteError> {
         let connection = self.database.connect()?;
+        let item_uuid: String = connection.query_row(
+            "SELECT uuid FROM clipboard_items WHERE id = ?1",
+            [item_id],
+            |row| row.get(0),
+        )?;
         let payloads = self.load_payloads(&connection, item_id)?;
         // 文件类型优先：取第一个文件路径直接用默认程序打开。
         if let Some(path) = payloads
@@ -478,8 +483,10 @@ impl PasteService {
         {
             return open_with_default_program(&path).map_err(PasteError::Clipboard);
         }
-        // 图片类型：生成临时文件后打开，文件由下一次应用启动统一清理。
-        if let Some(path) = create_openable_image_file(&payloads).map_err(PasteError::Clipboard)? {
+        // 图片缓存由条目 UUID 和图片哈希标识，重复打开时复用同一文件。
+        if let Some(path) =
+            create_openable_image_file(&payloads, &item_uuid).map_err(PasteError::Clipboard)?
+        {
             return open_with_default_program(&path).map_err(PasteError::Clipboard);
         }
         Err(PasteError::NoRestorableFormat)
