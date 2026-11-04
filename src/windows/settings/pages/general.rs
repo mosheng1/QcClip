@@ -32,6 +32,9 @@ impl SettingsWindowView {
         let translator = i18n::translator(cx);
         let language = config_runtime::interface_language(cx);
         let launch_at_login = config_runtime::launch_at_login(cx);
+        #[cfg(target_os = "windows")]
+        let inactive_window_scroll_compatibility =
+            config_runtime::inactive_window_scroll_compatibility(cx);
         let run_as_administrator = config_runtime::run_as_administrator(cx);
         let language_label = translator.translate(language_label_key(language));
         let view = cx.entity().clone();
@@ -89,6 +92,33 @@ impl SettingsWindowView {
                     cx.notify();
                 });
             });
+        #[cfg(target_os = "windows")]
+        let scroll_compatibility_save_error =
+            translator.translate("settings.general.scroll_compatibility_save_error");
+        #[cfg(target_os = "windows")]
+        let scroll_compatibility_view = view.clone();
+        #[cfg(target_os = "windows")]
+        let scroll_compatibility_switch =
+            Switch::new("settings-general-inactive-window-scroll-compatibility")
+                .large()
+                .checked(inactive_window_scroll_compatibility)
+                .accessibility_label(
+                    translator.translate("settings.general.inactive_window_scroll_compatibility"),
+                )
+                .on_click(move |checked, _, cx| {
+                    let error =
+                        config_runtime::set_inactive_window_scroll_compatibility(*checked, cx)
+                            .err()
+                            .map(|error| {
+                                tracing::error!("保存非焦点窗口滚轮兼容设置失败：{error}");
+                                scroll_compatibility_save_error.clone()
+                            });
+                    scroll_compatibility_view.update(cx, |view, cx| {
+                        view.language_error =
+                            notify_settings_error(SettingsPage::General, error, cx);
+                        cx.notify();
+                    });
+                });
         let administrator_save_error =
             translator.translate("settings.general.administrator_save_error");
         let administrator_view = view.clone();
@@ -298,6 +328,23 @@ impl SettingsWindowView {
                 None,
                 tray_right_selector,
             ));
+        #[cfg(target_os = "windows")]
+        {
+            section = section.child(
+                self.setting_row(
+                    theme,
+                    translator.translate("settings.general.inactive_window_scroll_compatibility"),
+                    Some(
+                        translator
+                            .translate(
+                                "settings.general.inactive_window_scroll_compatibility_description",
+                            )
+                            .into(),
+                    ),
+                    scroll_compatibility_switch,
+                ),
+            );
+        }
         if let Some(error) = &self.language_error {
             section = section.child(
                 div()

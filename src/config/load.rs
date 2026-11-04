@@ -230,6 +230,13 @@ fn read_general(object: &Map<String, Value>, warnings: &mut Vec<String>) -> Gene
             warnings,
         ),
         notifications: read_group(object, "notifications", warnings, read_notifications),
+        inactive_window_scroll_compatibility: read_field(
+            object,
+            "inactiveWindowScrollCompatibility",
+            "general.inactiveWindowScrollCompatibility",
+            default.inactive_window_scroll_compatibility,
+            warnings,
+        ),
         launch_at_login: read_field(
             object,
             "launchAtLogin",
@@ -1273,6 +1280,7 @@ mod tests {
         assert!(loaded.config.clipboard.formatted_paste);
         assert_eq!(loaded.config.general.language, InterfaceLanguage::ZhCn);
         assert!(loaded.config.general.global_notification_enabled);
+        assert!(!loaded.config.general.inactive_window_scroll_compatibility);
         assert_eq!(
             loaded.config.clipboard.display_priority,
             ClipboardDisplayPriority::TextHtmlImage
@@ -1299,6 +1307,15 @@ mod tests {
             ListItemHeight::Adaptive
         );
         assert_eq!(loaded.config.appearance.adaptive_max_lines, 8);
+        assert!(loaded.warnings.is_empty());
+    }
+
+    #[test]
+    fn inactive_window_scroll_compatibility_is_loaded_from_general_config() {
+        let loaded = from_str(r#"{"general":{"inactiveWindowScrollCompatibility":true}}"#)
+            .expect("非焦点窗口滚轮兼容设置应当可以加载");
+
+        assert!(loaded.config.general.inactive_window_scroll_compatibility);
         assert!(loaded.warnings.is_empty());
     }
 

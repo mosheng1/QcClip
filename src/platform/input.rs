@@ -64,7 +64,10 @@ pub(crate) enum GlobalMouseEvent {
 #[cfg(target_os = "windows")]
 mod windows_input {
     use std::{
-        sync::{Arc, Mutex, OnceLock},
+        sync::{
+            Arc, Mutex, OnceLock,
+            atomic::{AtomicIsize, Ordering},
+        },
         thread,
         time::Duration,
     };
@@ -81,10 +84,110 @@ mod windows_input {
     use super::{GlobalMouseEvent, PointerButtons, PointerRegionWatch, PointerSnapshot};
 
     static INPUT_STATE: OnceLock<Arc<Mutex<InputState>>> = OnceLock::new();
+    static SCROLL_COMPAT_HOOK: AtomicIsize = AtomicIsize::new(0);
     static CURRENT_TRIGGER_KEY: Mutex<Option<TriggerKey>> = Mutex::new(None);
     static SHORTCUT_SIMULATION_LOCK: Mutex<()> = Mutex::new(());
     const PHYSICAL_KEY_COUNT: usize = raw_input::Key::Unidentified as usize + 1;
     static PHYSICAL_KEY_STATE: OnceLock<Mutex<PhysicalKeySnapshot>> = OnceLock::new();
+
+    pub(crate) fn set_inactive_window_scroll_compatibility(enabled: bool) -> Result<(), String> {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            HHOOK, SetWindowsHookExW, UnhookWindowsHookEx, WH_MOUSE_LL,
+        };
+
+        if enabled {
+            if SCROLL_COMPAT_HOOK.load(Ordering::Acquire) != 0 {
+                return Ok(());
+            }
+            // SAFETY: 钩子回调为静态函数，只转发鼠标位于本进程非前台窗口上的滚轮消息。
+            let hook = unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(scroll_compat_hook), None, 0) }
+                .map_err(|error| format!("安装非焦点窗口滚轮兼容钩子失败：{error}"))?;
+            let previous = SCROLL_COMPAT_HOOK.compare_exchange(
+                0,
+                hook.0 as isize,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
+            if previous.is_err() {
+                // SAFETY: hook 是本次成功创建但未保存的钩子句柄。
+                unsafe {
+                    let _ = UnhookWindowsHookEx(hook);
+                }
+            }
+        } else {
+            let hook = SCROLL_COMPAT_HOOK.load(Ordering::Acquire);
+            if hook != 0 {
+                // SAFETY: 句柄由上方 SetWindowsHookExW 创建，且只会在此处释放一次。
+                unsafe {
+                    UnhookWindowsHookEx(HHOOK(hook as *mut _))
+                        .map_err(|error| format!("卸载非焦点窗口滚轮兼容钩子失败：{error}"))?;
+                }
+                let _ = SCROLL_COMPAT_HOOK.compare_exchange(
+                    hook,
+                    0,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                );
+            }
+        }
+        Ok(())
+    }
+
+    unsafe extern "system" fn scroll_compat_hook(
+        code: i32,
+        message: windows::Win32::Foundation::WPARAM,
+        data: windows::Win32::Foundation::LPARAM,
+    ) -> windows::Win32::Foundation::LRESULT {
+        use windows::Win32::{
+            Foundation::{HWND, LPARAM, LRESULT},
+            System::Threading::GetCurrentProcessId,
+            UI::WindowsAndMessaging::{
+                CallNextHookEx, GA_ROOT, GetAncestor, GetForegroundWindow,
+                GetWindowThreadProcessId, HC_ACTION, MSLLHOOKSTRUCT, PostMessageW, WM_MOUSEHWHEEL,
+                WM_MOUSEWHEEL, WindowFromPoint,
+            },
+        };
+
+        if code == HC_ACTION as i32
+            && matches!(message.0 as u32, WM_MOUSEWHEEL | WM_MOUSEHWHEEL)
+            && data.0 != 0
+        {
+            // SAFETY: WH_MOUSE_LL 在 HC_ACTION 时提供有效的 MSLLHOOKSTRUCT 指针。
+            let event = unsafe { &*(data.0 as *const MSLLHOOKSTRUCT) };
+            let target = unsafe { WindowFromPoint(event.pt) };
+            let root = unsafe { GetAncestor(target, GA_ROOT) };
+            if !target.0.is_null() && !root.0.is_null() {
+                let mut process_id = 0;
+                // SAFETY: target、root 和前台句柄均来自刚才的 Win32 查询。
+                let target_thread =
+                    unsafe { GetWindowThreadProcessId(root, Some(&mut process_id)) };
+                let foreground = unsafe { GetForegroundWindow() };
+                let foreground_root = unsafe { GetAncestor(foreground, GA_ROOT) };
+                if target_thread != 0
+                    && process_id == unsafe { GetCurrentProcessId() }
+                    && root != foreground_root
+                {
+                    // 保留原始滚轮增量和屏幕坐标，让 GPUI 按鼠标命中位置分发。
+                    // SAFETY: root 属于当前进程且仍是鼠标下方窗口。
+                    let _ = unsafe {
+                        PostMessageW(
+                            Some(HWND(root.0)),
+                            message.0 as u32,
+                            windows::Win32::Foundation::WPARAM(event.mouseData as usize),
+                            LPARAM(
+                                (event.pt.x as u16 as u32 | ((event.pt.y as u16 as u32) << 16))
+                                    as isize,
+                            ),
+                        )
+                    };
+                    return LRESULT(1);
+                }
+            }
+        }
+
+        // SAFETY: 将未处理事件继续交给后续钩子与系统。
+        unsafe { CallNextHookEx(None, code, message, LPARAM(data.0)) }
+    }
 
     #[derive(Clone, Copy)]
     struct TriggerKey {
@@ -794,6 +897,18 @@ mod windows_input {
 }
 
 pub(crate) use windows_input::{pointer_snapshot, start};
+
+pub(crate) fn set_inactive_window_scroll_compatibility(enabled: bool) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        windows_input::set_inactive_window_scroll_compatibility(enabled)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = enabled;
+        Ok(())
+    }
+}
 
 pub(crate) use windows_input::{
     latest_mouse_down_sequence, subscribe_mouse_events, unsubscribe_mouse_events,

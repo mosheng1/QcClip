@@ -44,6 +44,8 @@ pub(crate) enum ConfigError {
     DataSwitching,
     #[error("代理地址必须是有效的 HTTP 代理地址，如 http://127.0.0.1:7890")]
     InvalidUpdateProxy,
+    #[error("无法设置非焦点窗口滚轮兼容：{0}")]
+    InactiveWindowScrollCompatibility(String),
 }
 
 pub(crate) struct ConfigRuntime {
@@ -96,6 +98,14 @@ impl ConfigRuntime {
         } = reload;
         if previous.general.language != config.general.language {
             i18n::set_locale(Locale::new(config.general.language.code()), cx);
+        }
+        if previous.general.inactive_window_scroll_compatibility
+            != config.general.inactive_window_scroll_compatibility
+            && let Err(error) = crate::platform::input::set_inactive_window_scroll_compatibility(
+                config.general.inactive_window_scroll_compatibility,
+            )
+        {
+            tracing::error!("同步非焦点窗口滚轮兼容设置失败：{error}");
         }
         if previous.sound != config.sound {
             crate::services::sound::set_config(config.sound.clone());
@@ -269,6 +279,42 @@ pub(crate) fn gallery_gif_autoplay(cx: &App) -> bool {
 
 pub(crate) fn launch_at_login(cx: &App) -> bool {
     cx.read_global::<ConfigRuntime, _>(|runtime, _| runtime.config.general.launch_at_login)
+}
+
+pub(crate) fn inactive_window_scroll_compatibility(cx: &App) -> bool {
+    cx.read_global::<ConfigRuntime, _>(|runtime, _| {
+        runtime.config.general.inactive_window_scroll_compatibility
+    })
+}
+
+pub(crate) fn set_inactive_window_scroll_compatibility(
+    enabled: bool,
+    cx: &mut App,
+) -> Result<bool, ConfigError> {
+    let (current, path, mut next) = cx.read_global::<ConfigRuntime, _>(|runtime, _| {
+        (
+            runtime.config.general.inactive_window_scroll_compatibility,
+            runtime.path.clone(),
+            runtime.config.clone(),
+        )
+    });
+    if current == enabled {
+        return Ok(false);
+    }
+
+    crate::platform::input::set_inactive_window_scroll_compatibility(enabled)
+        .map_err(ConfigError::InactiveWindowScrollCompatibility)?;
+    next.general.inactive_window_scroll_compatibility = enabled;
+    if let Err(error) = persist_config(&path, &next) {
+        if let Err(restore_error) =
+            crate::platform::input::set_inactive_window_scroll_compatibility(current)
+        {
+            tracing::error!("保存滚轮兼容设置失败后恢复钩子状态失败：{restore_error}");
+        }
+        return Err(error);
+    }
+    cx.update_global::<ConfigRuntime, _>(|runtime, _| runtime.config = next);
+    Ok(true)
 }
 
 pub(crate) fn run_as_administrator(cx: &App) -> bool {
@@ -578,6 +624,21 @@ pub(crate) fn reset_general_config(cx: &mut App) -> Result<bool, ConfigError> {
         crate::platform::auto_start::set_enabled(default.launch_at_login)
             .map_err(|source| ConfigError::System { source })?;
     }
+    if current.inactive_window_scroll_compatibility {
+        if let Err(error) = crate::platform::input::set_inactive_window_scroll_compatibility(false)
+        {
+            if current.launch_at_login != default.launch_at_login
+                && let Err(restore_error) =
+                    crate::platform::auto_start::set_enabled(current.launch_at_login)
+            {
+                return Err(ConfigError::AutoStartRollback {
+                    config: error,
+                    restore: restore_error.to_string(),
+                });
+            }
+            return Err(ConfigError::InactiveWindowScrollCompatibility(error));
+        }
+    }
     let language = default.language;
     let hide_tray_icon = default.hide_tray_icon;
     next.general = default;
@@ -591,6 +652,12 @@ pub(crate) fn reset_general_config(cx: &mut App) -> Result<bool, ConfigError> {
                     restore: restore_error.to_string(),
                 });
             }
+        }
+        if current.inactive_window_scroll_compatibility
+            && let Err(restore_error) =
+                crate::platform::input::set_inactive_window_scroll_compatibility(true)
+        {
+            tracing::error!("重置常规设置保存失败后恢复滚轮兼容钩子失败：{restore_error}");
         }
         return Err(error);
     }

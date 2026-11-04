@@ -196,6 +196,12 @@ pub fn run() {
                 Ok(()) => tracing::info!("全局鼠标事件监听已启动"),
                 Err(error) => tracing::error!("无法启动全局鼠标事件监听：{error}"),
             }
+            if crate::config_runtime::inactive_window_scroll_compatibility(cx)
+                && let Err(error) =
+                    crate::platform::input::set_inactive_window_scroll_compatibility(true)
+            {
+                tracing::error!("启动非焦点窗口滚轮兼容失败：{error}");
+            }
             #[cfg(target_os = "windows")]
             crate::platform::drag_preview::DragPreviewService::install(cx);
             #[cfg(target_os = "windows")]
