@@ -9,8 +9,8 @@ use gpui_render::{
     InstanceRange,
     artifacts::{Dx11DrawConstants, Dx11DrawConstantsBinding},
     blur::{
-        BlurAxis, BlurKernel, BlurUniforms, FilterCompositeClip,
-        GAUSSIAN_CUTOFF_STANDARD_DEVIATIONS, downsampled_dimension,
+        BlurAxis, BlurKernel, BlurUniforms, DOWNSAMPLE_FACTOR, FilterCompositeClip,
+        GAUSSIAN_CUTOFF_STANDARD_DEVIATIONS, ScissorRectangle, downsampled_dimension,
     },
     path_types::{PathRasterizationVertex, PathSprite},
     shaders::{
@@ -24,7 +24,7 @@ use smallvec::SmallVec;
 use wgsl_rs::std::{vec2f, vec4f};
 use windows::{
     Win32::{
-        Foundation::{FreeLibrary, HMODULE, HWND},
+        Foundation::{FreeLibrary, HMODULE, HWND, RECT},
         Graphics::{
             Direct3D::*,
             Direct3D11::*,
@@ -255,6 +255,8 @@ struct DirectXRenderPipelines {
     smoothed_blur_composite_vertex: ID3D11VertexShader,
     smoothed_blur_composite_fragment: ID3D11PixelShader,
     blur_params_buffer: ID3D11Buffer,
+    blur_rasterizer_state: ID3D11RasterizerState,
+    blur_sampler: Option<ID3D11SamplerState>,
     blur_blend_replace: ID3D11BlendState,
     blur_blend_composite: ID3D11BlendState,
     // Backdrop composite replaces the backdrop instead of drawing over it: an erase pass
@@ -1271,6 +1273,7 @@ impl DirectXRenderer {
         topology: D3D_PRIMITIVE_TOPOLOGY,
         vertex_count: u32,
         clear: bool,
+        scissor: Option<RECT>,
     ) -> Result<()> {
         let devices = self.devices.as_ref().context("devices missing")?;
         let ctx = &devices.device_context;
@@ -1278,6 +1281,11 @@ impl DirectXRenderer {
         let null_srv: [Option<ID3D11ShaderResourceView>; 1] = [None];
         let cbuffers = self.globals.cbuffers();
         let blur_params = [Some(self.pipelines.blur_params_buffer.clone())];
+        let previous_rasterizer = if scissor.is_some() {
+            Some(unsafe { ctx.RSGetState()? })
+        } else {
+            None
+        };
         unsafe {
             // Unbind any SRV at the blur slot; the target must not be bound as input.
             ctx.PSSetShaderResources(PRIMARY_TEXTURE_REGISTER, Some(&null_srv));
@@ -1289,6 +1297,10 @@ impl DirectXRenderer {
             }
             ctx.OMSetRenderTargets(Some(slice::from_ref(target_rtv)), None);
             ctx.RSSetViewports(Some(slice::from_ref(viewport)));
+            if let Some(scissor) = scissor {
+                ctx.RSSetState(&self.pipelines.blur_rasterizer_state);
+                ctx.RSSetScissorRects(Some(slice::from_ref(&scissor)));
+            }
             ctx.IASetPrimitiveTopology(topology);
             ctx.VSSetShader(vertex, None);
             ctx.PSSetShader(fragment, None);
@@ -1298,13 +1310,16 @@ impl DirectXRenderer {
             ctx.PSSetConstantBuffers(DATA_REGISTER, Some(&blur_params));
             ctx.PSSetSamplers(
                 PRIMARY_SAMPLER_REGISTER,
-                Some(slice::from_ref(&self.globals.sampler)),
+                Some(slice::from_ref(&self.pipelines.blur_sampler)),
             );
             ctx.PSSetShaderResources(PRIMARY_TEXTURE_REGISTER, Some(slice::from_ref(source_srv)));
             ctx.OMSetBlendState(blend, None, 0xFFFFFFFF);
             ctx.DrawInstanced(vertex_count, 1, 0, 0);
             // Unbind the source so the target can be rebound as a render target next.
             ctx.PSSetShaderResources(PRIMARY_TEXTURE_REGISTER, Some(&null_srv));
+            if let Some(previous_rasterizer) = previous_rasterizer {
+                ctx.RSSetState(&previous_rasterizer);
+            }
         }
         Ok(())
     }
@@ -1326,8 +1341,49 @@ impl DirectXRenderer {
         // Backdrop clips to the rounded rect; content (`filter`) bleeds past its bounds.
         clip_rounded: bool,
     ) -> Result<()> {
+        let Some(kernel) = BlurKernel::for_radius(blur_radius) else {
+            return Ok(());
+        };
         let full_width = self.width;
         let full_height = self.height;
+        let dilation = GAUSSIAN_CUTOFF_STANDARD_DEVIATIONS * blur_radius;
+        let composite_bounds = if clip_rounded {
+            bounds
+        } else {
+            bounds.dilate(ScaledPixels(dilation))
+        };
+        let viewport_bounds = Bounds::new(
+            point(ScaledPixels(0.0), ScaledPixels(0.0)),
+            size(
+                ScaledPixels(full_width as f32),
+                ScaledPixels(full_height as f32),
+            ),
+        );
+        let visible_bounds = composite_bounds
+            .intersect(&content_mask)
+            .intersect(&viewport_bounds);
+        if visible_bounds.is_empty() || opacity <= 0.0 {
+            return Ok(());
+        }
+        let scissor_rect = |padding| {
+            let scissor = ScissorRectangle::for_blurred_bounds(
+                visible_bounds,
+                padding,
+                full_width,
+                full_height,
+            );
+            RECT {
+                left: scissor.x as i32,
+                top: scissor.y as i32,
+                right: (scissor.x + scissor.width) as i32,
+                bottom: (scissor.y + scissor.height) as i32,
+            }
+        };
+        // 前两遍保留完整采样边缘；额外两像素覆盖双线性采样与奇数尺寸的舍入。
+        let sample_padding =
+            (kernel.sample_count as f32 * kernel.sample_step + 2.0) * DOWNSAMPLE_FACTOR as f32;
+        let input_scissor = scissor_rect(sample_padding);
+        let output_scissor = scissor_rect(2.0 * DOWNSAMPLE_FACTOR as f32);
         let blur_size = [
             downsampled_dimension(full_width) as f32,
             downsampled_dimension(full_height) as f32,
@@ -1359,11 +1415,7 @@ impl DirectXRenderer {
                 blur.pong_srv.clone(),
             )
         };
-        let Some(kernel) = BlurKernel::for_radius(blur_radius) else {
-            return Ok(());
-        };
-
-        // Downsample source -> ping, then separable gaussian ping -> pong -> ping.
+        // 每遍只覆盖后续会读取的区域，复用纹理时无需清空整张窗口纹理。
         self.dx_blur_pass(
             &self.pipelines.blur_downsample_vertex,
             &self.pipelines.blur_downsample_fragment,
@@ -1374,7 +1426,8 @@ impl DirectXRenderer {
             &half_vp,
             D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
             3,
-            true,
+            false,
+            Some(input_scissor),
         )?;
         self.dx_blur_pass(
             &self.pipelines.blur_vertex,
@@ -1386,7 +1439,8 @@ impl DirectXRenderer {
             &half_vp,
             D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
             3,
-            true,
+            false,
+            Some(input_scissor),
         )?;
         self.dx_blur_pass(
             &self.pipelines.blur_vertex,
@@ -1398,17 +1452,10 @@ impl DirectXRenderer {
             &half_vp,
             D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
             3,
-            true,
+            false,
+            Some(output_scissor),
         )?;
 
-        // Content blur bleeds ~3·radius past the box; composite over a dilated rect.
-        let composite_bounds = if clip_rounded {
-            bounds
-        } else {
-            bounds.dilate(ScaledPixels(
-                GAUSSIAN_CUTOFF_STANDARD_DEVIATIONS * blur_radius,
-            ))
-        };
         let composite_uniforms = BlurUniforms::composite(
             composite_bounds,
             content_mask,
@@ -1446,6 +1493,7 @@ impl DirectXRenderer {
                 D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP,
                 4,
                 false,
+                None,
             )?;
             self.dx_blur_pass(
                 composite_vertex,
@@ -1458,6 +1506,7 @@ impl DirectXRenderer {
                 D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP,
                 4,
                 false,
+                None,
             )?;
             return Ok(());
         }
@@ -1473,6 +1522,7 @@ impl DirectXRenderer {
             D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP,
             4,
             false,
+            None,
         )?;
         Ok(())
     }
@@ -1518,6 +1568,7 @@ impl DirectXRenderer {
             D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP,
             4,
             false,
+            None,
         )
     }
 
@@ -1543,6 +1594,7 @@ impl DirectXRenderer {
             D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
             3,
             true,
+            None,
         )
     }
 
@@ -1777,6 +1829,23 @@ impl DirectXRenderPipelines {
             create_fragment_shader(device, smoothed_blur_composite.fragment)?;
         let blur_params_buffer =
             create_constant_buffer(device, std::mem::size_of::<BlurUniforms>())?;
+        // 模糊采样超出窗口时延用边缘像素，不能循环读取另一端或未更新的区域。
+        let mut blur_sampler = None;
+        unsafe {
+            device.CreateSamplerState(
+                &D3D11_SAMPLER_DESC {
+                    Filter: D3D11_FILTER_MIN_MAG_MIP_LINEAR,
+                    AddressU: D3D11_TEXTURE_ADDRESS_CLAMP,
+                    AddressV: D3D11_TEXTURE_ADDRESS_CLAMP,
+                    AddressW: D3D11_TEXTURE_ADDRESS_CLAMP,
+                    MaxAnisotropy: 1,
+                    ComparisonFunc: D3D11_COMPARISON_ALWAYS,
+                    MaxLOD: D3D11_FLOAT32_MAX,
+                    ..Default::default()
+                },
+                Some(&mut blur_sampler),
+            )?;
+        }
         let blur_blend_replace = create_blend_state_no_blend(device)?;
         // Premultiplied (One / InvSrcAlpha) — the composite outputs a premultiplied blurred sample;
         // straight-alpha blending would darken the faded edges.
@@ -1819,6 +1888,8 @@ impl DirectXRenderPipelines {
             smoothed_blur_composite_vertex,
             smoothed_blur_composite_fragment,
             blur_params_buffer,
+            blur_rasterizer_state: create_rasterizer_state(device, true)?,
+            blur_sampler,
             blur_blend_replace,
             blur_blend_composite,
             backdrop_blend_erase,
@@ -2371,6 +2442,12 @@ fn set_viewport(device_context: &ID3D11DeviceContext, width: f32, height: f32) -
 
 #[inline]
 fn set_rasterizer_state(device: &ID3D11Device, device_context: &ID3D11DeviceContext) -> Result<()> {
+    let rasterizer_state = create_rasterizer_state(device, false)?;
+    unsafe { device_context.RSSetState(&rasterizer_state) };
+    Ok(())
+}
+
+fn create_rasterizer_state(device: &ID3D11Device, scissor: bool) -> Result<ID3D11RasterizerState> {
     let desc = D3D11_RASTERIZER_DESC {
         FillMode: D3D11_FILL_SOLID,
         CullMode: D3D11_CULL_NONE,
@@ -2379,17 +2456,13 @@ fn set_rasterizer_state(device: &ID3D11Device, device_context: &ID3D11DeviceCont
         DepthBiasClamp: 0.0,
         SlopeScaledDepthBias: 0.0,
         DepthClipEnable: true.into(),
-        ScissorEnable: false.into(),
+        ScissorEnable: scissor.into(),
         MultisampleEnable: true.into(),
         AntialiasedLineEnable: false.into(),
     };
-    let rasterizer_state = unsafe {
-        let mut state = None;
-        device.CreateRasterizerState(&desc, Some(&mut state))?;
-        state.unwrap()
-    };
-    unsafe { device_context.RSSetState(&rasterizer_state) };
-    Ok(())
+    let mut state = None;
+    unsafe { device.CreateRasterizerState(&desc, Some(&mut state))? };
+    state.context("创建光栅化状态失败")
 }
 
 // https://learn.microsoft.com/en-us/windows/win32/api/d3d11/ns-d3d11-d3d11_blend_desc
