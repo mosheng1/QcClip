@@ -19,6 +19,7 @@ use crate::{
 };
 use gpui::{App, Entity, SharedString, div, px};
 use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::checkbox::Checkbox;
 use gpui_component::slider::{Slider, SliderState};
 use gpui_component::switch::Switch;
 use gpui_component::{ActiveTheme as _, Disableable as _, IconNamed, Sizable as _, h_flex, v_flex};
@@ -159,6 +160,23 @@ impl SettingsWindowView {
             sound_config.enabled,
             translator.translate("settings.sound.preview"),
         );
+        let global_paste_checkbox = Checkbox::new("settings-sound-global-paste")
+            .checked(sound_config.global_paste)
+            .accessibility_label(translator.translate("settings.sound.global_paste"))
+            .tooltip(translator.translate("settings.sound.global_paste_tooltip"))
+            .on_click({
+                let view = view.clone();
+                let save_error = save_error.clone();
+                move |checked, _, cx| {
+                    let global_paste = *checked;
+                    persist_sound_change(
+                        view.clone(),
+                        move |sound| sound.global_paste = global_paste,
+                        save_error.clone(),
+                        cx,
+                    );
+                }
+            });
         let copy_preview = sound_preview_button(
             "settings-sound-copy-preview",
             sound_config.copy.preset.clone(),
@@ -246,7 +264,11 @@ impl SettingsWindowView {
                             .translate("settings.sound.effect_description")
                             .into(),
                     ),
-                    h_flex().gap_2().child(paste_selector).child(paste_preview),
+                    h_flex()
+                        .gap_2()
+                        .child(paste_selector)
+                        .child(paste_preview)
+                        .child(global_paste_checkbox),
                 ),
             )
             .child(

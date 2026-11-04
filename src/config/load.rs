@@ -780,6 +780,13 @@ fn read_sound(object: &Map<String, Value>, warnings: &mut Vec<String>) -> SoundC
             default.enabled,
             warnings,
         ),
+        global_paste: read_field(
+            object,
+            "globalPaste",
+            "sound.globalPaste",
+            default.global_paste,
+            warnings,
+        ),
         paste: read_sound_effect(object, "paste", "sound.paste", default.paste, warnings),
         copy: read_sound_effect(object, "copy", "sound.copy", default.copy, warnings),
         quick_paste_scroll: read_sound_effect(
@@ -1241,15 +1248,17 @@ mod tests {
         let old =
             from_str(r#"{"sound":{"copy":{"preset":"disabled"}}}"#).expect("无法加载旧音效配置");
         assert!(old.config.sound.enabled);
+        assert!(!old.config.sound.global_paste);
         assert_eq!(old.config.sound.copy.preset, SoundPreset::Disabled);
         assert!(old.warnings.is_empty());
 
         for enabled in [false, true] {
             let loaded = from_str(&format!(
-                r#"{{"sound":{{"enabled":{enabled},"paste":{{"preset":"external:提示.wav","volume":35}},"copy":{{"preset":"disabled"}}}}}}"#,
+                r#"{{"sound":{{"enabled":{enabled},"globalPaste":true,"paste":{{"preset":"external:提示.wav","volume":35}},"copy":{{"preset":"disabled"}}}}}}"#,
             ))
             .expect("无法加载音效总开关配置");
             assert_eq!(loaded.config.sound.enabled, enabled);
+            assert!(loaded.config.sound.global_paste);
             assert_eq!(
                 loaded.config.sound.paste.preset,
                 SoundPreset::External("提示.wav".to_owned())

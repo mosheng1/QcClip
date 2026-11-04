@@ -3,10 +3,11 @@ use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock, RwLock, mpsc};
+use std::sync::{Arc, Mutex, OnceLock, RwLock, mpsc};
 use std::thread;
 use std::time::Duration;
 
+use raw_input::{Event, Key, Listen};
 use rodio::buffer::SamplesBuffer;
 use rodio::{Decoder, OutputStream, Sink, Source};
 
@@ -19,6 +20,7 @@ const AUDIO_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
 #[derive(Clone, Copy)]
 pub(crate) enum SoundEvent {
     Paste,
+    GlobalPasteShortcut,
     Copy,
     QuickPasteScroll,
 }
@@ -57,6 +59,7 @@ static SOUND_CONFIG: OnceLock<RwLock<SoundConfig>> = OnceLock::new();
 static SOUND_DIRECTORY: OnceLock<RwLock<PathBuf>> = OnceLock::new();
 static SOUND_PLAYER: OnceLock<SoundPlayer> = OnceLock::new();
 static SOUND_SINK: RwLock<Option<Arc<Sink>>> = RwLock::new(None);
+static GLOBAL_PASTE_KEYS: OnceLock<Mutex<std::collections::HashSet<Key>>> = OnceLock::new();
 
 pub(crate) fn install(config: SoundConfig, sound_directory: PathBuf) {
     if let Err(error) = fs::create_dir_all(&sound_directory) {
@@ -71,6 +74,29 @@ pub(crate) fn install(config: SoundConfig, sound_directory: PathBuf) {
     if SOUND_CONFIG.set(RwLock::new(config.clone())).is_err() {
         set_config(config);
     }
+    let pressed_keys = GLOBAL_PASTE_KEYS.get_or_init(Default::default);
+    Listen::subscribe(move |event| {
+        let (key, is_down) = match event {
+            Event::KeyDown { key, .. } => (key, true),
+            Event::KeyUp { key, .. } => (key, false),
+            _ => return,
+        };
+        let should_play = {
+            let mut pressed_keys = pressed_keys
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if !is_down {
+                pressed_keys.remove(&key);
+                false
+            } else {
+                let newly_pressed = pressed_keys.insert(key);
+                newly_pressed && is_global_paste_shortcut(key, &pressed_keys)
+            }
+        };
+        if should_play {
+            play(SoundEvent::GlobalPasteShortcut);
+        }
+    });
 }
 
 pub(crate) fn set_data_directory(directory: PathBuf) {
@@ -160,12 +186,27 @@ pub(crate) fn play(event: SoundEvent) {
         }
     };
     let effect = match event {
-        SoundEvent::Paste => config.paste.clone(),
+        SoundEvent::GlobalPasteShortcut if !config.global_paste => return,
+        SoundEvent::Paste | SoundEvent::GlobalPasteShortcut => config.paste.clone(),
         SoundEvent::Copy => config.copy.clone(),
         SoundEvent::QuickPasteScroll => config.quick_paste_scroll.clone(),
     };
     drop(config);
     enqueue(effect.preset, effect.volume);
+}
+
+fn is_global_paste_shortcut(key: Key, pressed_keys: &std::collections::HashSet<Key>) -> bool {
+    let control =
+        pressed_keys.contains(&Key::ControlLeft) || pressed_keys.contains(&Key::ControlRight);
+    let shift = pressed_keys.contains(&Key::ShiftLeft) || pressed_keys.contains(&Key::ShiftRight);
+    let alt = pressed_keys.contains(&Key::AltLeft) || pressed_keys.contains(&Key::AltRight);
+    let meta = pressed_keys.contains(&Key::MetaLeft) || pressed_keys.contains(&Key::MetaRight);
+    !alt && !meta
+        && match key {
+            Key::KeyV => control && !shift,
+            Key::Insert => shift && !control,
+            _ => false,
+        }
 }
 
 pub(crate) fn preview(preset: SoundPreset, volume: u8) {
@@ -494,11 +535,29 @@ fn sweep_phase_cycles(
 
 #[cfg(test)]
 mod tests {
-    use super::{SoundRequest, append_if_enabled, generate_samples, scan_external_presets};
+    use super::{
+        SoundRequest, append_if_enabled, generate_samples, is_global_paste_shortcut,
+        scan_external_presets,
+    };
     use crate::config::{SoundConfig, SoundPreset};
+    use raw_input::Key;
     use rodio::{Sink, buffer::SamplesBuffer};
+    use std::collections::HashSet;
     use std::fs;
     use std::sync::RwLock;
+
+    #[test]
+    fn global_paste_shortcut_matching_excludes_copy_and_modified_paste_keys() {
+        let control_c = HashSet::from([Key::ControlLeft, Key::KeyC]);
+        let control_v = HashSet::from([Key::ControlLeft, Key::KeyV]);
+        let shift_insert = HashSet::from([Key::ShiftLeft, Key::Insert]);
+        let control_shift_v = HashSet::from([Key::ControlLeft, Key::ShiftLeft, Key::KeyV]);
+
+        assert!(!is_global_paste_shortcut(Key::KeyC, &control_c));
+        assert!(is_global_paste_shortcut(Key::KeyV, &control_v));
+        assert!(is_global_paste_shortcut(Key::Insert, &shift_insert));
+        assert!(!is_global_paste_shortcut(Key::KeyV, &control_shift_v));
+    }
 
     #[test]
     fn master_switch_blocks_all_presets_and_keeps_unconfigured_effects_silent() {

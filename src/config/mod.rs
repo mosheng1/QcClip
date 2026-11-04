@@ -1365,6 +1365,7 @@ impl SoundEffectConfig {
 #[serde(default)]
 pub struct SoundConfig {
     pub enabled: bool,
+    pub global_paste: bool,
     pub paste: SoundEffectConfig,
     pub copy: SoundEffectConfig,
     pub quick_paste_scroll: SoundEffectConfig,
@@ -1374,6 +1375,7 @@ impl Default for SoundConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            global_paste: false,
             paste: SoundEffectConfig {
                 preset: SoundPreset::CrispChime,
                 volume: 70,
@@ -2041,6 +2043,7 @@ mod tests {
         assert_eq!(config.shortcuts.add_favorite, None);
         assert!(config.shortcuts.add_favorite_open_editor_on_empty);
         assert!(config.sound.enabled);
+        assert!(!config.sound.global_paste);
         assert_eq!(config.sound.paste.preset, SoundPreset::CrispChime);
         assert_eq!(config.sound.copy.preset, SoundPreset::BrightPing);
         assert_eq!(config.appearance.mode, AppearanceMode::System);
@@ -2080,6 +2083,7 @@ mod tests {
         assert_eq!(value["shortcuts"]["addFavorite"], serde_json::Value::Null);
         assert_eq!(value["shortcuts"]["addFavoriteOpenEditorOnEmpty"], true);
         assert_eq!(value["sound"]["enabled"], true);
+        assert_eq!(value["sound"]["globalPaste"], false);
         assert_eq!(value["sound"]["paste"]["preset"], "crisp-chime");
         assert_eq!(value["sound"]["paste"]["volume"], 70);
         assert_eq!(value["sound"]["copy"]["volume"], 70);

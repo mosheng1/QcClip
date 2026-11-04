@@ -798,6 +798,8 @@
   "settings.clipboard.invalid_search_engine_icon": "Icon must be an image file (png / jpg / jpeg / svg / ico / webp / bmp / gif)",
   "settings.sound.enabled": "Enable sounds",
   "settings.sound.paste_effect": "Paste sound",
+  "settings.sound.global_paste": "Global",
+  "settings.sound.global_paste_tooltip": "Play the paste sound when a global paste shortcut is pressed.",
   "settings.sound.copy_effect": "Copy sound",
   "settings.sound.effect_description": "Choose a built-in or external sound to play.",
   "settings.sound.paste_volume": "Paste sound volume",

@@ -798,6 +798,8 @@
   "settings.clipboard.invalid_search_engine_icon": "图标必须是图片文件（png / jpg / jpeg / svg / ico / webp / bmp / gif）",
   "settings.sound.enabled": "启用音效",
   "settings.sound.paste_effect": "粘贴音效",
+  "settings.sound.global_paste": "全局生效",
+  "settings.sound.global_paste_tooltip": "监听全局粘贴快捷键并播放粘贴音效",
   "settings.sound.copy_effect": "复制音效",
   "settings.sound.effect_description": "选择要播放的内置或外部音效。",
   "settings.sound.paste_volume": "粘贴音效音量",
