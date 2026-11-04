@@ -468,7 +468,7 @@ pub(super) fn render(
                 })
                 .when(expanded, |this| {
                     this.bg(rail_background)
-                        .backdrop_blur(px(18.0))
+                        .map(|this| crate::window_material::with_backdrop_blur(this, cx))
                         .when(horizontal, |this| this.border_t_1())
                         .when(!horizontal, |this| this.border_l_1())
                         .border_color(gpui::ColorExt::opacity(&theme.muted_foreground, 0.16))
@@ -696,7 +696,7 @@ pub(super) fn render(
             .max(px(0.0)),
         );
         let mut background = theme.popover;
-        background.alpha = 0.5;
+        background.alpha = 1.0;
         let background = crate::window_material::overlay_surface_color(cx, background);
         let foreground = theme.popover_foreground;
         let secondary = gpui::ColorExt::opacity(&foreground, 0.7);
@@ -718,10 +718,9 @@ pub(super) fn render(
                     .border_1()
                     .border_color(gpui::ColorExt::opacity(&foreground, 0.12))
                     .bg(background)
-                    .backdrop_blur(px(18.0))
+                    .map(|this| crate::window_material::with_backdrop_blur(this, cx))
                     .text_color(foreground)
                     .text_xs()
-                    .shadow_sm()
                     .child(region)
                     .child(div().text_color(secondary).child(summary)),
             )

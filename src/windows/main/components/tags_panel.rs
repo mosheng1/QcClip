@@ -750,7 +750,7 @@ pub fn render(
         .overflow_hidden()
         .occlude()
         .bg(panel_background)
-        .when(material_enabled, |this| this.backdrop_blur(px(18.0)))
+        .map(|this| crate::window_material::with_backdrop_blur(this, cx))
         .border(px(0.5))
         .border_color(theme.border)
         .when(!material_enabled, |this| this.shadow_lg())

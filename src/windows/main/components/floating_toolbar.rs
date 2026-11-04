@@ -178,7 +178,7 @@ pub fn render(
         .p_1()
         .rounded_md()
         .bg(toolbar_background)
-        .backdrop_blur(px(18.0))
+        .map(|this| crate::window_material::with_backdrop_blur(this, cx))
         .border_1()
         .border_color(theme.border)
         .shadow_lg()

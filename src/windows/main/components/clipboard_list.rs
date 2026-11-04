@@ -1897,7 +1897,9 @@ fn render_item_surface<T>(
         .border_color(theme.border)
         .bg(info_bar_background)
         .rounded_bl(px(6.0))
-        .when(!metrics.horizontal, |this| this.backdrop_blur(px(18.0)))
+        .when(!metrics.horizontal, |this| {
+            crate::window_material::with_backdrop_blur(this, cx)
+        })
         .children(hover_actions)
         .when(identity_count > 0, |this| this.child(identity));
     let toolbar_visible = (identity_count > 0 && display.toolbar_visibility.is_visible(selected))
@@ -2069,7 +2071,7 @@ fn render_item_surface<T>(
         let surface_theme = crate::window_material::excluded_window_theme(cx);
         let mut background = surface_theme.background;
         background.alpha = 0.5;
-        row = row.bg(background).backdrop_blur(px(18.0));
+        row = crate::window_material::with_backdrop_blur(row.bg(background), cx);
         if has_toolbar {
             row = row.child(
                 div()

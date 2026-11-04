@@ -1358,7 +1358,7 @@ impl StickyNote {
                 .py(px(5.0))
                 .rounded(px(8.0))
                 .bg(paper.background.opacity(0.62))
-                .backdrop_blur(px(18.0))
+                .map(|this| crate::window_material::with_backdrop_blur(this, cx))
                 .border_1()
                 .border_color(paper.border.opacity(0.6))
                 .shadow_sm()

@@ -468,16 +468,20 @@ pub(crate) fn overlay_surface_color(cx: &App, fallback: Hsla) -> Hsla {
     )
 }
 
-/// 设置页抽屉表面：开启材质时与浮层一致（窗口色调 + 背景模糊），关闭材质时完全不透明。
-pub(crate) fn sheet_surface<E: Styled>(element: E, cx: &App) -> E {
-    let fallback = excluded_window_theme(cx).background;
+/// 背景模糊跟随窗口材质，关闭材质时不创建模糊滤镜。
+pub(crate) fn with_backdrop_blur<E: Styled>(element: E, cx: &App) -> E {
     let material = supported_material(crate::config_runtime::appearance_config(cx).window_material);
-    let element = element.bg(overlay_surface_color(cx, fallback));
     if material == WindowMaterial::Disabled {
         element
     } else {
         element.backdrop_blur(px(18.0))
     }
+}
+
+/// 设置页抽屉表面：开启材质时与浮层一致（窗口色调 + 背景模糊），关闭材质时完全不透明。
+pub(crate) fn sheet_surface<E: Styled>(element: E, cx: &App) -> E {
+    let fallback = excluded_window_theme(cx).background;
+    with_backdrop_blur(element.bg(overlay_surface_color(cx, fallback)), cx)
 }
 
 pub(crate) fn material_tint_color(
