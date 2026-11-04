@@ -49,6 +49,8 @@ enum ClipboardFingerprint {
 
 struct TransientClipboardFilter {
     baseline: Option<ClipboardFingerprint>,
+    self_write_baseline: bool,
+    baseline_restore_expected: bool,
     clipboard_is_empty: bool,
     pending: VecDeque<PendingCapture>,
 }
@@ -59,6 +61,8 @@ impl TransientClipboardFilter {
         let clipboard_is_empty = baseline == Some(ClipboardFingerprint::Empty);
         Self {
             baseline,
+            self_write_baseline: false,
+            baseline_restore_expected: false,
             clipboard_is_empty,
             pending: VecDeque::new(),
         }
@@ -67,6 +71,7 @@ impl TransientClipboardFilter {
     fn observe(&mut self, observation: ClipboardObservation) -> Vec<CapturedClipboard> {
         let ready = self.take_ready(observation.observed_at);
         let Some(fingerprint) = fingerprint(&observation.captured) else {
+            self.baseline_restore_expected = true;
             tracing::debug!("剪贴板快照没有可比对的有效内容，保留稳定基准和待确认内容");
             return ready;
         };
@@ -74,34 +79,80 @@ impl TransientClipboardFilter {
         // 真实清空与读取失败分开处理，同时保留最后的有效基准用于识别旧内容还原。
         self.clipboard_is_empty = fingerprint == ClipboardFingerprint::Empty;
         let ClipboardFingerprint::Content(fingerprint) = fingerprint else {
+            self.baseline_restore_expected = true;
             return ready;
         };
 
-        // 工具可能只还原部分格式；保留原基准，避免连续划词逐步丢失格式后被当作新内容。
+        // 部分应用还原时只恢复部分格式；这类快照仍视为还原而非新的复制。
         if let Some(ClipboardFingerprint::Content(baseline)) = &self.baseline
+            && baseline != &fingerprint
             && is_restored_content(baseline, &fingerprint)
         {
             self.pending.clear();
-            tracing::debug!("剪贴板内容与稳定内容一致或为其格式子集，跳过重复捕获或还原事件");
+            self.baseline_restore_expected = false;
+            tracing::debug!("剪贴板部分恢复到稳定内容，跳过临时捕获");
+            return ready;
+        }
+
+        // 回到最近基准且之前确有不同的待确认内容时，才视为临时内容还原。
+        if let Some(ClipboardFingerprint::Content(baseline)) = &self.baseline
+            && is_restored_content(baseline, &fingerprint)
+            && self
+                .pending
+                .iter()
+                .any(|pending| !is_restored_content(baseline, &pending.fingerprint))
+        {
+            self.pending.clear();
+            self.baseline_restore_expected = false;
+            tracing::debug!("剪贴板恢复到稳定内容，跳过临时捕获");
+            return ready;
+        }
+
+        if self.baseline_restore_expected
+            && let Some(ClipboardFingerprint::Content(baseline)) = &self.baseline
+            && baseline == &fingerprint
+        {
+            self.baseline_restore_expected = false;
             return ready;
         }
 
         if let Some(index) = self
             .pending
             .iter()
-            .rposition(|pending| is_restored_content(&pending.fingerprint, &fingerprint))
+            .enumerate()
+            .rev()
+            .find_map(|(index, pending)| {
+                (is_restored_content(&pending.fingerprint, &fingerprint)
+                    && self
+                        .pending
+                        .iter()
+                        .skip(index + 1)
+                        .any(|later| !is_restored_content(&later.fingerprint, &fingerprint)))
+                .then_some(index)
+            })
         {
             // 只撤销还原点之后的内容，保留此前尚未入库的正常复制。
             self.pending.truncate(index + 1);
             return ready;
         }
 
-        // 部分应用会分多次写入同一内容（先文件路径、再补位图），新快照包含上一条待确认内容的全部格式时视为同一次复制。
-        if self
-            .pending
-            .back()
-            .is_some_and(|pending| is_restored_content(&fingerprint, &pending.fingerprint))
+        // 程序自身写入的内容可能紧接着收到一次还原通知，消费该通知但允许后续相同复制。
+        if self.self_write_baseline
+            && let Some(ClipboardFingerprint::Content(baseline)) = &self.baseline
+            && is_restored_content(baseline, &fingerprint)
         {
+            self.self_write_baseline = false;
+            self.pending.clear();
+            return ready;
+        }
+
+        self.baseline_restore_expected = false;
+
+        // 部分应用会分多次写入同一内容（先文件路径、再补位图），新快照包含上一条待确认内容的全部格式时视为同一次复制。
+        if self.pending.back().is_some_and(|pending| {
+            fingerprint.len() > pending.fingerprint.len()
+                && is_restored_content(&fingerprint, &pending.fingerprint)
+        }) {
             tracing::debug!("剪贴板内容在确认前补充了格式，合并为同一次捕获");
             self.pending.pop_back();
         }
@@ -129,6 +180,7 @@ impl TransientClipboardFilter {
                 continue;
             }
             self.baseline = Some(ClipboardFingerprint::Content(pending.fingerprint));
+            self.self_write_baseline = !pending.observation.recordable;
             if pending.observation.recordable {
                 ready.push(pending.observation.captured);
             }
@@ -792,33 +844,33 @@ mod tests {
     }
 
     #[test]
-    fn restore_without_a_captured_temporary_copy_does_not_produce_an_event() {
+    fn copying_the_current_baseline_is_recorded() {
         let now = Instant::now();
         let original = text("原内容");
         let mut filter = TransientClipboardFilter::new(Some(&original));
-        filter.observe(observation(original, now, true));
-        assert!(filter.take_ready(now + RESTORE_WINDOW).is_empty());
-        assert!(filter.next_deadline().is_none());
+        filter.observe(observation(original.clone(), now, true));
+        assert_eq!(filter.take_ready(now + RESTORE_WINDOW), vec![original]);
     }
 
     #[test]
-    fn repeated_restore_events_after_a_temporary_copy_do_not_produce_notifications() {
+    fn consecutive_copies_matching_the_baseline_are_each_recorded() {
         let now = Instant::now();
         let original = text("原内容");
         let mut filter = TransientClipboardFilter::new(Some(&original));
-        filter.observe(observation(text("划词内容"), now, true));
-        for delay in [52, 53, 100, 450] {
-            assert!(
-                filter
-                    .observe(observation(
-                        original.clone(),
-                        now + Duration::from_millis(delay),
-                        true,
-                    ))
-                    .is_empty()
-            );
-        }
-        assert!(filter.take_ready(now + Duration::from_secs(1)).is_empty());
+        filter.observe(observation(original.clone(), now, true));
+        filter.observe(observation(
+            original.clone(),
+            now + Duration::from_millis(50),
+            true,
+        ));
+        assert_eq!(
+            filter.take_ready(now + RESTORE_WINDOW),
+            vec![original.clone()]
+        );
+        assert_eq!(
+            filter.take_ready(now + RESTORE_WINDOW + Duration::from_millis(50)),
+            vec![original]
+        );
         assert!(filter.next_deadline().is_none());
     }
 
