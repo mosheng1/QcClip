@@ -1998,6 +1998,7 @@ fn render_item_surface<T>(
                     metrics.preview_line_height,
                     translator.translate("main.format.image_html"),
                     html_images,
+                    None,
                     // 自适应行高按固定的图片上限估算高度，渲染时必须使用同一上限。
                     if metrics.height == ListItemHeight::Adaptive {
                         ADAPTIVE_IMAGE_PREVIEW_LINES

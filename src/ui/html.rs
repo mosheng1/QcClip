@@ -68,6 +68,7 @@ pub fn render_with_images(
         line_height,
         fallback_text,
         images,
+        None,
         INTERNAL_PREVIEW_LINE_COUNT as usize,
     )
 }
@@ -79,6 +80,7 @@ pub fn render_with_images_and_max_lines(
     line_height: Pixels,
     fallback_text: String,
     images: &HashMap<PathBuf, Arc<RenderImage>>,
+    max_image_width: Option<Pixels>,
     max_preview_lines: usize,
 ) -> AnyElement {
     let source = crate::domain::html::fragment(source);
@@ -87,6 +89,7 @@ pub fn render_with_images_and_max_lines(
         font_size,
         line_height,
         images,
+        max_image_width,
         max_preview_lines: max_preview_lines.max(1),
         max_nodes: if max_preview_lines <= INTERNAL_PREVIEW_LINE_COUNT as usize {
             MAX_LIST_RENDER_NODES
@@ -535,6 +538,37 @@ impl InlineContent {
         self.push_highlight(start, style);
     }
 
+    fn trim_boundary_line_breaks(&mut self) {
+        let leading = self.text.bytes().take_while(|byte| *byte == b'\n').count();
+        let trailing = self
+            .text
+            .bytes()
+            .rev()
+            .take_while(|byte| *byte == b'\n')
+            .count();
+        if leading == 0 && trailing == 0 {
+            return;
+        }
+
+        if leading + trailing >= self.text.len() {
+            self.text.clear();
+            self.highlights.clear();
+            return;
+        }
+
+        let end = self.text.len().saturating_sub(trailing);
+        self.text = self.text[leading..end].to_owned();
+        self.highlights = self
+            .highlights
+            .iter()
+            .filter_map(|(range, style)| {
+                let start = range.start.max(leading).min(end);
+                let finish = range.end.max(leading).min(end);
+                (start < finish).then(|| ((start - leading)..(finish - leading), *style))
+            })
+            .collect();
+    }
+
     fn push_highlight(&mut self, start: usize, style: HtmlStyle) {
         if start < self.text.len() {
             self.highlights
@@ -562,6 +596,7 @@ struct HtmlRenderer<'a> {
     font_size: Pixels,
     line_height: Pixels,
     images: &'a HashMap<PathBuf, Arc<RenderImage>>,
+    max_image_width: Option<Pixels>,
     max_preview_lines: usize,
     max_nodes: usize,
     visited_nodes: usize,
@@ -638,6 +673,7 @@ impl<'a> HtmlRenderer<'a> {
         font_size: Pixels,
         line_height: Pixels,
     ) {
+        inline.trim_boundary_line_breaks();
         if !inline.has_visible_text() {
             inline.text.clear();
             inline.highlights.clear();
@@ -836,12 +872,24 @@ impl<'a> HtmlRenderer<'a> {
                 line_height,
             } => {
                 let max_height = line_height * self.max_preview_lines as f32;
-                let element = div().w_full().flex().items_start().child(
+                let image_element = if let Some(max_width) = self.max_image_width {
+                    let image_size = image.size(0);
+                    let image_width = image_size.width.0 as f32;
+                    let image_height = image_size.height.0 as f32;
+                    let scale = (f32::from(max_width) / image_width)
+                        .min(f32::from(max_height) / image_height)
+                        .min(1.0);
+                    img(image)
+                        .w(px(image_width * scale))
+                        .h(px(image_height * scale))
+                        .object_fit(ObjectFit::Contain)
+                } else {
                     img(image)
                         .max_w_full()
                         .max_h(max_height)
-                        .object_fit(ObjectFit::Contain),
-                );
+                        .object_fit(ObjectFit::Contain)
+                };
+                let element = div().w_full().flex().items_start().child(image_element);
                 apply_block_style(element, style).into_any_element()
             }
             FlowChunk::Block(element) => element,
@@ -1085,6 +1133,7 @@ impl HtmlDocument {
             font_size: self.font_size,
             line_height: self.line_height,
             images,
+            max_image_width: None,
             max_preview_lines: 40,
             max_nodes: MAX_RENDER_NODES,
             visited_nodes: 0,
@@ -1173,6 +1222,7 @@ impl DocumentCollector {
     }
 
     fn flush_inline(&mut self, inline: &mut InlineContent, style: HtmlStyle) {
+        inline.trim_boundary_line_breaks();
         if !inline.has_visible_text() {
             inline.text.clear();
             inline.highlights.clear();
@@ -1618,6 +1668,28 @@ mod tests {
         let mut content = InlineContent::default();
         content.push_text("  hello\n   world  ", HtmlStyle::default());
         assert_eq!(content.text, " hello world ");
+    }
+
+    #[test]
+    fn boundary_line_breaks_do_not_create_empty_preview_lines() {
+        let mut content = InlineContent::default();
+        content.push_line_break(HtmlStyle::default());
+        content.push_text("前", HtmlStyle::default());
+        content.push_line_break(HtmlStyle::default());
+        content.trim_boundary_line_breaks();
+        assert_eq!(content.text, "前");
+
+        let mut content = InlineContent::default();
+        content.push_text("前", HtmlStyle::default());
+        content.push_line_break(HtmlStyle::default());
+        content.push_text("后", HtmlStyle::default());
+        content.trim_boundary_line_breaks();
+        assert_eq!(content.text, "前\n后");
+
+        let mut content = InlineContent::default();
+        content.push_line_break(HtmlStyle::default());
+        content.trim_boundary_line_breaks();
+        assert!(content.text.is_empty());
     }
 
     #[test]

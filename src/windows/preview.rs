@@ -1323,14 +1323,21 @@ impl PreviewWindow {
                             .id("preview-html-scroll-content")
                             .overflow_y_scroll()
                             .track_scroll(&self.html_scroll)
-                            .child(div().child(html_preview::render_with_images_and_max_lines(
-                                html,
-                                ui_rem(14.0).to_pixels(window.rem_size()),
-                                self.text_line_height,
-                                preview.text.clone(),
-                                &self.html_images,
-                                10_000,
-                            ))),
+                            .child(
+                                div().child(html_preview::render_with_images_and_max_lines(
+                                    html,
+                                    ui_rem(14.0).to_pixels(window.rem_size()),
+                                    self.text_line_height,
+                                    preview.text.clone(),
+                                    &self.html_images,
+                                    Some(px((max_width
+                                        - 16.0 * crate::ui::scale::window_scale(window))
+                                    .max(1.0))),
+                                    (max_height / f32::from(self.text_line_height))
+                                        .ceil()
+                                        .max(1.0) as usize,
+                                )),
+                            ),
                     )
                     .into_any_element()
             }
