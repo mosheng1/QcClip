@@ -701,7 +701,7 @@ impl ClipboardMouseBehavior {
         if self.is_double_click() {
             click_count == 2
         } else {
-            click_count == 1
+            click_count > 0
         }
     }
 
@@ -2126,7 +2126,12 @@ mod tests {
         assert_eq!(ClipboardMouseBehavior::ALL, cases.map(|case| case.0));
         for (behavior, click_count, action) in cases {
             for count in 0..=3 {
-                assert_eq!(behavior.matches_click_count(count), count == click_count);
+                let expected = if behavior.is_double_click() {
+                    count == click_count
+                } else {
+                    count > 0
+                };
+                assert_eq!(behavior.matches_click_count(count), expected);
             }
             assert_eq!(behavior.action(), action);
             let saved = serde_json::to_value(behavior).expect("鼠标行为应当可以保存");
