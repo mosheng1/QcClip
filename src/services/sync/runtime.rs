@@ -759,17 +759,14 @@ impl Runtime {
                         }
                         if let Some(s) = &socket {
                             if last.elapsed().as_secs() >= 3 {
-                                if config.enabled && config.lan_enabled {
-                                    let _ = s.send_to(
-                                        format!("QcClip/1/{}", config.port).as_bytes(),
-                                        ("255.255.255.255", super::config::PORT),
-                                    );
-                                }
-                                if let Some(advertisement) = runtime.pairing_advertisement() {
-                                    let _ = s.send_to(
-                                        &advertisement,
-                                        ("255.255.255.255", super::config::PORT),
-                                    );
+                                let targets = super::lan::broadcast_targets();
+                                let announce = (config.enabled && config.lan_enabled)
+                                    .then(|| format!("QcClip/1/{}", config.port).into_bytes());
+                                let advertisement = runtime.pairing_advertisement();
+                                for target in &targets {
+                                    for payload in announce.iter().chain(advertisement.iter()) {
+                                        let _ = s.send_to(payload, (*target, super::config::PORT));
+                                    }
                                 }
                                 last = Instant::now();
                             }

@@ -47,3 +47,27 @@ pub fn prepare(stream: &TcpStream) -> Result<()> {
     stream.set_write_timeout(Some(Duration::from_secs(8)))?;
     Ok(())
 }
+
+/// 局域网发现广播的目标地址：受限广播加上每块 IPv4 网卡的子网定向广播。
+/// Windows 只会把 255.255.255.255 从默认路由网卡发出，ZeroTier 等虚拟网卡需要定向广播才能覆盖。
+pub fn broadcast_targets() -> Vec<std::net::Ipv4Addr> {
+    let mut targets = vec![std::net::Ipv4Addr::BROADCAST];
+    for interface in if_addrs::get_if_addrs().unwrap_or_default() {
+        let if_addrs::IfAddr::V4(v4) = interface.addr else {
+            continue;
+        };
+        if v4.ip.is_loopback()
+            || v4.ip.is_link_local()
+            || v4.netmask == std::net::Ipv4Addr::BROADCAST
+        {
+            continue;
+        }
+        let broadcast = v4
+            .broadcast
+            .unwrap_or_else(|| (u32::from(v4.ip) | !u32::from(v4.netmask)).into());
+        if broadcast != v4.ip && !targets.contains(&broadcast) {
+            targets.push(broadcast);
+        }
+    }
+    targets
+}

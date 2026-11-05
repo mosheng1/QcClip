@@ -63,6 +63,7 @@ chacha20poly1305 = "0.10"
 spake2 = "0.4"
 zeroize = { version = "1", features = ["derive"] }
 url = "2"
+if-addrs = "0.15"
 
 [build-dependencies]
 embed-resource = "3.0.11"
