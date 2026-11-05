@@ -422,10 +422,8 @@ fn refresh_window_geometry(reposition: bool, cx: &mut App) {
         .main_window
         .restored_layout_size(clipboard.effective_list_layout());
     // 屏幕边缘定位的窗口由定位规则决定尺寸和位置；隐藏或动画中的窗口下次显示时会重新定位。
-    let resize_in_place = !reposition
-        && visible
-        && !transition_active
-        && !clipboard.window_position.is_screen_edge();
+    let resize_in_place =
+        !reposition && visible && !transition_active && !clipboard.window_position.is_screen_edge();
     // 已贴边的窗口稍后由 set_edge_hide_enabled 按原贴边位置和新尺寸恢复，
     // 这里不能先挪动，也不能把贴边坐标记成普通窗口位置。
     let keep_edge_position = resize_in_place && edge_attached && clipboard.edge_hide;
