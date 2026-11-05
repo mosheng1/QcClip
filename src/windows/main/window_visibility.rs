@@ -207,9 +207,14 @@ pub(crate) fn set_edge_hide_enabled(enabled: bool, cx: &mut App) {
         return;
     }
 
-    let (window, attachment) = cx.read_global::<MainWindowService, _>(|service, _| {
-        (service.window, service.window_state.edge_attachment())
-    });
+    let (window, attachment, transition_active) =
+        cx.read_global::<MainWindowService, _>(|service, _| {
+            (
+                service.window,
+                service.window_state.edge_attachment(),
+                service.window_state.is_visibility_transition_active(),
+            )
+        });
     if let Some(window) = window {
         let result = window.update(cx, |_, window, _| {
             platform_window::set_window_shadow_visible(window, true)?;
@@ -233,13 +238,14 @@ pub(crate) fn set_edge_hide_enabled(enabled: bool, cx: &mut App) {
     cx.update_global::<MainWindowService, _>(|service, _| {
         service.window_state.disable_edge_mode();
     });
-    synchronize_disabled_edge_window(attachment, cx);
+    synchronize_disabled_edge_window(attachment, transition_active, cx);
     state_runtime::set_main_window_edge(None, cx);
     sync_mouse_leave_state(cx);
 }
 
 fn synchronize_disabled_edge_window(
     previous_attachment: Option<window_state::EdgeAttachment>,
+    transition_was_active: bool,
     cx: &mut App,
 ) {
     let (window, visible, normal_bounds) = cx.read_global::<MainWindowService, _>(|service, _| {
@@ -270,8 +276,12 @@ fn synchronize_disabled_edge_window(
 
         let bounds = normal_bounds.unwrap_or(platform_window::physical_client_bounds(window)?);
         if visible {
-            platform_window::set_client_bounds(window, bounds)?;
-            window.bounds_changed(cx);
+            // 静止显示的普通窗口当前坐标就是用户看到的位置，不能用记录的 normal_bounds 覆盖；
+            // 只有显示/隐藏动画进行中（窗口尺寸可能处于中间状态）才恢复完整尺寸。
+            if transition_was_active {
+                platform_window::set_client_bounds(window, bounds)?;
+                window.bounds_changed(cx);
+            }
             platform_window::set_window_opacity(window, 1.0)?;
             platform_window::set_window_shadow_visible(window, true)?;
             platform_window::set_window_visible(window, true)?;
@@ -381,14 +391,27 @@ enum VisibilityAnimation {
     },
 }
 
+/// “窗口显示位置”设置变化：按新的定位规则重新放置窗口。
 pub(crate) fn refresh_window_position(cx: &mut App) {
+    refresh_window_geometry(true, cx);
+}
+
+/// 只切换列表分栏：显示中的窗口原地换成新布局尺寸。
+/// “窗口显示位置”只负责从隐藏到显示时的定位，不在这里重新定位。
+pub(crate) fn refresh_window_layout(cx: &mut App) {
+    refresh_window_geometry(false, cx);
+}
+
+fn refresh_window_geometry(reposition: bool, cx: &mut App) {
     window_drag::sync_window_size_after_native_resize(cx);
     record_normal_position(cx);
-    let (window, visible, previous_panel, normal_bounds) =
+    let (window, edge_attached, visible, transition_active, previous_panel, normal_bounds) =
         cx.read_global::<MainWindowService, _>(|service, _| {
             (
                 service.window,
+                service.window_state.edge_attachment().is_some(),
                 service.window_state.is_logically_visible(),
+                service.window_state.is_visibility_transition_active(),
                 service.window_state.panel_attachment(),
                 service.window_state.normal_bounds(),
             )
@@ -398,6 +421,14 @@ pub(crate) fn refresh_window_position(cx: &mut App) {
     let restored = state_runtime::state(cx)
         .main_window
         .restored_layout_size(clipboard.effective_list_layout());
+    // 屏幕边缘定位的窗口由定位规则决定尺寸和位置；隐藏或动画中的窗口下次显示时会重新定位。
+    let resize_in_place = !reposition
+        && visible
+        && !transition_active
+        && !clipboard.window_position.is_screen_edge();
+    // 已贴边的窗口稍后由 set_edge_hide_enabled 按原贴边位置和新尺寸恢复，
+    // 这里不能先挪动，也不能把贴边坐标记成普通窗口位置。
+    let keep_edge_position = resize_in_place && edge_attached && clipboard.edge_hide;
     cx.update_global::<MainWindowService, _>(|service, _| {
         service.window_state.disable_edge_mode();
         service.window_state.set_panel_attachment(None);
@@ -413,7 +444,14 @@ pub(crate) fn refresh_window_position(cx: &mut App) {
         {
             platform_window::set_client_bounds(window, bounds)?;
         }
-        position_initial_window(window, size(px(restored.width), px(restored.height)), cx)?;
+        let restored_size = size(px(restored.width), px(restored.height));
+        if resize_in_place {
+            if !keep_edge_position {
+                resize_window_in_place(window, restored_size, cx)?;
+            }
+        } else {
+            position_initial_window(window, restored_size, cx)?;
+        }
         if visible {
             platform_window::set_window_opacity(window, 1.0)?;
             platform_window::set_window_shadow_visible(window, true)?;
@@ -545,6 +583,51 @@ pub(crate) fn position_initial_window(
         let _ = (window, initial_logical_size, cx);
         Ok(())
     }
+}
+
+/// 保持窗口左上角不动换成新尺寸；超出所在屏幕时向内收回。
+fn resize_window_in_place(
+    window: &mut gpui::Window,
+    logical_size: Size<Pixels>,
+    cx: &mut App,
+) -> Result<(), String> {
+    let current = platform_window::physical_client_bounds(window)?;
+    let Some(display) = platform_window::display_for_physical_point(
+        cx,
+        Point {
+            x: (current.left + current.right) as f32 / 2.0,
+            y: (current.top + current.bottom) as f32 / 2.0,
+        },
+    ) else {
+        return position_initial_window(window, logical_size, cx);
+    };
+    let converter = platform_window::CoordinateConverter::new(display.scale_factor);
+    let screen = converter.logical_display_bounds(display.bounds);
+    let origin = converter.physical_point_to_logical(Point {
+        x: current.left as f32,
+        y: current.top as f32,
+    });
+    let width = f32::from(logical_size.width)
+        .max(1.0)
+        .min(screen.width.max(1.0));
+    let height = f32::from(logical_size.height)
+        .max(1.0)
+        .min(screen.height.max(1.0));
+    let bounds = platform_window::physical_client_bounds_from_logical(
+        platform_window::LogicalClientBounds {
+            left: clamp_position(origin.x, screen.x, screen.x + screen.width, width),
+            top: clamp_position(origin.y, screen.y, screen.y + screen.height, height),
+            width,
+            height,
+        },
+        display.scale_factor,
+    );
+    if bounds != current {
+        platform_window::set_client_bounds(window, bounds)?;
+    }
+    window.bounds_changed(cx);
+    remember_normal_geometry(bounds, (width, height), cx);
+    record_normal_position_from_window(window, cx)
 }
 
 #[cfg(target_os = "windows")]

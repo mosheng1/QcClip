@@ -747,6 +747,11 @@ impl MainWindowService {
         cx.defer(window_visibility::refresh_window_position);
     }
 
+    /// 只切换列表分栏：窗口按新布局尺寸原地调整，不按“窗口显示位置”重新定位。
+    pub(crate) fn refresh_window_layout(cx: &mut App) {
+        cx.defer(window_visibility::refresh_window_layout);
+    }
+
     pub(crate) fn set_edge_hide_temporarily_blocked(blocked: bool, cx: &mut App) {
         window_visibility::set_edge_hide_temporarily_blocked(blocked, cx);
     }

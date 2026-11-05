@@ -124,11 +124,12 @@ impl ConfigRuntime {
         if previous.clipboard.edge_hide_show_edge != config.clipboard.edge_hide_show_edge {
             crate::windows::main::MainWindowService::refresh_edge_hide_position(cx);
         }
-        if previous.clipboard.window_position != config.clipboard.window_position
-            || previous.clipboard.effective_list_layout()
-                != config.clipboard.effective_list_layout()
-        {
+        if previous.clipboard.window_position != config.clipboard.window_position {
             crate::windows::main::MainWindowService::refresh_window_position(cx);
+        } else if previous.clipboard.effective_list_layout()
+            != config.clipboard.effective_list_layout()
+        {
+            crate::windows::main::MainWindowService::refresh_window_layout(cx);
         }
         if previous.clipboard.hover_preview_enabled && !config.clipboard.hover_preview_enabled {
             crate::windows::main::MainWindowService::cancel_hover_preview(cx);
@@ -848,8 +849,10 @@ pub(crate) fn set_clipboard_config(
     if current.edge_hide_show_edge != edge_hide_show_edge {
         crate::windows::main::MainWindowService::refresh_edge_hide_position(cx);
     }
-    if current.window_position != window_position || list_layout_changed {
+    if current.window_position != window_position {
         crate::windows::main::MainWindowService::refresh_window_position(cx);
+    } else if list_layout_changed {
+        crate::windows::main::MainWindowService::refresh_window_layout(cx);
     }
     if (current.hover_preview_enabled && !hover_preview_enabled)
         || current.preview_types != preview_types

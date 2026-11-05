@@ -104,6 +104,11 @@ fn begin_or_start_window_move(window: &mut Window, edge_hide_enabled: bool, cx: 
     if edge_hide_enabled {
         begin(window, cx);
     } else {
+        // 未开启贴边时也要进入拖拽状态，松开鼠标后才会记录新的普通窗口位置；
+        // 否则 normal_bounds 停留在拖拽前，后续按它恢复窗口时会跳回旧位置。
+        cx.update_global::<MainWindowService, _>(|service, _| {
+            service.window_state.begin_drag();
+        });
         window.start_window_move();
     }
 }
