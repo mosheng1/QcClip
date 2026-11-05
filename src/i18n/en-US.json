@@ -904,6 +904,7 @@
   "settings.personalization.mode.system": "Follow system",
   "settings.personalization.mode.light": "Light",
   "settings.personalization.mode.dark": "Dark",
+  "settings.personalization.theme_external_badge": "Custom",
   "settings.personalization.light_theme": "Light theme",
   "settings.personalization.light_theme_description": "The theme used in light mode or a light system appearance.",
   "settings.personalization.dark_theme": "Dark theme",

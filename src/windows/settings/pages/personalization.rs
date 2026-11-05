@@ -17,16 +17,20 @@ use crate::{
         TitlebarPosition, WindowMaterial,
     },
     config_runtime, i18n,
-    ui::theme::{ThemeOption, available_theme_options},
+    ui::icon::icon,
+    ui::theme::{ThemeOption, ThemePreviewColors, available_theme_options},
     ui::{SingleSelectOption, single_select},
     windows::menu::{DropdownItem, DropdownItemId},
 };
-use gpui::{App, Entity, Window, div, px};
+use gpui::DurationWithEasing as _;
+use gpui::{App, Entity, FontWeight, Hsla, SharedString, Window, div, px, relative};
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::scroll::ScrollableElement as _;
 use gpui_component::slider::Slider;
 use gpui_component::switch::Switch;
 use gpui_component::{ActiveTheme as _, Sizable as _, ThemeMode, WindowExt as _, h_flex, v_flex};
+use gpui_component::{Colorize as _, ThemeColor, tooltip::Tooltip};
+use std::{rc::Rc, time::Duration};
 
 impl SettingsWindowView {
     pub(in crate::windows::settings) fn render_appearance(
@@ -138,42 +142,36 @@ impl SettingsWindowView {
             cx,
         );
 
-        let mode_items = AppearanceMode::ALL
-            .into_iter()
-            .map(|mode| {
-                DropdownItem::option(
-                    DropdownItemId::new(mode.code()),
-                    translator.translate(appearance_mode_label_key(mode)),
-                )
-                .selected(mode == appearance.mode)
-            })
-            .collect::<Vec<_>>();
         let save_error = translator.translate("settings.personalization.save_error");
-        let mode_selector = settings_dropdown(
-            "settings-appearance-mode-select",
-            appearance.mode.code(),
-            mode_items,
-            {
+        let theme_options = available_theme_options(cx);
+        let light_preview =
+            selected_theme_preview(&theme_options, ThemeMode::Light, &appearance.light_theme);
+        let dark_preview =
+            selected_theme_preview(&theme_options, ThemeMode::Dark, &appearance.dark_theme);
+        let mode_cards = h_flex()
+            .w_full()
+            .gap_3()
+            .children(AppearanceMode::ALL.into_iter().map(|mode| {
                 let view = view.clone();
                 let save_error = save_error.clone();
-                move |action_id, cx| {
-                    let Some(mode) = AppearanceMode::ALL
-                        .into_iter()
-                        .find(|mode| mode.code() == action_id.as_str())
-                    else {
-                        return;
-                    };
-                    persist_appearance_change(
-                        view.clone(),
-                        "外观模式",
-                        move |appearance| appearance.mode = mode,
-                        save_error.clone(),
-                        cx,
-                    );
-                }
-            },
-            cx,
-        );
+                appearance_mode_card(
+                    mode,
+                    translator.translate(appearance_mode_label_key(mode)),
+                    mode == appearance.mode,
+                    light_preview,
+                    dark_preview,
+                    theme,
+                    move |cx| {
+                        persist_appearance_change(
+                            view.clone(),
+                            "外观模式",
+                            move |appearance| appearance.mode = mode,
+                            save_error.clone(),
+                            cx,
+                        );
+                    },
+                )
+            }));
 
         let horizontal_list = config_runtime::clipboard_config(cx)
             .window_position
@@ -410,16 +408,20 @@ impl SettingsWindowView {
                 )
             });
 
-        let theme_options = available_theme_options(cx);
-        let light_selector = settings_dropdown(
-            "settings-light-theme-select",
-            appearance.light_theme.clone(),
-            theme_options_for_mode(&theme_options, ThemeMode::Light, &appearance.light_theme),
-            {
-                let view = view.clone();
-                let save_error = save_error.clone();
-                move |action_id, cx| {
-                    let value = action_id.as_str().to_owned();
+        let on_theme_select: Rc<dyn Fn(ThemeMode, SharedString, &mut App)> = {
+            let view = view.clone();
+            let save_error = save_error.clone();
+            Rc::new(move |mode, value, cx| {
+                let value = value.to_string();
+                if mode.is_dark() {
+                    persist_appearance_change(
+                        view.clone(),
+                        "深色主题",
+                        move |appearance| appearance.dark_theme = value,
+                        save_error.clone(),
+                        cx,
+                    );
+                } else {
                     persist_appearance_change(
                         view.clone(),
                         "浅色主题",
@@ -428,28 +430,28 @@ impl SettingsWindowView {
                         cx,
                     );
                 }
-            },
-            cx,
+            })
+        };
+        let external_badge = translator.translate("settings.personalization.theme_external_badge");
+        let swatch_hover_animation =
+            config_runtime::animation_enabled(cx, crate::config::AnimationKind::IconHoverScale);
+        let light_swatches = theme_swatches(
+            &theme_options,
+            ThemeMode::Light,
+            &appearance.light_theme,
+            &external_badge,
+            theme,
+            swatch_hover_animation,
+            &on_theme_select,
         );
-        let dark_selector = settings_dropdown(
-            "settings-dark-theme-select",
-            appearance.dark_theme.clone(),
-            theme_options_for_mode(&theme_options, ThemeMode::Dark, &appearance.dark_theme),
-            {
-                let view = view.clone();
-                let save_error = save_error.clone();
-                move |action_id, cx| {
-                    let value = action_id.as_str().to_owned();
-                    persist_appearance_change(
-                        view.clone(),
-                        "深色主题",
-                        move |appearance| appearance.dark_theme = value,
-                        save_error.clone(),
-                        cx,
-                    );
-                }
-            },
-            cx,
+        let dark_swatches = theme_swatches(
+            &theme_options,
+            ThemeMode::Dark,
+            &appearance.dark_theme,
+            &external_badge,
+            theme,
+            swatch_hover_animation,
+            &on_theme_select,
         );
 
         let mut section = v_flex()
@@ -471,18 +473,16 @@ impl SettingsWindowView {
                 theme,
                 translator.translate("settings.section.theme"),
             ))
-            .child(
-                self.setting_row(
+            .child(self.highlight_element(
+                theme,
+                translator.translate("settings.personalization.appearance_mode"),
+                settings_block(
                     theme,
                     translator.translate("settings.personalization.appearance_mode"),
-                    Some(
-                        translator
-                            .translate("settings.personalization.appearance_mode_description")
-                            .into(),
-                    ),
-                    mode_selector,
+                    translator.translate("settings.personalization.appearance_mode_description"),
+                    mode_cards,
                 ),
-            )
+            ))
             .child(
                 self.setting_row(
                     theme,
@@ -492,7 +492,7 @@ impl SettingsWindowView {
                             .translate("settings.personalization.light_theme_description")
                             .into(),
                     ),
-                    light_selector,
+                    light_swatches,
                 ),
             )
             .child(
@@ -504,7 +504,7 @@ impl SettingsWindowView {
                             .translate("settings.personalization.dark_theme_description")
                             .into(),
                     ),
-                    dark_selector,
+                    dark_swatches,
                 ),
             )
             .child(
@@ -784,29 +784,315 @@ fn reset_appearance_page_fields(appearance: &mut AppearanceConfig) {
     appearance.animations = default.animations;
 }
 
-fn theme_options_for_mode(
+/// 外观页中占满整行的设置块：标题与说明在上，自定义控件在下。
+fn settings_block(
+    theme: ThemeColor,
+    title: String,
+    description: String,
+    content: impl IntoElement,
+) -> AnyElement {
+    v_flex()
+        .w_full()
+        .min_w_0()
+        .flex_shrink_0()
+        .gap_3()
+        .border_b_1()
+        .border_color(theme.border)
+        .px_4()
+        .py_3()
+        .child(
+            v_flex()
+                .gap_1()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.foreground)
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(description),
+                ),
+        )
+        .child(content)
+        .into_any_element()
+}
+
+/// 当前配置对应主题的预览色；配置的主题不存在时与运行时一样回退到默认主题。
+fn selected_theme_preview(
     themes: &[ThemeOption],
     mode: ThemeMode,
     current: &str,
-) -> Vec<DropdownItem> {
-    let mut items = themes
+) -> ThemePreviewColors {
+    themes
         .iter()
-        .filter(|theme| theme.mode == mode)
-        .map(|theme| {
-            DropdownItem::option(
-                DropdownItemId::new(theme.value.clone()),
-                theme.label.clone(),
-            )
-            .selected(theme.value.as_ref() == current)
+        .filter(|option| option.mode == mode)
+        .find(|option| option.value.as_ref() == current)
+        .or_else(|| {
+            themes
+                .iter()
+                .find(|option| option.mode == mode && option.is_default)
         })
+        .map(|option| option.preview)
+        .unwrap_or_else(|| ThemePreviewColors::fallback(mode))
+}
+
+/// 用主题颜色拼出的剪贴板窗口缩略图：标题栏加三行列表，第一行为选中态。
+fn theme_thumbnail(colors: ThemePreviewColors) -> gpui::Div {
+    let line = |width: f32, color: Hsla| {
+        div()
+            .h(ui_rem(3.0))
+            .w(relative(width))
+            .rounded(px(2.0))
+            .bg(color)
+    };
+    let row = |active: bool, width: f32| {
+        h_flex()
+            .w_full()
+            .h(ui_rem(10.0))
+            .flex_shrink_0()
+            .px(ui_rem(4.0))
+            .gap(ui_rem(3.0))
+            .rounded(px(3.0))
+            .when(active, |this| {
+                this.bg(colors.list_active).child(
+                    div()
+                        .w(ui_rem(2.0))
+                        .h(ui_rem(6.0))
+                        .flex_shrink_0()
+                        .rounded(px(1.0))
+                        .bg(colors.primary),
+                )
+            })
+            .child(line(
+                width,
+                if active {
+                    colors.foreground
+                } else {
+                    colors.muted_foreground.opacity(0.6)
+                },
+            ))
+    };
+    v_flex()
+        .size_full()
+        .overflow_hidden()
+        .rounded(px(5.0))
+        .border_1()
+        .border_color(colors.border)
+        .bg(colors.background)
+        .child(
+            h_flex()
+                .w_full()
+                .h(ui_rem(10.0))
+                .flex_shrink_0()
+                .px(ui_rem(4.0))
+                .gap(ui_rem(2.0))
+                .bg(colors.title_bar)
+                .border_b_1()
+                .border_color(colors.border)
+                .children((0..3).map(|_| {
+                    div()
+                        .size(ui_rem(3.0))
+                        .rounded_full()
+                        .bg(colors.muted_foreground.opacity(0.5))
+                })),
+        )
+        .child(
+            v_flex()
+                .w_full()
+                .p(ui_rem(3.0))
+                .gap(ui_rem(2.0))
+                .child(row(true, 0.6))
+                .child(row(false, 0.75))
+                .child(row(false, 0.45)),
+        )
+}
+
+fn selection_mark(selected: bool, theme: ThemeColor) -> AnyElement {
+    div()
+        .size(ui_rem(14.0))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .when(selected, |this| {
+            this.bg(theme.primary)
+                .child(icon("check", 9.0, theme.primary_foreground))
+        })
+        .when(!selected, |this| this.border_1().border_color(theme.input))
+        .into_any_element()
+}
+
+fn appearance_mode_card(
+    mode: AppearanceMode,
+    label: String,
+    selected: bool,
+    light: ThemePreviewColors,
+    dark: ThemePreviewColors,
+    theme: ThemeColor,
+    on_click: impl Fn(&mut App) + 'static,
+) -> AnyElement {
+    let preview = match mode {
+        AppearanceMode::Light => theme_thumbnail(light).into_any_element(),
+        AppearanceMode::Dark => theme_thumbnail(dark).into_any_element(),
+        // 跟随系统：浅色窗口的右半边替换为深色窗口的右半边，拼成一个完整窗口。
+        AppearanceMode::System => div()
+            .size_full()
+            .relative()
+            .child(theme_thumbnail(light))
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .right_0()
+                    .h_full()
+                    .w(relative(0.5))
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .right_0()
+                            .h_full()
+                            .w(relative(2.0))
+                            .child(theme_thumbnail(dark)),
+                    ),
+            )
+            .into_any_element(),
+    };
+    v_flex()
+        .id(SharedString::from(format!(
+            "settings-appearance-mode-{}",
+            mode.code()
+        )))
+        .flex_1()
+        .min_w_0()
+        .gap_2()
+        .p_2()
+        .rounded(px(8.0))
+        .cursor_pointer()
+        .border_1()
+        .border_color(if selected {
+            theme.primary
+        } else {
+            theme.border
+        })
+        .bg(if selected {
+            theme.primary.opacity(0.06)
+        } else {
+            theme.background
+        })
+        .when(!selected, |this| {
+            this.hover(|style| style.border_color(theme.muted_foreground.opacity(0.5)))
+        })
+        .on_click(move |_, _, cx| on_click(cx))
+        .child(div().w_full().h(ui_rem(64.0)).child(preview))
+        .child(
+            h_flex()
+                .w_full()
+                .gap_2()
+                .items_center()
+                .justify_center()
+                .child(selection_mark(selected, theme))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(if selected {
+                            theme.foreground
+                        } else {
+                            theme.muted_foreground
+                        })
+                        .child(label),
+                ),
+        )
+        .into_any_element()
+}
+
+/// 某一模式下的主题色板：圆点底色为主题背景色，中心为强调色，悬停显示主题名。
+fn theme_swatches(
+    themes: &[ThemeOption],
+    mode: ThemeMode,
+    current: &str,
+    external_badge: &str,
+    theme: ThemeColor,
+    hover_animation: bool,
+    on_select: &Rc<dyn Fn(ThemeMode, SharedString, &mut App)>,
+) -> AnyElement {
+    let options = themes
+        .iter()
+        .filter(|option| option.mode == mode)
         .collect::<Vec<_>>();
-    if !items.iter().any(|item| item.id.as_str() == current) {
-        items.push(
-            DropdownItem::option(DropdownItemId::new(current.to_owned()), current.to_owned())
-                .selected(true),
-        );
-    }
-    items
+    let selected_label = options
+        .iter()
+        .find(|option| option.value.as_ref() == current)
+        .map(|option| option.label.clone());
+    let mode_key = if mode.is_dark() { "dark" } else { "light" };
+    let hover_motion = Duration::from_millis(140).with_easing(gpui::ease_in_out);
+
+    h_flex()
+        .max_w_full()
+        .gap_3()
+        .items_center()
+        .when_some(selected_label, |this, label| {
+            this.child(
+                div()
+                    .max_w(ui_rem(96.0))
+                    .truncate()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(label),
+            )
+        })
+        .child(
+            h_flex()
+                .flex_wrap()
+                .gap(ui_rem(6.0))
+                .children(options.into_iter().enumerate().map(|(index, option)| {
+                    let selected = option.value.as_ref() == current;
+                    let colors = option.preview;
+                    let tooltip: SharedString = if option.is_external {
+                        format!("{} · {external_badge}", option.label).into()
+                    } else {
+                        option.label.clone()
+                    };
+                    let on_select = on_select.clone();
+                    let value = option.value.clone();
+                    // 色块用主题强调色填充：各主题背景色彼此接近，同色系下会和设置页背景融合，
+                    // 强调色才是区分主题的主要特征。选中环取当前界面前景色，浅色界面下为深色环、
+                    // 深色界面下为浅色环，与所在行是浅色主题还是深色主题无关。
+                    //
+                    // 色块撑满槽位、用固定像素的边框与内边距留出间隙，不用 flex 居中：居中会产生
+                    // 半像素偏移，GPUI 像素对齐时向零取整，色块会整体偏向左上 1 个设备像素。
+                    // 悬停时收窄内边距让色块放大，槽位尺寸不变，不会推挤相邻色块。
+                    div()
+                        .id(SharedString::from(format!(
+                            "settings-theme-swatch-{mode_key}-{index}"
+                        )))
+                        .size(ui_rem(30.0))
+                        .flex_shrink_0()
+                        .p(px(3.0))
+                        .rounded(ui_rem(9.0))
+                        .border_2()
+                        .border_color(if selected {
+                            theme.foreground
+                        } else {
+                            gpui::transparent_black()
+                        })
+                        .cursor_pointer()
+                        .when(hover_animation, |this| {
+                            this.transitions(|transitions| transitions.p(hover_motion.clone()))
+                        })
+                        .when(!selected, |this| this.hover(|style| style.p(px(1.0))))
+                        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+                        .on_click(move |_, _, cx| on_select(mode, value.clone(), cx))
+                        .child(div().size_full().rounded(ui_rem(6.0)).bg(colors.primary))
+                })),
+        )
+        .into_any_element()
 }
 
 const fn appearance_mode_label_key(mode: AppearanceMode) -> &'static str {

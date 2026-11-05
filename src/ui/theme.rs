@@ -7,10 +7,12 @@ use std::{
 };
 
 use gpui::{
-    App, AppContext as _, BorrowAppContext as _, Global, Lerp as _, SharedString, Subscription,
-    Window, WindowId, px,
+    App, AppContext as _, BorrowAppContext as _, Global, Hsla, Lerp as _, SharedString,
+    Subscription, Window, WindowId, px,
 };
-use gpui_component::{Root, Theme, ThemeColor, ThemeConfig, ThemeMode, ThemeRegistry};
+use gpui_component::{
+    Colorize as _, Root, Theme, ThemeColor, ThemeConfig, ThemeMode, ThemeRegistry, try_parse_color,
+};
 use rust_embed::RustEmbed;
 use serde::Deserialize;
 
@@ -116,13 +118,69 @@ impl ThemePackage {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ThemeOption {
     pub(crate) value: SharedString,
     pub(crate) label: SharedString,
+    /// 所属主题包，用于把同一包的浅色与深色主题归到一起展示。
+    pub(crate) package: SharedString,
     pub(crate) mode: ThemeMode,
     pub(crate) is_default: bool,
     pub(crate) is_external: bool,
+    pub(crate) preview: ThemePreviewColors,
+}
+
+/// 设置页缩略预览所需的少量主题颜色，直接从主题配置解析，不影响全局主题。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct ThemePreviewColors {
+    pub(crate) background: Hsla,
+    pub(crate) title_bar: Hsla,
+    pub(crate) foreground: Hsla,
+    pub(crate) muted_foreground: Hsla,
+    pub(crate) primary: Hsla,
+    pub(crate) border: Hsla,
+    pub(crate) list_active: Hsla,
+}
+
+impl ThemePreviewColors {
+    pub(crate) fn fallback(mode: ThemeMode) -> Self {
+        let defaults = if mode.is_dark() {
+            ThemeColor::dark()
+        } else {
+            ThemeColor::light()
+        };
+        Self {
+            background: defaults.background,
+            title_bar: defaults.title_bar,
+            foreground: defaults.foreground,
+            muted_foreground: defaults.muted_foreground,
+            primary: defaults.primary,
+            border: defaults.border,
+            list_active: defaults.list_active,
+        }
+    }
+
+    fn from_config(config: &ThemeConfig) -> Self {
+        let fallback = Self::fallback(config.mode);
+        let colors = &config.colors;
+        let parse = |value: &Option<SharedString>, fallback: Hsla| {
+            value
+                .as_deref()
+                .and_then(|value| try_parse_color(value).ok())
+                .unwrap_or(fallback)
+        };
+        let background = parse(&colors.background, fallback.background);
+        let primary = parse(&colors.primary, fallback.primary);
+        Self {
+            background,
+            title_bar: parse(&colors.title_bar, background),
+            foreground: parse(&colors.foreground, fallback.foreground),
+            muted_foreground: parse(&colors.muted_foreground, fallback.muted_foreground),
+            primary,
+            border: parse(&colors.border, fallback.border),
+            list_active: parse(&colors.list_active, primary.opacity(0.16)),
+        }
+    }
 }
 
 pub(crate) fn available_theme_options(cx: &App) -> Vec<ThemeOption> {
@@ -132,12 +190,15 @@ pub(crate) fn available_theme_options(cx: &App) -> Vec<ThemeOption> {
         .flat_map(|package| {
             let label: SharedString = package.localized_name(locale).into();
             let is_external = package.is_external;
+            let package_name: SharedString = package.name.into();
             package.themes.into_iter().map(move |theme| ThemeOption {
                 value: theme.name.clone(),
                 label: label.clone(),
+                package: package_name.clone(),
                 mode: theme.mode,
                 is_default: theme.is_default,
                 is_external,
+                preview: ThemePreviewColors::from_config(&theme),
             })
         })
         .collect::<Vec<_>>();

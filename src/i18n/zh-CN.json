@@ -904,6 +904,7 @@
   "settings.personalization.mode.system": "跟随系统",
   "settings.personalization.mode.light": "浅色",
   "settings.personalization.mode.dark": "深色",
+  "settings.personalization.theme_external_badge": "自定义",
   "settings.personalization.light_theme": "浅色主题",
   "settings.personalization.light_theme_description": "在浅色模式或系统浅色外观下使用的主题。",
   "settings.personalization.dark_theme": "深色主题",
