@@ -980,7 +980,10 @@ pub(crate) fn set_visibility(
             }
             match animation {
                 VisibilityAnimation::Edge {
-                    from, hide_window, ..
+                    from,
+                    show,
+                    hide_window,
+                    ..
                 } => {
                     platform_window::set_window_opacity(window, 1.0)?;
                     if hide_window {
@@ -989,6 +992,10 @@ pub(crate) fn set_visibility(
                         window.bounds_changed(cx);
                     }
                     platform_window::set_window_visible(window, true)?;
+                    if show {
+                        // 动画开始前就提升到置顶层最前，避免滑入过程中被任务栏遮挡、结束时才突然跳到上层。
+                        platform_window::raise_window_to_topmost(window)?;
+                    }
                 }
                 VisibilityAnimation::Normal {
                     left,
@@ -1008,6 +1015,9 @@ pub(crate) fn set_visibility(
                             from_height,
                         )?;
                         platform_window::set_window_visible(window, true)?;
+                        // 点击托盘图标时任务栏处于前台，若等动画结束才置顶，与任务栏重叠的部分
+                        // 会在动画末段被遮挡后突然跳出；因此在动画开始前就提升层级。
+                        platform_window::raise_window_to_topmost(window)?;
                     } else {
                         platform_window::set_window_opacity(window, 1.0)?;
                     }
