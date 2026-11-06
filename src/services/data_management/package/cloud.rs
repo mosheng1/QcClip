@@ -56,9 +56,6 @@ impl CloudPackage {
             path,
             64 * 1024 * 1024 * 1024,
         )?;
-        if std::fs::metadata(path)?.len() != self.bytes {
-            return invalid("云端数据包大小发生变化，请刷新后重试");
-        }
         Ok(())
     }
     pub fn delete(&self, client: &Client) -> Result<()> {

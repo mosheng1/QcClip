@@ -671,7 +671,7 @@ fn webdav_packages_use_manual_requests_and_do_not_require_pairing_or_sync_indexe
                 "PROPFIND" => {
                     assert!(header.to_lowercase().contains("depth: 1"));
                     let path = stored.as_ref().unwrap();
-                    (207,format!("<d:multistatus xmlns:d=\"DAV:\"><d:response><d:href>{path}</d:href><d:propstat><d:prop><d:getcontentlength>{}</d:getcontentlength><d:resourcetype/></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>", expected.len()).into_bytes())
+                    (207,format!("<d:multistatus xmlns:d=\"DAV:\"><d:response><d:href>{path}</d:href><d:propstat><d:prop><d:getcontentlength>{}</d:getcontentlength><d:resourcetype/></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>", expected.len() + 1).into_bytes())
                 }
                 "GET" => {
                     assert_eq!(Some(&path), stored.as_ref());
@@ -704,6 +704,7 @@ fn webdav_packages_use_manual_requests_and_do_not_require_pairing_or_sync_indexe
     CloudPackage::upload(&client, &path).unwrap();
     let files = CloudPackage::list(&client).unwrap();
     assert_eq!(files.len(), 1);
+    assert_ne!(files[0].bytes, bytes.len() as u64);
     let download = output.path().join("download.qcclip-data");
     files[0].download(&client, &download).unwrap();
     assert_eq!(fs::read(download).unwrap(), bytes);
