@@ -13,8 +13,8 @@ use crate::{
     config::{
         AnimationKind, AppConfig, AppearanceConfig, ApplicationFilterConfig, ClipboardConfig,
         HistoryConfig, InterfaceLanguage, NotificationConfig, NotificationKind,
-        NotificationPosition, PreviewInformationConfig, QuickPasteConfig, ShortcutBinding,
-        ShortcutsConfig, SoundConfig, TrayClickAction, WindowMaterial,
+        NotificationPosition, PasteKeyMode, PreviewInformationConfig, QuickPasteConfig,
+        ShortcutBinding, ShortcutsConfig, SoundConfig, TrayClickAction, WindowMaterial,
         default_window_material_opacity,
     },
     i18n::{self, Locale},
@@ -68,6 +68,7 @@ impl ConfigRuntime {
             config.clipboard.capture_formats.clone(),
         );
         crate::services::paste::set_formatted_paste_enabled(config.clipboard.formatted_paste);
+        crate::services::paste_key::sync(&config);
         cx.set_global(Self { config, path });
     }
 
@@ -78,6 +79,7 @@ impl ConfigRuntime {
             config.clipboard.capture_formats.clone(),
         );
         crate::services::paste::set_formatted_paste_enabled(config.clipboard.formatted_paste);
+        crate::services::paste_key::sync(&config);
         let previous = cx.update_global::<Self, _>(|runtime, _| {
             let previous = runtime.config.clone();
             runtime.config = config.clone();
@@ -472,6 +474,7 @@ pub(crate) fn set_shortcuts_config(
 
     next.shortcuts = shortcuts;
     persist_config(&path, &next)?;
+    crate::services::paste_key::sync(&next);
     cx.update_global::<ConfigRuntime, _>(|runtime, _| runtime.config = next);
     Ok(true)
 }
@@ -494,6 +497,7 @@ pub(crate) fn set_interface_language(
     next.general.language = language;
     persist_config(&path, &next)?;
 
+    crate::services::paste_key::sync(&next);
     cx.update_global::<ConfigRuntime, _>(|runtime, _| {
         runtime.config = next;
     });
@@ -602,6 +606,25 @@ pub(crate) fn set_tray_click_action(
 
     *target = action;
     persist_config(&path, &next)?;
+    cx.update_global::<ConfigRuntime, _>(|runtime, _| runtime.config = next);
+    Ok(true)
+}
+
+pub(crate) fn paste_key_mode(cx: &App) -> PasteKeyMode {
+    cx.read_global::<ConfigRuntime, _>(|runtime, _| runtime.config.general.paste_key_mode)
+}
+
+pub(crate) fn set_paste_key_mode(mode: PasteKeyMode, cx: &mut App) -> Result<bool, ConfigError> {
+    let (path, mut next) = cx.read_global::<ConfigRuntime, _>(|runtime, _| {
+        (runtime.path.clone(), runtime.config.clone())
+    });
+    if next.general.paste_key_mode == mode {
+        return Ok(false);
+    }
+
+    next.general.paste_key_mode = mode;
+    persist_config(&path, &next)?;
+    crate::services::paste_key::sync(&next);
     cx.update_global::<ConfigRuntime, _>(|runtime, _| runtime.config = next);
     Ok(true)
 }
@@ -926,6 +949,7 @@ pub(crate) fn reset_shortcuts_config(cx: &mut App) -> Result<bool, ConfigError> 
 
     next.shortcuts = default;
     persist_config(&path, &next)?;
+    crate::services::paste_key::sync(&next);
     cx.update_global::<ConfigRuntime, _>(|runtime, _| runtime.config = next);
     Ok(true)
 }

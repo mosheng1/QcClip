@@ -205,6 +205,7 @@ pub struct GeneralConfig {
     pub hide_tray_icon: bool,
     pub tray_left_click_action: TrayClickAction,
     pub tray_right_click_action: TrayClickAction,
+    pub paste_key_mode: PasteKeyMode,
 }
 
 impl Default for GeneralConfig {
@@ -219,6 +220,30 @@ impl Default for GeneralConfig {
             hide_tray_icon: false,
             tray_left_click_action: TrayClickAction::ToggleMainWindow,
             tray_right_click_action: TrayClickAction::OpenMenu,
+            paste_key_mode: PasteKeyMode::Auto,
+        }
+    }
+}
+
+/// 写入剪贴板后向前台程序模拟的粘贴按键。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PasteKeyMode {
+    /// 根据快捷键占用情况和前台程序自动选择。
+    #[default]
+    Auto,
+    CtrlV,
+    ShiftInsert,
+}
+
+impl PasteKeyMode {
+    pub const ALL: [Self; 3] = [Self::Auto, Self::CtrlV, Self::ShiftInsert];
+
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::CtrlV => "ctrl-v",
+            Self::ShiftInsert => "shift-insert",
         }
     }
 }

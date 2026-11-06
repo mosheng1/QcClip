@@ -11,7 +11,7 @@ use std::{cell::Cell, rc::Rc};
 
 use super::super::{SETTINGS_DROPDOWN_HEIGHT, SETTINGS_DROPDOWN_WIDTH};
 use crate::{
-    config::{InterfaceLanguage, TrayClickAction},
+    config::{InterfaceLanguage, PasteKeyMode, TrayClickAction},
     config_runtime, i18n,
     platform::elevation,
     platform::window as platform_window,
@@ -171,6 +171,12 @@ impl SettingsWindowView {
             tray_save_error,
             cx,
         );
+        let paste_key_selector = paste_key_mode_dropdown(
+            config_runtime::paste_key_mode(cx),
+            view.clone(),
+            translator.translate("settings.general.save_error"),
+            cx,
+        );
         let save_error = translator.translate("settings.general.save_error");
         let trigger_bounds = Rc::new(Cell::new(None::<Bounds<Pixels>>));
         let trigger_bounds_for_paint = trigger_bounds.clone();
@@ -302,6 +308,18 @@ impl SettingsWindowView {
                             .into(),
                     ),
                     administrator_switch,
+                ),
+            )
+            .child(
+                self.setting_row(
+                    theme,
+                    translator.translate("settings.general.paste_key_mode"),
+                    Some(
+                        translator
+                            .translate("settings.general.paste_key_mode_description")
+                            .into(),
+                    ),
+                    paste_key_selector,
                 ),
             )
             .child(
@@ -518,6 +536,57 @@ fn tray_click_action_dropdown(
         },
         cx,
     )
+}
+
+fn paste_key_mode_dropdown(
+    current: PasteKeyMode,
+    view: Entity<SettingsWindowView>,
+    save_error: String,
+    cx: &mut Context<SettingsWindowView>,
+) -> AnyElement {
+    let translator = i18n::translator(cx);
+    let items = PasteKeyMode::ALL
+        .into_iter()
+        .map(|mode| {
+            DropdownItem::option(
+                DropdownItemId::new(mode.code()),
+                translator.translate(paste_key_mode_label_key(mode)),
+            )
+            .selected(mode == current)
+        })
+        .collect::<Vec<_>>();
+    settings_dropdown(
+        "settings-general-paste-key-mode-select",
+        current.code(),
+        items,
+        move |action_id, cx| {
+            let Some(mode) = PasteKeyMode::ALL
+                .into_iter()
+                .find(|mode| mode.code() == action_id.as_str())
+            else {
+                return;
+            };
+            let error = config_runtime::set_paste_key_mode(mode, cx)
+                .err()
+                .map(|error| {
+                    tracing::error!("保存模拟粘贴方式失败：{error}");
+                    save_error.clone()
+                });
+            view.update(cx, |view, cx| {
+                view.language_error = notify_settings_error(SettingsPage::General, error, cx);
+                cx.notify();
+            });
+        },
+        cx,
+    )
+}
+
+const fn paste_key_mode_label_key(mode: PasteKeyMode) -> &'static str {
+    match mode {
+        PasteKeyMode::Auto => "settings.general.paste_key_mode.auto",
+        PasteKeyMode::CtrlV => "settings.general.paste_key_mode.ctrl_v",
+        PasteKeyMode::ShiftInsert => "settings.general.paste_key_mode.shift_insert",
+    }
 }
 
 const fn tray_click_action_label_key(action: TrayClickAction) -> &'static str {

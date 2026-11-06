@@ -599,7 +599,7 @@ mod windows_clipboard {
         }
         suppressor.complete_write(ticket, clipboard_sequence_number());
         thread::sleep(PASTE_DELAY);
-        let result = send_ctrl_v();
+        let result = send_paste_keys();
         if result.is_ok() {
             crate::services::sound::play(crate::services::sound::SoundEvent::Paste);
         }
@@ -745,8 +745,16 @@ mod windows_clipboard {
         }
     }
 
-    fn send_ctrl_v() -> Result<(), String> {
-        crate::platform::input::simulate_ctrl_v();
+    fn send_paste_keys() -> Result<(), String> {
+        let foreground = source_application_from_path(foreground_process_path());
+        match crate::services::paste_key::current(foreground.name.as_deref()) {
+            crate::services::paste_key::PasteKey::CtrlV => {
+                crate::platform::input::simulate_ctrl_v()
+            }
+            crate::services::paste_key::PasteKey::ShiftInsert => {
+                crate::platform::input::simulate_shift_insert()
+            }
+        }
         Ok(())
     }
 

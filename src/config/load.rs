@@ -272,6 +272,13 @@ fn read_general(object: &Map<String, Value>, warnings: &mut Vec<String>) -> Gene
             default.tray_right_click_action,
             warnings,
         ),
+        paste_key_mode: read_field(
+            object,
+            "pasteKeyMode",
+            "general.pasteKeyMode",
+            default.paste_key_mode,
+            warnings,
+        ),
     }
 }
 
@@ -1239,8 +1246,8 @@ mod tests {
     use super::{ConfigLoadError, from_str};
     use crate::config::{
         AppearanceMode, CardItemGap, ClipboardDisplayPriority, ClipboardMouseBehavior,
-        ClipboardWindowPosition, InterfaceLanguage, ListItemHeight, ListItemStyle, ShortcutBinding,
-        SoundPreset, TitlebarPosition, TrayClickAction, WindowMaterial,
+        ClipboardWindowPosition, InterfaceLanguage, ListItemHeight, ListItemStyle, PasteKeyMode,
+        ShortcutBinding, SoundPreset, TitlebarPosition, TrayClickAction, WindowMaterial,
     };
 
     #[test]
@@ -1584,6 +1591,25 @@ mod tests {
             loaded.config.clipboard.display_priority,
             ClipboardDisplayPriority::HtmlImageText
         );
+    }
+
+    #[test]
+    fn paste_key_mode_is_loaded_from_general_config() {
+        assert_eq!(
+            from_str("{}")
+                .expect("空配置应当可以加载")
+                .config
+                .general
+                .paste_key_mode,
+            PasteKeyMode::Auto
+        );
+        for mode in PasteKeyMode::ALL {
+            let json = serde_json::json!({ "general": { "pasteKeyMode": mode.code() } });
+            let loaded = from_str(&json.to_string()).expect("粘贴方式应当可以加载");
+
+            assert!(loaded.warnings.is_empty(), "粘贴方式不应产生警告");
+            assert_eq!(loaded.config.general.paste_key_mode, mode);
+        }
     }
 
     #[test]

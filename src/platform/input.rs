@@ -578,14 +578,19 @@ mod windows_input {
     }
 
     pub(crate) fn simulate_ctrl_v() {
-        simulate_ctrl_key(raw_input::Key::KeyV);
+        simulate_shortcut(raw_input::Key::ControlLeft, raw_input::Key::KeyV);
+    }
+
+    pub(crate) fn simulate_shift_insert() {
+        simulate_shortcut(raw_input::Key::ShiftLeft, raw_input::Key::Insert);
     }
 
     pub(crate) fn simulate_ctrl_insert() {
-        simulate_ctrl_key(raw_input::Key::Insert);
+        simulate_shortcut(raw_input::Key::ControlLeft, raw_input::Key::Insert);
     }
 
-    fn simulate_ctrl_key(key: raw_input::Key) {
+    /// 模拟“单个修饰键 + 主按键”组合，`modifier` 只能是 Ctrl 或 Shift。
+    fn simulate_shortcut(modifier: raw_input::Key, key: raw_input::Key) {
         let _shortcut_guard = match SHORTCUT_SIMULATION_LOCK.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
@@ -600,11 +605,11 @@ mod windows_input {
         }
         modifiers.release_alt();
 
-        Simulate::keyboard(raw_input::Key::ControlLeft, true);
+        Simulate::keyboard(modifier, true);
         Simulate::keyboard(key, true);
         thread::sleep(Duration::from_millis(8));
         Simulate::keyboard(key, false);
-        Simulate::keyboard(raw_input::Key::ControlLeft, false);
+        Simulate::keyboard(modifier, false);
 
         // 不重新按下触发键：触发键若先于 Ctrl 等修饰键恢复，会被前台程序
         // 当作普通字符；若与修饰键同时恢复，又可能再次触发全局快捷键。
@@ -678,7 +683,7 @@ mod windows_input {
         }
 
         fn restore_physical(&self) {
-            // 临时用于 Ctrl+V 的左 Ctrl 不属于物理状态，只恢复粘贴前已按下的修饰键。
+            // 临时用于粘贴/复制组合键的左 Ctrl 或左 Shift 不属于物理状态，只恢复粘贴前已按下的修饰键。
             let physical_state = match physical_key_state().lock() {
                 Ok(state) => *state,
                 Err(poisoned) => *poisoned.into_inner(),
@@ -968,5 +973,5 @@ pub(crate) use windows_input::{
 #[cfg(target_os = "windows")]
 pub(crate) use windows_input::{
     clear_trigger_key, set_pointer_change_notifier, set_trigger_key_code, simulate_ctrl_insert,
-    simulate_ctrl_v, trigger_shortcut_is_physically_pressed,
+    simulate_ctrl_v, simulate_shift_insert, trigger_shortcut_is_physically_pressed,
 };

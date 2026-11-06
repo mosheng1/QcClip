@@ -2314,11 +2314,10 @@ pub(crate) fn set_all_session_shortcuts_only_in_window(
     Ok(())
 }
 
-fn validate_shortcuts_config(shortcuts: &ShortcutsConfig) -> Result<(), String> {
-    if let Some(binding) = shortcuts.add_favorite.as_ref() {
-        add_favorite_binding_to_hotkey(binding)?;
-    }
-    let mut registered = HashMap::new();
+/// 列出所有可配置的单项快捷键（不含快捷粘贴 1~9），名称用于冲突提示。
+fn configured_bindings(
+    shortcuts: &ShortcutsConfig,
+) -> Vec<(&'static str, Option<&ShortcutBinding>)> {
     let mut bindings = Vec::with_capacity(SessionShortcutId::ALL.len() + 8);
     bindings.push(("全局显示/隐藏窗口", shortcuts.toggle_main_window.as_ref()));
     bindings.push(("全局打开设置", shortcuts.open_settings.as_ref()));
@@ -2340,6 +2339,43 @@ fn validate_shortcuts_config(shortcuts: &ShortcutsConfig) -> Result<(), String> 
             .into_iter()
             .map(|id| (id.label_key(), shortcuts.session(id).binding.as_ref())),
     );
+    bindings
+}
+
+/// 统计快捷键中是否占用了系统粘贴组合键，供“自动”粘贴方式避开被本程序拦截的按键。
+/// 只有修饰键完全一致才算占用，例如 Ctrl+Shift+V 不会拦截模拟的 Ctrl+V。
+pub(crate) fn paste_keys_in_use(
+    shortcuts: &ShortcutsConfig,
+) -> crate::services::paste_key::PasteKeysInUse {
+    let mut in_use = crate::services::paste_key::PasteKeysInUse::default();
+    let quick_paste = shortcuts
+        .quick_paste_1_to_9
+        .enabled
+        .then(|| (0..9).map(|index| shortcuts.quick_paste_1_to_9.binding(index)))
+        .into_iter()
+        .flatten();
+    let hotkeys = configured_bindings(shortcuts)
+        .into_iter()
+        .filter_map(|(_, binding)| binding.cloned())
+        .chain(quick_paste)
+        .filter_map(|binding| binding_to_hotkey(&binding).ok());
+    for hotkey in hotkeys {
+        if hotkey.mods == HotkeyModifiers::CONTROL && hotkey.key == Code::KeyV {
+            in_use.ctrl_v = true;
+        }
+        if hotkey.mods == HotkeyModifiers::SHIFT && hotkey.key == Code::Insert {
+            in_use.shift_insert = true;
+        }
+    }
+    in_use
+}
+
+fn validate_shortcuts_config(shortcuts: &ShortcutsConfig) -> Result<(), String> {
+    if let Some(binding) = shortcuts.add_favorite.as_ref() {
+        add_favorite_binding_to_hotkey(binding)?;
+    }
+    let mut registered = HashMap::new();
+    let bindings = configured_bindings(shortcuts);
 
     for (name, binding) in bindings {
         let Some(binding) = binding else {
