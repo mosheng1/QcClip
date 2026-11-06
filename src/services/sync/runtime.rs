@@ -16,7 +16,9 @@ use super::{
         CHUNK_BYTES, Config, ConfigStore, EVENT_TTL, MAX_INCOMING_BYTES, MAX_INCOMING_EVENTS,
         PairingCode, Peer,
     },
-    dav_cache, fail, lan, local_pairing,
+    dav_cache,
+    diagnostics::{self, Failure},
+    fail, lan, local_pairing,
     pairing::{Candidate, Invitation, InvitationStatus},
     protocol::{self, Envelope, Event, Mode, Reply, Request, Session},
     repository::{self, Packet},
@@ -33,6 +35,9 @@ use uuid::Uuid;
 pub struct PeerStatus {
     pub lan: Option<Session>,
     pub result: String,
+    /// 最近一次局域网握手失败的原因，连接成功后清空。
+    pub lan_error: String,
+    pub(super) lan_failures: u32,
 }
 impl PeerStatus {
     pub fn channel(&self, config: &Config, peer: &Peer) -> Option<&'static str> {
@@ -83,6 +88,8 @@ struct OperationNotice {
     message: String,
     failed: bool,
     informational: bool,
+    /// 后台检测到、需要用户处理的问题，按“需要注意”类通知发送。
+    attention: bool,
 }
 
 #[derive(Clone)]
@@ -164,6 +171,9 @@ pub struct Runtime {
     next_pull: Mutex<Instant>,
     dav_traffic: Arc<webdav::Traffic>,
     wake: Arc<Wake>,
+    /// 每台设备的时钟偏差（对方时间减本机时间，秒），由本机发起的握手测得。
+    clock_offsets: Mutex<HashMap<String, i64>>,
+    diagnostics: diagnostics::Gate,
 }
 
 impl SyncService {
@@ -217,10 +227,17 @@ impl SyncService {
                             use crate::windows::notification::{
                                 NotificationLevel, NotificationService,
                             };
-                            NotificationService::show_message(
+                            NotificationService::show_message_for(
+                                if notice.attention {
+                                    crate::config::NotificationKind::Attention
+                                } else {
+                                    crate::config::NotificationKind::OperationResult
+                                },
                                 crate::i18n::translator(cx).translate("settings.page.sync"),
                                 notice.message,
-                                if notice.failed {
+                                if notice.attention {
+                                    NotificationLevel::Warning
+                                } else if notice.failed {
                                     NotificationLevel::Error
                                 } else if notice.informational {
                                     NotificationLevel::Info
@@ -331,6 +348,8 @@ impl Runtime {
             next_pull: Mutex::new(Instant::now()),
             dav_traffic: Arc::new(webdav::Traffic::default()),
             wake: Arc::default(),
+            clock_offsets: Mutex::new(HashMap::new()),
+            diagnostics: Default::default(),
         }
     }
     fn dav_client(&self, config: &super::config::DavConfig) -> Result<webdav::Client> {
@@ -593,6 +612,8 @@ impl Runtime {
             next_pull: Mutex::new(Instant::now()),
             dav_traffic: Arc::new(webdav::Traffic::default()),
             wake: Arc::default(),
+            clock_offsets: Mutex::new(HashMap::new()),
+            diagnostics: Default::default(),
         });
         let _ = super::ACTIVE.set(Arc::downgrade(&runtime));
         for (name, receiver) in [
@@ -611,6 +632,16 @@ impl Runtime {
                         break;
                     }
                     if let Err(error) = runtime.receive_dav_job(&job) {
+                        if runtime.diagnostics.pass(
+                            &format!("dav-receive:{}", job.peer.profile.id),
+                            &error.to_string(),
+                            diagnostics::LOG_REPEAT,
+                        ) {
+                            tracing::warn!(
+                                device = %job.peer.profile.label(),
+                                "WebDAV 同步内容接收失败：{error}"
+                            );
+                        }
                         runtime.set_message(&error.to_string());
                         runtime.result(&job.peer.profile.id, error.to_string());
                         if job.manual {
@@ -653,6 +684,14 @@ impl Runtime {
                     }
                     match runtime.send_job(&job) {
                         Err(error) => {
+                            let (_, reason) = diagnostics::describe(&error);
+                            if runtime.diagnostics.pass(
+                                &format!("send:{}", job.peer),
+                                &reason,
+                                diagnostics::LOG_REPEAT,
+                            ) {
+                                tracing::warn!(device = %job.peer, "同步内容发送失败：{reason}");
+                            }
                             runtime.result(&job.peer, error.to_string());
                             runtime.finish_manual(&job, true, error.to_string());
                         }
@@ -687,9 +726,19 @@ impl Runtime {
                                 let Some(runtime) = weak.upgrade() else {
                                     break;
                                 };
-                                let result = runtime.handle_lan_stream(&mut stream);
-                                if result.is_err() {
-                                    tracing::debug!("已拒绝无效或未授权的局域网同步请求");
+                                if let Err(error) = runtime.handle_lan_stream(&mut stream) {
+                                    let source = stream
+                                        .peer_addr()
+                                        .map(|a| a.ip().to_string())
+                                        .unwrap_or_default();
+                                    let (_, reason) = diagnostics::describe(&error);
+                                    if runtime.diagnostics.pass(
+                                        &format!("incoming:{source}"),
+                                        &reason,
+                                        diagnostics::LOG_REPEAT,
+                                    ) {
+                                        tracing::warn!(%source, "已拒绝局域网同步请求：{reason}");
+                                    }
                                 }
                             }
                         });
@@ -712,9 +761,13 @@ impl Runtime {
                         match TcpListener::bind(("0.0.0.0", config.port)) {
                             Ok(socket) => {
                                 let _ = socket.set_nonblocking(true);
+                                if runtime.diagnostics.clear("listen") {
+                                    tracing::info!(port = config.port, "局域网同步端口已恢复监听");
+                                }
                                 listener = Some((config.port, socket));
                             }
-                            Err(_) => runtime.set_message("局域网监听失败，请检查端口是否被占用"),
+                            // 监听失败时每轮都会重试，只在原因变化时记录和提示。
+                            Err(error) => runtime.listen_failed(config.port, &error),
                         }
                     }
                     if let Some((_, listener)) = &listener {
@@ -751,10 +804,16 @@ impl Runtime {
                     let config = runtime.config();
                     if (config.enabled && config.lan_enabled) || runtime.local_pairing_active() {
                         if socket.is_none() {
-                            socket = UdpSocket::bind(("0.0.0.0", super::config::PORT)).ok();
-                            if let Some(s) = &socket {
-                                let _ = s.set_nonblocking(true);
-                                let _ = s.set_broadcast(true);
+                            match UdpSocket::bind(("0.0.0.0", super::config::PORT)) {
+                                Ok(s) => {
+                                    let _ = s.set_nonblocking(true);
+                                    let _ = s.set_broadcast(true);
+                                    if runtime.diagnostics.clear("discovery") {
+                                        tracing::info!("局域网发现端口已恢复");
+                                    }
+                                    socket = Some(s);
+                                }
+                                Err(error) => runtime.discovery_failed(&error),
                             }
                         }
                         if let Some(s) = &socket {
@@ -926,10 +985,29 @@ impl Runtime {
                             match runtime.poll_dav(true) {
                                 Ok(_) => {
                                     errors = 0;
+                                    if runtime.diagnostics.clear("dav-poll") {
+                                        tracing::info!("WebDAV 自动拉取已恢复");
+                                    }
                                 }
                                 Err(error) => {
                                     errors = (errors + 1).min(5);
-                                    runtime.set_message(&error.to_string());
+                                    let message = error.to_string();
+                                    if runtime.diagnostics.pass(
+                                        "dav-poll",
+                                        &message,
+                                        diagnostics::LOG_REPEAT,
+                                    ) {
+                                        tracing::warn!("WebDAV 自动拉取失败：{message}");
+                                    }
+                                    // 偶发网络波动不打扰用户，连续失败后再提示。
+                                    if errors >= 3 {
+                                        runtime.attention_notice(
+                                            "dav-poll",
+                                            &message,
+                                            format!("WebDAV 自动拉取连续失败：{message}"),
+                                        );
+                                    }
+                                    runtime.set_message(&message);
                                 }
                             }
                         }
@@ -1003,6 +1081,9 @@ impl Runtime {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .clear();
+            // 提示随设置变更被清空；问题仍在时由后台线程重新记录并显示。
+            self.diagnostics.clear("listen");
+            self.diagnostics.clear("discovery");
         }
         drop(config);
         self.notify();
@@ -1104,6 +1185,110 @@ impl Runtime {
         *self.message.lock().unwrap_or_else(|e| e.into_inner()) = message.into();
         self.notify();
     }
+    fn listen_failed(&self, port: u16, error: &io::Error) {
+        let message = format!(
+            "局域网同步端口 {port} 监听失败，其他设备无法连接本机：{error}。请更换同步端口或关闭占用该端口的程序"
+        );
+        if self.diagnostics.pass("listen", &message, Duration::MAX) {
+            tracing::warn!(port, "{message}");
+            self.set_message(&message);
+            self.attention_notice("listen", &message, message.clone());
+        }
+    }
+    fn discovery_failed(&self, error: &io::Error) {
+        let port = super::config::PORT;
+        let message =
+            format!("局域网发现端口 {port}（UDP）被占用，无法自动发现设备和更新设备地址：{error}");
+        if self.diagnostics.pass("discovery", &message, Duration::MAX) {
+            tracing::warn!(port, "{message}");
+            self.set_message(&message);
+            self.attention_notice("discovery", &message, message.clone());
+        }
+    }
+    fn clock_offset(&self, peer: &str) -> i64 {
+        self.clock_offsets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(peer)
+            .copied()
+            .unwrap_or(0)
+    }
+    fn record_offset(&self, peer: &Peer, offset: i64) {
+        self.clock_offsets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(peer.profile.id.clone(), offset);
+        let key = format!("clock:{}", peer.profile.id);
+        let name = peer.profile.label();
+        // 偏差在阈值附近抖动时不反复记录：超过 30 秒才提示，回到 20 秒内才算恢复。
+        if offset.unsigned_abs() > 30 {
+            if self.diagnostics.pass(&key, "skew", diagnostics::LOG_REPEAT) {
+                tracing::warn!(
+                    device = %name,
+                    offset_seconds = offset,
+                    "设备系统时间与本机相差较大，局域网同步已按偏差自动校正"
+                );
+            }
+            self.attention_notice(
+                &key,
+                "clock",
+                format!(
+                    "{name} 与本机的系统时间相差约 {}，局域网同步已自动校正，WebDAV 同步可能受影响。建议两台设备都开启“自动设置时间”",
+                    readable_seconds(offset.unsigned_abs())
+                ),
+            );
+        } else if offset.unsigned_abs() <= 20 && self.diagnostics.clear(&key) {
+            tracing::info!(device = %name, offset_seconds = offset, "设备系统时间偏差已恢复正常");
+        }
+    }
+    fn lan_connected(&self, peer: &Peer, address: &str) {
+        let mut statuses = self.statuses.lock().unwrap_or_else(|e| e.into_inner());
+        let status = statuses.entry(peer.profile.id.clone()).or_default();
+        status.lan_error.clear();
+        status.lan_failures = 0;
+        drop(statuses);
+        let id = &peer.profile.id;
+        self.diagnostics.clear(&format!("lan:{id}"));
+        self.diagnostics.clear(&format!("notice:lan:{id}"));
+        if self
+            .diagnostics
+            .pass(&format!("lan-up:{id}"), address, Duration::MAX)
+        {
+            tracing::info!(device = %peer.profile.label(), %address, "已建立局域网同步连接");
+        }
+    }
+    fn lan_failed(&self, peer: &Peer, address: &str, reason: String, failure: Failure) {
+        let id = &peer.profile.id;
+        let failures = {
+            let mut statuses = self.statuses.lock().unwrap_or_else(|e| e.into_inner());
+            let status = statuses.entry(id.clone()).or_default();
+            status.lan_error = if address.is_empty() {
+                reason.clone()
+            } else {
+                format!("{address}：{reason}")
+            };
+            status.lan_failures = status.lan_failures.saturating_add(1);
+            status.lan_failures
+        };
+        let name = peer.profile.label();
+        if self.diagnostics.clear(&format!("lan-up:{id}")) {
+            tracing::info!(device = %name, "局域网同步连接已断开");
+        }
+        if self
+            .diagnostics
+            .pass(&format!("lan:{id}"), &reason, diagnostics::LOG_REPEAT)
+        {
+            tracing::warn!(device = %name, %address, "局域网握手失败：{reason}");
+        }
+        // 刚配对时对方可能尚未保存本设备，连续失败数次后才提示用户。
+        if failure == Failure::Rejected && failures >= 3 {
+            self.attention_notice(
+                &format!("lan:{id}"),
+                &reason,
+                format!("无法与 {name} 建立局域网连接：{reason}"),
+            );
+        }
+    }
     fn result(&self, peer: &str, message: String) {
         self.statuses
             .lock()
@@ -1133,15 +1318,34 @@ impl Runtime {
         self.queue_notice(message, false, true);
     }
     fn queue_notice(&self, message: String, failed: bool, informational: bool) {
+        self.push_notice(OperationNotice {
+            message,
+            failed,
+            informational,
+            attention: false,
+        });
+    }
+    /// 后台问题的通知：同一问题消息不变时按 `NOTICE_REPEAT` 限频，避免反复打扰。
+    fn attention_notice(&self, key: &str, reason: &str, message: String) {
+        if !self
+            .diagnostics
+            .pass(&format!("notice:{key}"), reason, diagnostics::NOTICE_REPEAT)
+        {
+            return;
+        }
+        self.push_notice(OperationNotice {
+            message,
+            failed: true,
+            informational: false,
+            attention: true,
+        });
+    }
+    fn push_notice(&self, notice: OperationNotice) {
         let mut notices = self.notices.lock().unwrap_or_else(|e| e.into_inner());
         if notices.len() >= 32 {
             notices.pop_front();
         }
-        notices.push_back(OperationNotice {
-            message,
-            failed,
-            informational,
-        });
+        notices.push_back(notice);
         drop(notices);
         self.notify();
     }
@@ -1184,27 +1388,46 @@ impl Runtime {
         if !candidates.is_empty() {
             addresses.push(candidates[round % candidates.len()].clone());
         }
+        let mut first_error = None;
         for address in addresses {
             if super::config::validate_address(&address).is_err() {
                 continue;
             }
-            if let Ok(session) = self.hello(peer, &address) {
-                self.set_session(&peer.profile.id, session, true);
-                if address != peer.address {
-                    let _ = self.change(
-                        |c| {
-                            if let Some(p) = c.peers.iter_mut().find(|p| {
-                                p.profile.id == peer.profile.id && p.profile.key == peer.profile.key
-                            }) {
-                                p.address = address;
-                            }
-                            Ok(())
-                        },
-                        false,
-                    );
+            let session = match self.hello(peer, &address) {
+                Ok(session) => session,
+                Err(error) => {
+                    first_error.get_or_insert((address, error));
+                    continue;
                 }
-                break;
+            };
+            self.lan_connected(peer, &address);
+            self.set_session(&peer.profile.id, session, true);
+            if address != peer.address {
+                let _ = self.change(
+                    |c| {
+                        if let Some(p) = c.peers.iter_mut().find(|p| {
+                            p.profile.id == peer.profile.id && p.profile.key == peer.profile.key
+                        }) {
+                            p.address = address;
+                        }
+                        Ok(())
+                    },
+                    false,
+                );
             }
+            return;
+        }
+        match first_error {
+            Some((address, error)) => {
+                let (failure, reason) = diagnostics::describe(&error);
+                self.lan_failed(peer, &address, reason, failure);
+            }
+            None => self.lan_failed(
+                peer,
+                "",
+                "还没有对方的局域网地址，请确认两台设备在同一网络并都已开启同步".into(),
+                Failure::Unreachable,
+            ),
         }
     }
     fn hello(&self, peer: &Peer, address: &str) -> Result<Session> {
@@ -1218,15 +1441,30 @@ impl Runtime {
             profile: config.profile.clone(),
         };
         let envelope = protocol::seal(&config, peer, &request)?;
+        let started = Instant::now();
+        let local = protocol::now();
         let response = lan::exchange(super::config::validate_address(address)?, &envelope)?;
-        let (_, reply): (_, Reply) = protocol::open(&config, &response)?;
-        if reply.request != challenge || !reply.accepted {
-            return fail("设备握手未通过");
+        // 响应必须带回本次随机挑战，因此无需再按发送时间防重放；其发送时间用于测量时钟偏差。
+        let (_, reply, sent_at): (_, Reply, u64) = protocol::open_online(&config, &response)?;
+        if reply.request != challenge {
+            return fail("设备握手响应与请求不匹配");
         }
-        reply
+        if !reply.accepted {
+            return Err(super::Error::Message(format!(
+                "对方拒绝握手：{}",
+                reply.message
+            )));
+        }
+        let midpoint = local.saturating_add(started.elapsed().as_secs() / 2);
+        self.record_offset(peer, sent_at as i64 - midpoint as i64);
+        // 会话有效期按对方时钟给出，换算为本机时间，两台设备时间不一致时也能正确判断。
+        let mut session = reply
             .session
+            .ok_or_else(|| super::Error::Message("对方未返回在线会话".into()))?;
+        session.expires = protocol::now() + session.expires.saturating_sub(sent_at).min(120);
+        Some(session)
             .filter(|s| s.valid(peer))
-            .ok_or_else(|| super::Error::Message("设备在线会话无效".into()))
+            .ok_or_else(|| super::Error::Message("对方返回的在线会话无效".into()))
     }
 
     pub fn automatic(&self, database: &Database, item_id: i64, mode: Mode) {
@@ -1406,7 +1644,10 @@ impl Runtime {
             recipient: peer.profile.id.clone(),
             session,
             sequence: job.sequence,
-            expires: protocol::now() + EVENT_TTL - job.created.elapsed().as_secs().min(EVENT_TTL),
+            // 局域网事件由对方按其时钟校验有效期；WebDAV 缓存会把有效期改写为 0。
+            expires: protocol::shift(protocol::now(), self.clock_offset(&peer.profile.id))
+                + EVENT_TTL
+                - job.created.elapsed().as_secs().min(EVENT_TTL),
             item_uuid: String::new(),
             mode: job.mode,
             hash_version: 0,
@@ -1454,6 +1695,14 @@ impl Runtime {
                     return Ok(());
                 }
                 Err(error) => {
+                    let (_, reason) = diagnostics::describe(&error);
+                    if self.diagnostics.pass(
+                        &format!("send-lan:{}", peer.profile.id),
+                        &reason,
+                        diagnostics::LOG_REPEAT,
+                    ) {
+                        tracing::warn!(device = %peer.profile.label(), "局域网发送失败：{reason}");
+                    }
                     lan_error = Some(error);
                 }
             }
@@ -1478,7 +1727,9 @@ impl Runtime {
         if (via_lan && !config.lan_allowed(peer))
             || (!via_lan && !config.dav_allowed(peer))
             || self.generation.load(Ordering::Acquire) != generation
-            || (via_lan && event.expires <= protocol::now())
+            || (via_lan
+                && event.expires
+                    <= protocol::shift(protocol::now(), self.clock_offset(&peer.profile.id)))
             || !config.peers.iter().any(|p| {
                 p.profile.id == peer.profile.id
                     && p.policy.enabled
@@ -1494,9 +1745,17 @@ impl Runtime {
         if !config.lan_allowed(peer) {
             return fail("局域网通道已关闭");
         }
-        let envelope = protocol::seal(&config, peer, request)?;
+        // 发送时间按握手测得的偏差换算到对方时钟，响应时间再换算回本机时钟校验。
+        let offset = self.clock_offset(&peer.profile.id);
+        let envelope = protocol::seal_at(
+            &config,
+            peer,
+            request,
+            protocol::shift(protocol::now(), offset),
+        )?;
         let response = lan::exchange(super::config::validate_address(&peer.address)?, &envelope)?;
-        let (sender, reply): (_, Reply) = protocol::open(&config, &response)?;
+        let (sender, reply, sent_at): (_, Reply, u64) = protocol::open_online(&config, &response)?;
+        protocol::check_fresh(protocol::shift(sent_at, offset.saturating_neg()))?;
         if sender.profile.id != peer.profile.id || reply.request != protocol::request_id(request) {
             return fail("同步响应身份不匹配");
         }
@@ -1568,12 +1827,25 @@ impl Runtime {
     pub(super) fn receive_lan(&self, envelope: &Envelope) -> Result<Envelope> {
         let config_guard = self.config.read().unwrap_or_else(|e| e.into_inner());
         let config = &*config_guard;
-        let (peer, request): (_, Request) = protocol::open(config, envelope)?;
+        let (peer, request, sent_at): (_, Request, u64) = protocol::open_online(config, envelope)?;
+        // 握手只返回加密的会话；不放宽它的时间检查，对方就无法测量两台设备的时钟偏差。其余请求仍须在有效期内。
+        if !matches!(request, Request::Hello { .. }) {
+            protocol::check_fresh(sent_at)?;
+        }
         if !config.lan_allowed(&peer) {
             return fail("当前设备通道已关闭");
         }
         let request_id = protocol::request_id(&request);
         let outcome = self.handle_request(config, &peer, request);
+        if let Err(error) = &outcome
+            && self.diagnostics.pass(
+                &format!("reject:{}", peer.profile.id),
+                &error.to_string(),
+                diagnostics::LOG_REPEAT,
+            )
+        {
+            tracing::warn!(device = %peer.profile.label(), "已拒绝设备的局域网同步请求：{error}");
+        }
         let reply = match outcome {
             Ok((session, applied)) => Reply {
                 request: request_id,
@@ -2007,6 +2279,14 @@ fn validate_limits(event: &Event, policy: &super::config::Policy) -> Result<()> 
         }
     }
     Ok(())
+}
+
+fn readable_seconds(seconds: u64) -> String {
+    match seconds {
+        0..120 => format!("{seconds} 秒"),
+        120..7200 => format!("{} 分钟", seconds / 60),
+        _ => format!("{} 小时", seconds / 3600),
+    }
 }
 
 fn success(channel: &str, packet: &Packet) -> String {

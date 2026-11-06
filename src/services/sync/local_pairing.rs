@@ -427,6 +427,15 @@ impl Runtime {
         self.notify();
         Ok(())
     }
+    /// 配对不要求开启同步；同步未开启时提醒用户，否则设备会一直显示为未连接。
+    fn added_notice(&self, name: &str) {
+        let message = if self.config().enabled {
+            format!("已添加设备：{name}")
+        } else {
+            format!("已添加设备：{name}。跨设备同步尚未开启，开启后才能连接和同步")
+        };
+        self.operation_notice(message, false);
+    }
     fn trust_local_peer(&self, profile: &Profile, address: &str) -> Result<()> {
         self.change(
             |config| {
@@ -463,7 +472,11 @@ impl Runtime {
         self.trust_local_peer(&p.peer.profile, &p.peer.address)?;
         p.added = true;
         p.pin = None;
+        let name = p.peer.profile.name.clone();
         drop(state);
+        if !self.config().enabled {
+            self.added_notice(&name);
+        }
         self.notify();
         Ok(())
     }
@@ -560,7 +573,7 @@ impl Runtime {
                 Ok(()) => {
                     pending.added = true;
                     state.message.clear();
-                    self.operation_notice(format!("已添加设备：{}", peer.profile.name), false);
+                    self.added_notice(&peer.profile.name);
                 }
                 Err(error) => state.message = error.to_string(),
             },

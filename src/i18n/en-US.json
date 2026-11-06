@@ -1081,6 +1081,8 @@
   "sync.no_devices_help": "Choose Add device to start. Nearby devices are found automatically; use remote pairing on other networks.",
   "sync.blocked": "Paused for this device",
   "sync.offline": "Not connected",
+  "sync.disabled": "Sync is off",
+  "sync.lan_error": "LAN connection failed: ",
   "sync.collapse": "Collapse",
   "sync.policy": "Content and more settings",
   "sync.history": "New history",

@@ -1,6 +1,7 @@
 pub(crate) mod activity;
 pub(crate) mod config;
 mod dav_cache;
+mod diagnostics;
 mod lan;
 pub(crate) mod local_pairing;
 pub(crate) mod pairing;

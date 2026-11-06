@@ -1563,6 +1563,8 @@ impl SettingsWindowView {
             };
             let state = if !peer.policy.enabled {
                 t.translate("sync.blocked")
+            } else if !config.enabled {
+                t.translate("sync.disabled")
             } else {
                 channel
                     .map(str::to_owned)
@@ -1623,6 +1625,24 @@ impl SettingsWindowView {
                             }),
                     ),
             );
+            // 未连接时显示最近一次局域网握手失败的原因，便于排查。
+            if channel.is_none()
+                && config.lan_allowed(peer)
+                && let Some(status) = status.filter(|s| !s.lan_error.is_empty())
+            {
+                device = device.child(
+                    div()
+                        .px_4()
+                        .pb_3()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(format!(
+                            "{}{}",
+                            t.translate("sync.lan_error"),
+                            status.lan_error
+                        )),
+                );
+            }
             if let Some(status) = status.filter(|s| !s.result.is_empty()) {
                 device = device.child(
                     div()

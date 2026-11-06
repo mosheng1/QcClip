@@ -1081,6 +1081,8 @@
   "sync.no_devices_help": "点击“添加设备”开始；同一网络会自动发现，其他网络可选择远程添加。",
   "sync.blocked": "已暂停此设备",
   "sync.offline": "未连接",
+  "sync.disabled": "同步未开启",
+  "sync.lan_error": "局域网连接失败：",
   "sync.collapse": "收起",
   "sync.policy": "发送内容与更多设置",
   "sync.history": "自动同步新历史",

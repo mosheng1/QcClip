@@ -506,6 +506,47 @@ fn receiving_opaque_foreign_formats_does_not_create_ready_item() {
 }
 
 #[test]
+fn handshake_tolerates_clock_skew_while_other_requests_stay_time_bound() {
+    let source = Fixture::new();
+    let target = Fixture::new();
+    let (a, b) = paired();
+    let receiver = runtime(&target, b);
+    // 发送方时钟比接收方慢 10 分钟。
+    let skewed = protocol::now() - 600;
+    let hello = protocol::seal_at(
+        &a,
+        &a.peers[0],
+        &Request::Hello {
+            challenge: "时钟偏差".into(),
+            profile: a.profile.clone(),
+        },
+        skewed,
+    )
+    .unwrap();
+    let reply = protocol::open_online::<Reply>(&a, &receiver.receive_lan(&hello).unwrap())
+        .unwrap()
+        .1;
+    assert!(reply.accepted, "{}", reply.message);
+    let session = reply.session.unwrap();
+    let mut packet = source.packet(source.capture("时钟偏差"), Mode::NewContent, 1);
+    packet.event.sender = a.profile.id.clone();
+    packet.event.recipient = receiver.config().profile.id;
+    packet.event.session = session.id;
+    // 未换算到接收方时钟的请求仍按有效期拒绝。
+    let mut stale = packet.event.clone();
+    stale.expires = skewed + EVENT_TTL;
+    let begin = protocol::seal_at(&a, &a.peers[0], &Request::Begin(stale), skewed).unwrap();
+    assert!(receiver.receive_lan(&begin).is_err());
+    // 发送方按握手测得的偏差换算后即可正常送达。
+    let delivered = deliver(&receiver, &a, &packet);
+    assert!(
+        delivered.accepted && delivered.applied,
+        "{}",
+        delivered.message
+    );
+}
+
+#[test]
 fn encrypted_pipeline_is_idempotent_and_rejects_revocation_and_old_sessions() {
     let source = Fixture::new();
     let target = Fixture::new();

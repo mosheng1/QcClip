@@ -72,7 +72,17 @@ struct BoundMessage<T> {
 }
 
 pub fn seal<T: Serialize>(config: &Config, peer: &Peer, payload: &T) -> Result<Envelope> {
-    seal_bound(config, peer, payload, "online")
+    seal_bound(config, peer, payload, "online", now())
+}
+
+/// 以指定的发送时间封装在线消息；局域网发送方用它把时间戳换算到对方时钟。
+pub(super) fn seal_at<T: Serialize>(
+    config: &Config,
+    peer: &Peer,
+    payload: &T,
+    sent_at: u64,
+) -> Result<Envelope> {
+    seal_bound(config, peer, payload, "online", sent_at)
 }
 
 pub(super) fn seal_cache<T: Serialize>(
@@ -81,7 +91,7 @@ pub(super) fn seal_cache<T: Serialize>(
     payload: &T,
     purpose: &str,
 ) -> Result<Envelope> {
-    seal_bound(config, peer, payload, purpose)
+    seal_bound(config, peer, payload, purpose, now())
 }
 
 fn seal_bound<T: Serialize>(
@@ -89,12 +99,13 @@ fn seal_bound<T: Serialize>(
     peer: &Peer,
     payload: &T,
     purpose: &str,
+    sent_at: u64,
 ) -> Result<Envelope> {
     let bound = BoundMessage {
         version: VERSION,
         sender: config.profile.id.clone(),
         recipient: peer.profile.id.clone(),
-        sent_at: now(),
+        sent_at,
         purpose: purpose.into(),
         payload,
     };
@@ -114,6 +125,7 @@ fn seal_bound<T: Serialize>(
     })
 }
 
+#[cfg(test)]
 pub fn open<T: DeserializeOwned>(config: &Config, envelope: &Envelope) -> Result<(Peer, T)> {
     open_bound(config, envelope, "online", true)
 }
@@ -126,12 +138,48 @@ pub(super) fn open_cache<T: DeserializeOwned>(
     open_bound(config, envelope, purpose, false)
 }
 
+/// 解开在线消息但不检查发送时间，返回发送方时钟下的发送时间，由调用方按时钟偏差自行校验。
+pub(super) fn open_online<T: DeserializeOwned>(
+    config: &Config,
+    envelope: &Envelope,
+) -> Result<(Peer, T, u64)> {
+    open_unchecked(config, envelope, "online")
+}
+
+/// 在线消息的有效期检查；`sent_at` 必须已换算到本机时钟。
+pub(super) fn check_fresh(sent_at: u64) -> Result<()> {
+    check_time(sent_at, true)
+}
+
+fn check_time(sent_at: u64, online: bool) -> Result<()> {
+    let time = now();
+    if sent_at > time.saturating_add(30) || (online && sent_at.saturating_add(EVENT_TTL) < time) {
+        return fail("同步消息已过期，或两台设备的系统时间相差过大");
+    }
+    Ok(())
+}
+
+/// 把时间按秒级偏差平移，用于在本机时钟与对方时钟之间换算。
+pub fn shift(time: u64, offset: i64) -> u64 {
+    time.saturating_add_signed(offset)
+}
+
 fn open_bound<T: DeserializeOwned>(
     config: &Config,
     envelope: &Envelope,
     purpose: &str,
     online: bool,
 ) -> Result<(Peer, T)> {
+    let (peer, payload, sent_at) = open_unchecked(config, envelope, purpose)?;
+    check_time(sent_at, online)?;
+    Ok((peer, payload))
+}
+
+fn open_unchecked<T: DeserializeOwned>(
+    config: &Config,
+    envelope: &Envelope,
+    purpose: &str,
+) -> Result<(Peer, T, u64)> {
     if !config.enabled {
         return fail("在线同步已关闭");
     }
@@ -150,17 +198,14 @@ fn open_bound<T: DeserializeOwned>(
             .map_err(|_| super::Error::Message("同步消息认证失败".into()))?,
     );
     let bound: BoundMessage<T> = serde_json::from_slice(&plain)?;
-    let time = now();
     if bound.version != VERSION
         || bound.purpose != purpose
         || bound.sender != peer.profile.id
         || bound.recipient != config.profile.id
-        || bound.sent_at > time.saturating_add(30)
-        || (online && bound.sent_at.saturating_add(EVENT_TTL) < time)
     {
-        return fail("同步消息版本、目标或有效期无效");
+        return fail("同步消息版本或目标无效");
     }
-    Ok((peer.clone(), bound.payload))
+    Ok((peer.clone(), bound.payload, bound.sent_at))
 }
 
 #[derive(Clone, Serialize, Deserialize)]
