@@ -16,7 +16,15 @@ const EDGE_ANIMATION_DURATION: Duration = Duration::from_millis(200);
 const NORMAL_SHOW_ANIMATION_DURATION: Duration = Duration::from_millis(400);
 const NORMAL_HIDE_ANIMATION_DURATION: Duration = Duration::from_millis(140);
 const COLLAPSED_WINDOW_HEIGHT_LOGICAL: f32 = 1.0;
-const NORMAL_SHOW_SETTLE_START: f32 = 0.7;
+/// 普通显示动画的弹簧阻尼比：过冲约为行程的 6.8%。显示从 75% 高度开始，
+/// 折合约 1.7% 的窗口高度（500px 窗口约 8px），回弹可感知但不夸张。
+const NORMAL_SHOW_SPRING_DAMPING: f32 = 0.65;
+/// 以动画总时长为单位的弹簧固有频率：衰减包络在终点降到约 0.2%，保证结束时已静止。
+const NORMAL_SHOW_SPRING_FREQUENCY: f32 = 9.5;
+/// 从隐藏状态显示时的起始高度比例：窗口一出现就接近完整形态，再弹到位。
+const NORMAL_SHOW_START_HEIGHT_RATIO: f32 = 0.75;
+/// 隐藏动画收起到的高度比例：此时已完全透明，随后直接隐藏窗口。
+const NORMAL_HIDE_END_HEIGHT_RATIO: f32 = 0.85;
 const NEARBY_WINDOW_GAP_LOGICAL: f32 = 8.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -382,9 +390,9 @@ enum VisibilityAnimation {
         hide_window: bool,
     },
     Normal {
-        left: i32,
-        top: i32,
-        right: i32,
+        /// 完整显示时的客户区边界，动画只改变高度，`anchor` 那条边保持不动。
+        bounds: platform_window::PhysicalClientBounds,
+        anchor: window_state::NormalAnchor,
         from_height: i32,
         to_height: i32,
         show: bool,
@@ -826,7 +834,7 @@ pub(crate) fn set_visibility(
             })
             .unwrap_or(window_logical_size)
     });
-    let (normal_bounds, normal_scale_factor) = if panel_mode
+    let (normal_bounds, _normal_scale_factor) = if panel_mode
         && (!visible || transition_active)
         && let Some(panel) = stored_panel
     {
@@ -885,20 +893,35 @@ pub(crate) fn set_visibility(
             hide_window: panel.is_some(),
         },
         None => {
-            let collapsed = collapsed_bounds(
-                normal_bounds,
-                platform_window::CoordinateConverter::new(normal_scale_factor)
-                    .logical_to_physical_ceil_i32(COLLAPSED_WINDOW_HEIGHT_LOGICAL),
-            );
+            let full_height = client_height(normal_bounds);
+            // 打断进行中的动画时沿用原锚点，否则窗口会在两条边之间跳动。
+            let anchor = if visible && !transition_active {
+                let anchor = normal_anchor_for_pointer(
+                    normal_bounds,
+                    platform_window::physical_cursor_position(),
+                );
+                cx.update_global::<MainWindowService, _>(|service, _| {
+                    service.window_state.set_normal_anchor(anchor);
+                });
+                anchor
+            } else {
+                cx.read_global::<MainWindowService, _>(|service, _| {
+                    service.window_state.normal_anchor()
+                })
+            };
             VisibilityAnimation::Normal {
-                left: normal_bounds.left,
-                top: normal_bounds.top,
-                right: normal_bounds.right,
-                from_height: client_height(current_bounds),
-                to_height: if visible {
-                    client_height(normal_bounds)
+                bounds: normal_bounds,
+                anchor,
+                // 从隐藏状态显示时直接从接近完整的高度弹出；打断进行中的动画则从当前高度继续。
+                from_height: if visible && !transition_active {
+                    scaled_height(full_height, NORMAL_SHOW_START_HEIGHT_RATIO)
                 } else {
-                    client_height(collapsed)
+                    client_height(current_bounds)
+                },
+                to_height: if visible {
+                    full_height
+                } else {
+                    scaled_height(full_height, NORMAL_HIDE_END_HEIGHT_RATIO)
                 },
                 show: visible,
             }
@@ -998,22 +1021,28 @@ pub(crate) fn set_visibility(
                     }
                 }
                 VisibilityAnimation::Normal {
-                    left,
-                    top,
-                    right,
+                    bounds,
+                    anchor,
                     from_height,
                     show,
                     ..
                 } => {
                     if show {
                         platform_window::set_window_opacity(window, 0.0)?;
+                        let start = anchored_bounds(bounds, anchor, from_height);
                         platform_window::set_client_bounds_from_top(
                             window,
-                            left,
-                            top,
-                            right,
+                            start.left,
+                            start.top,
+                            start.right,
                             from_height,
                         )?;
+                        let shift =
+                            content_shift_for_frame(bounds, anchor, start, window.scale_factor());
+                        cx.update_global::<MainWindowService, _>(|service, _| {
+                            service.window_state.set_content_shift(shift);
+                        });
+                        window.bounds_changed(cx);
                         platform_window::set_window_visible(window, true)?;
                         // 点击托盘图标时任务栏处于前台，若等动画结束才置顶，与任务栏重叠的部分
                         // 会在动画末段被遮挡后突然跳出；因此在动画开始前就提升层级。
@@ -1191,18 +1220,16 @@ fn apply_visibility_animation_frame(
     let frame_bounds = match animation {
         VisibilityAnimation::Edge { from, to, .. } => interpolate_bounds(from, to, progress),
         VisibilityAnimation::Normal {
-            left,
-            top,
-            right,
+            bounds,
+            anchor,
             from_height,
             to_height,
             ..
-        } => platform_window::PhysicalClientBounds {
-            left,
-            top,
-            right,
-            bottom: top.saturating_add(interpolate_i32(from_height, to_height, progress)),
-        },
+        } => anchored_bounds(
+            bounds,
+            anchor,
+            interpolate_i32(from_height, to_height, progress),
+        ),
     };
     match animation {
         VisibilityAnimation::Edge {
@@ -1230,27 +1257,43 @@ fn apply_visibility_animation_frame(
             }
         }
         VisibilityAnimation::Normal {
-            left,
-            top,
-            right,
+            bounds,
+            anchor,
             show,
             ..
         } => {
             platform_window::set_client_bounds_from_top_with_target(
                 animation_target,
-                left,
-                top,
-                right,
-                frame_bounds.bottom.saturating_sub(top),
+                frame_bounds.left,
+                frame_bounds.top,
+                frame_bounds.right,
+                client_height(frame_bounds),
             )?;
-            // 原生窗口尺寸变化不会始终同步 GPUI 的 viewport 缓存，显式通知以避免底部未重绘。
+            let shift =
+                content_shift_for_frame(bounds, anchor, frame_bounds, window.scale_factor());
+            cx.update_global::<MainWindowService, _>(|service, _| {
+                service.window_state.set_content_shift(shift);
+            });
+            // 原生窗口尺寸变化不会始终同步 GPUI 的 viewport 缓存，显式通知以避免底部未重绘；
+            // 内容偏移随窗口高度每帧变化，需要整窗重绘。
             window.bounds_changed(cx);
+            window.refresh();
             platform_window::set_window_opacity_with_target(
                 animation_target,
                 visibility_animation_opacity(raw_progress, show),
             )?;
             if completed && !show {
                 platform_window::set_window_visible(window, false)?;
+                // 隐藏动画只收到部分高度就已完全透明；窗口隐藏后再折叠，保持隐藏态边界与其他路径一致。
+                platform_window::set_client_bounds(
+                    window,
+                    collapsed_bounds(
+                        bounds,
+                        platform_window::CoordinateConverter::new(window.scale_factor())
+                            .logical_to_physical_ceil_i32(COLLAPSED_WINDOW_HEIGHT_LOGICAL),
+                    ),
+                )?;
+                window.bounds_changed(cx);
             }
             if completed && show {
                 platform_window::raise_window_to_topmost(window)?;
@@ -1341,7 +1384,7 @@ fn visibility_animation_progress(
     .clamp(0.0, 1.0);
     let eased_progress = match animation {
         VisibilityAnimation::Edge { .. } => ease_out_quad(raw_progress),
-        VisibilityAnimation::Normal { show: true, .. } => ease_with_settle_bounce(raw_progress),
+        VisibilityAnimation::Normal { show: true, .. } => spring_ease(raw_progress),
         VisibilityAnimation::Normal { show: false, .. } => ease_in_quad(raw_progress),
     };
     (raw_progress, eased_progress)
@@ -1369,22 +1412,28 @@ fn ease_out_quad(progress: f32) -> f32 {
     1.0 - (1.0 - progress) * (1.0 - progress)
 }
 
-fn ease_with_settle_bounce(progress: f32) -> f32 {
-    if progress < NORMAL_SHOW_SETTLE_START {
-        let normalized = progress / NORMAL_SHOW_SETTLE_START;
-        return 1.0 - (1.0 - normalized).powi(3);
+/// 欠阻尼弹簧的解析解（初速度为 0）：位置和速度全程连续，冲过终点后自然回落。
+/// 原分段曲线在衔接点会从 1.0 突降回 0.988，表现为到位后先缩回再慢慢补齐。
+fn spring_ease(progress: f32) -> f32 {
+    if progress >= 1.0 {
+        return 1.0;
     }
-
-    let settle_phase = (progress - NORMAL_SHOW_SETTLE_START) / (1.0 - NORMAL_SHOW_SETTLE_START);
-    let overshoot = (settle_phase * std::f32::consts::PI).cos() * 0.012;
-    1.0 - overshoot * (1.0 - settle_phase)
+    let zeta = NORMAL_SHOW_SPRING_DAMPING;
+    let omega = NORMAL_SHOW_SPRING_FREQUENCY;
+    let decay = zeta * omega;
+    let damped_omega = omega * (1.0 - zeta * zeta).sqrt();
+    let t = progress.max(0.0);
+    let phase = damped_omega * t;
+    1.0 - (-decay * t).exp() * (phase.cos() + decay / damped_omega * phase.sin())
 }
 
 fn visibility_animation_opacity(progress: f32, show: bool) -> f32 {
     if show {
-        (progress * 2.0).min(1.0)
+        // 前 40% 用 ease-out 淡入，窗口一出现就清晰可见，不拖着半透明。
+        ease_out_quad((progress / 0.4).min(1.0))
     } else {
-        1.0 - progress * progress
+        // 隐藏时立即开始变淡（ease-out），配合高度的 ease-in 收起，显得干脆。
+        (1.0 - progress) * (1.0 - progress)
     }
 }
 
@@ -1407,6 +1456,67 @@ fn interpolate_i32(from: i32, to: i32, progress: f32) -> i32 {
 
 fn client_height(bounds: platform_window::PhysicalClientBounds) -> i32 {
     bounds.bottom.saturating_sub(bounds.top).max(1)
+}
+
+/// 按锚点从完整边界推出指定高度的边界：顶部锚定时向下伸缩，底部锚定时向上伸缩。
+fn anchored_bounds(
+    bounds: platform_window::PhysicalClientBounds,
+    anchor: window_state::NormalAnchor,
+    height: i32,
+) -> platform_window::PhysicalClientBounds {
+    let height = height.max(1);
+    match anchor {
+        window_state::NormalAnchor::Top => platform_window::PhysicalClientBounds {
+            bottom: bounds.top.saturating_add(height),
+            ..bounds
+        },
+        window_state::NormalAnchor::Bottom => platform_window::PhysicalClientBounds {
+            top: bounds.bottom.saturating_sub(height),
+            ..bounds
+        },
+    }
+}
+
+/// 指针（含点击托盘图标时的位置）落在窗口下方三分之一及以下时，说明窗口是从下方“弹出”的，
+/// 以底边为锚点向上展开；其余情况保持原来的顶边锚定。
+fn normal_anchor_for_pointer(
+    bounds: platform_window::PhysicalClientBounds,
+    pointer: Option<Point<f32>>,
+) -> window_state::NormalAnchor {
+    let Some(pointer) = pointer else {
+        return window_state::NormalAnchor::Top;
+    };
+    let threshold = bounds.top as f32 + client_height(bounds) as f32 * 2.0 / 3.0;
+    if pointer.y > threshold {
+        window_state::NormalAnchor::Bottom
+    } else {
+        window_state::NormalAnchor::Top
+    }
+}
+
+/// 内容跟随运动的那条边：底边锚定时运动的是上边缘，内容本来就贴着窗口顶部一起动，按窗口
+/// 实际尺寸排版即可；顶边锚定时运动的是下边缘，让内容按完整高度排版并贴住窗口底边，
+/// 从上边缘“滑出”，与向上展开时的观感对称。
+fn content_shift_for_frame(
+    bounds: platform_window::PhysicalClientBounds,
+    anchor: window_state::NormalAnchor,
+    frame: platform_window::PhysicalClientBounds,
+    scale_factor: f32,
+) -> Option<window_state::ContentShift> {
+    if anchor != window_state::NormalAnchor::Top {
+        return None;
+    }
+    let scale_factor = scale_factor.max(f32::EPSILON);
+    let window_height = client_height(frame) as f32 / scale_factor;
+    let height = (client_height(bounds) as f32 / scale_factor).max(window_height);
+    Some(window_state::ContentShift {
+        height,
+        offset_y: window_height - height,
+    })
+}
+
+fn scaled_height(height: i32, ratio: f32) -> i32 {
+    ((height as f32 * ratio).round() as i32).clamp(1, height.max(1))
 }
 
 fn collapsed_bounds(
@@ -2165,40 +2275,99 @@ mod tests {
     }
 
     #[test]
-    fn normal_animation_keeps_the_top_anchor_while_height_changes() {
+    fn normal_animation_keeps_the_anchor_edge_fixed_while_height_changes() {
         let normal = platform_window::PhysicalClientBounds {
             left: 100,
             top: 200,
             right: 460,
             bottom: 720,
         };
-        let animation = VisibilityAnimation::Normal {
-            left: normal.left,
-            top: normal.top,
-            right: normal.right,
-            from_height: 1,
-            to_height: client_height(normal),
-            show: true,
-        };
-        let middle = match animation {
-            VisibilityAnimation::Normal {
-                left,
-                top,
-                right,
-                from_height,
-                to_height,
-                ..
-            } => platform_window::PhysicalClientBounds {
-                left,
-                top,
-                right,
-                bottom: top.saturating_add(interpolate_i32(from_height, to_height, 0.5)),
-            },
-            VisibilityAnimation::Edge { .. } => unreachable!(),
-        };
 
-        assert_eq!(middle.top, normal.top);
-        assert_eq!(middle.bottom, 461);
+        let top = anchored_bounds(normal, window_state::NormalAnchor::Top, 260);
+        assert_eq!(
+            (top.left, top.top, top.right, top.bottom),
+            (100, 200, 460, 460)
+        );
+
+        let bottom = anchored_bounds(normal, window_state::NormalAnchor::Bottom, 260);
+        assert_eq!(
+            (bottom.left, bottom.top, bottom.right, bottom.bottom),
+            (100, 460, 460, 720)
+        );
+        assert_eq!(
+            anchored_bounds(normal, window_state::NormalAnchor::Bottom, 0).top,
+            719
+        );
+    }
+
+    #[test]
+    fn normal_anchor_follows_pointer_below_the_window() {
+        let normal = platform_window::PhysicalClientBounds {
+            left: 100,
+            top: 200,
+            right: 460,
+            bottom: 800,
+        };
+        let at = |y: f32| Some(Point { x: 300.0, y });
+
+        // 点击托盘图标：指针在窗口下方，从底边向上展开。
+        assert_eq!(
+            normal_anchor_for_pointer(normal, at(900.0)),
+            window_state::NormalAnchor::Bottom
+        );
+        // 窗口被屏幕底部夹住、与任务栏重叠时，指针仍落在窗口下部。
+        assert_eq!(
+            normal_anchor_for_pointer(normal, at(780.0)),
+            window_state::NormalAnchor::Bottom
+        );
+        // 以鼠标为中心弹出、或窗口在指针下方时保持顶边锚定。
+        assert_eq!(
+            normal_anchor_for_pointer(normal, at(500.0)),
+            window_state::NormalAnchor::Top
+        );
+        assert_eq!(
+            normal_anchor_for_pointer(normal, at(100.0)),
+            window_state::NormalAnchor::Top
+        );
+        assert_eq!(
+            normal_anchor_for_pointer(normal, None),
+            window_state::NormalAnchor::Top
+        );
+    }
+
+    #[test]
+    fn top_anchored_content_follows_the_moving_bottom_edge() {
+        let normal = platform_window::PhysicalClientBounds {
+            left: 100,
+            top: 200,
+            right: 460,
+            bottom: 800,
+        };
+        let frame = anchored_bounds(normal, window_state::NormalAnchor::Top, 450);
+        let shift = content_shift_for_frame(normal, window_state::NormalAnchor::Top, frame, 1.5)
+            .expect("顶边锚定时内容需要跟随下边缘");
+        assert_eq!(shift.height, 400.0);
+        assert_eq!(shift.offset_y, -100.0);
+
+        // 过冲时窗口比完整高度更高：内容随窗口拉伸，不留空隙。
+        let overshoot = anchored_bounds(normal, window_state::NormalAnchor::Top, 630);
+        let shift =
+            content_shift_for_frame(normal, window_state::NormalAnchor::Top, overshoot, 1.5)
+                .unwrap();
+        assert_eq!((shift.height, shift.offset_y), (420.0, 0.0));
+
+        // 底边锚定时内容本来就贴着运动的上边缘，按窗口实际尺寸排版。
+        assert!(
+            content_shift_for_frame(normal, window_state::NormalAnchor::Bottom, frame, 1.5)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn scaled_height_stays_within_window_height() {
+        assert_eq!(scaled_height(520, NORMAL_SHOW_START_HEIGHT_RATIO), 390);
+        assert_eq!(scaled_height(520, NORMAL_HIDE_END_HEIGHT_RATIO), 442);
+        assert_eq!(scaled_height(1, 0.5), 1);
     }
 
     #[test]
@@ -2223,17 +2392,31 @@ mod tests {
     }
 
     #[test]
-    fn normal_show_easing_settles_with_a_small_bounce() {
-        assert!(ease_with_settle_bounce(NORMAL_SHOW_SETTLE_START) < 1.0);
-        assert!(ease_with_settle_bounce(0.9) > 1.0);
-        assert_eq!(ease_with_settle_bounce(1.0), 1.0);
+    fn normal_show_spring_is_continuous_with_small_overshoot() {
+        assert_eq!(spring_ease(0.0), 0.0);
+        assert_eq!(spring_ease(1.0), 1.0);
+        let steps = 400;
+        let mut previous = spring_ease(0.0);
+        let mut peak = 0.0_f32;
+        for step in 1..=steps {
+            let value = spring_ease(step as f32 / steps as f32);
+            // 400ms 动画下相邻 1ms 的变化不应出现跳变。
+            assert!((value - previous).abs() < 0.02, "第 {step} 步出现跳变");
+            peak = peak.max(value);
+            previous = value;
+        }
+        assert!(peak > 1.04 && peak < 1.10, "过冲幅度异常：{peak}");
+        // 终点前已基本静止，最后一帧强制归 1 时不会产生可见跳动。
+        assert!((spring_ease(0.999) - 1.0).abs() < 0.003);
     }
 
     #[test]
-    fn visibility_animation_opacity_matches_reference_animation() {
-        assert_eq!(visibility_animation_opacity(0.25, true), 0.5);
-        assert_eq!(visibility_animation_opacity(0.5, true), 1.0);
-        assert_eq!(visibility_animation_opacity(0.5, false), 0.75);
+    fn visibility_animation_opacity_fades_quickly() {
+        assert_eq!(visibility_animation_opacity(0.0, true), 0.0);
+        assert_eq!(visibility_animation_opacity(0.2, true), 0.75);
+        assert_eq!(visibility_animation_opacity(0.4, true), 1.0);
+        assert_eq!(visibility_animation_opacity(0.0, false), 1.0);
+        assert_eq!(visibility_animation_opacity(0.5, false), 0.25);
         assert_eq!(visibility_animation_opacity(1.0, false), 0.0);
     }
 

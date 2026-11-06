@@ -266,7 +266,23 @@ impl Render for MainWindow {
                 );
         }
 
-        root.into_any_element()
+        // 顶边锚定的显示/隐藏动画中，内容按完整高度排版并贴住窗口底边，跟着运动的下边缘滑动。
+        // 外层始终存在，保证元素树结构在动画前后一致。
+        let content_shift = cx
+            .global::<MainWindowService>()
+            .window_state
+            .content_shift();
+        let content = div().absolute().left_0().right_0();
+        let content = match content_shift {
+            Some(shift) => content.top(px(shift.offset_y)).h(px(shift.height)),
+            None => content.top_0().bottom_0(),
+        };
+        div()
+            .size_full()
+            .relative()
+            .overflow_hidden()
+            .child(content.child(root))
+            .into_any_element()
     }
 }
 

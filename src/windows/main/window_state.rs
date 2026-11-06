@@ -46,6 +46,24 @@ impl Default for WindowPresentation {
     }
 }
 
+/// 普通窗口显示/隐藏动画中保持不动的那条边。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum NormalAnchor {
+    #[default]
+    Top,
+    Bottom,
+}
+
+/// 顶边锚定的显示/隐藏动画中内容的排版（逻辑像素）：内容按完整高度排版并贴住窗口底边，
+/// 跟着运动的下边缘一起滑动，而不是静止不动、只被下边缘逐渐露出。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ContentShift {
+    /// 内容排版高度：完整高度与窗口当前高度取较大值，过冲时内容随窗口拉伸、不露出空隙。
+    pub(crate) height: f32,
+    /// 内容顶边相对窗口顶边的偏移，始终不大于 0。
+    pub(crate) offset_y: f32,
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct State {
     presentation: WindowPresentation,
@@ -55,6 +73,8 @@ pub(crate) struct State {
     visibility_transition_active: bool,
     normal_bounds: Option<platform_window::PhysicalClientBounds>,
     normal_logical_size: Option<(f32, f32)>,
+    normal_anchor: NormalAnchor,
+    content_shift: Option<ContentShift>,
     panel_attachment: Option<EdgeAttachment>,
     mouse_leave_state: MouseLeaveState,
     edge_reveal_suppressed: bool,
@@ -72,6 +92,8 @@ impl State {
         self.visibility_transition_active = false;
         self.normal_bounds = None;
         self.normal_logical_size = None;
+        self.normal_anchor = NormalAnchor::Top;
+        self.content_shift = None;
         self.panel_attachment = None;
         self.mouse_leave_state = MouseLeaveState::Disarmed;
         self.edge_reveal_suppressed = false;
@@ -192,6 +214,7 @@ impl State {
         self.visibility_transition_generation =
             self.visibility_transition_generation.wrapping_add(1);
         self.visibility_transition_active = true;
+        self.content_shift = None;
         self.set_visibility(visible);
         self.visibility_transition_generation
     }
@@ -213,6 +236,7 @@ impl State {
             return false;
         }
         self.visibility_transition_active = false;
+        self.content_shift = None;
         true
     }
 
@@ -220,6 +244,7 @@ impl State {
         self.visibility_transition_generation =
             self.visibility_transition_generation.wrapping_add(1);
         self.visibility_transition_active = false;
+        self.content_shift = None;
     }
 
     pub(crate) fn normal_bounds(&self) -> Option<platform_window::PhysicalClientBounds> {
@@ -228,6 +253,24 @@ impl State {
 
     pub(crate) fn normal_logical_size(&self) -> Option<(f32, f32)> {
         self.normal_logical_size
+    }
+
+    pub(crate) fn normal_anchor(&self) -> NormalAnchor {
+        self.normal_anchor
+    }
+
+    pub(crate) fn set_normal_anchor(&mut self, anchor: NormalAnchor) {
+        self.normal_anchor = anchor;
+    }
+
+    /// 只在显示/隐藏动画进行中有效；动画结束或被取消后内容恢复按窗口实际尺寸排版。
+    pub(crate) fn content_shift(&self) -> Option<ContentShift> {
+        self.content_shift
+            .filter(|_| self.visibility_transition_active)
+    }
+
+    pub(crate) fn set_content_shift(&mut self, shift: Option<ContentShift>) {
+        self.content_shift = shift;
     }
 
     pub(crate) fn remember_normal_bounds(&mut self, bounds: platform_window::PhysicalClientBounds) {
