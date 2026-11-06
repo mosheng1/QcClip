@@ -3111,8 +3111,9 @@ pub fn configure_window(window: &Window) {
             DWM_WINDOW_CORNER_PREFERENCE, DWMWA_WINDOW_CORNER_PREFERENCE, DwmSetWindowAttribute,
         },
         UI::WindowsAndMessaging::{
-            GWL_EXSTYLE, GetWindowLongPtrW, HWND_TOPMOST, SWP_FRAMECHANGED, SWP_NOACTIVATE,
-            SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetWindowLongPtrW, SetWindowPos, WS_EX_APPWINDOW,
+            GWL_EXSTYLE, GetWindowLongPtrW, HWND_TOPMOST, IsWindowVisible, SW_HIDE,
+            SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+            SWP_NOZORDER, SetWindowLongPtrW, SetWindowPos, ShowWindow, WS_EX_APPWINDOW,
             WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
         },
     };
@@ -3139,6 +3140,17 @@ pub fn configure_window(window: &Window) {
         & !(WS_EX_APPWINDOW.0 as isize);
     unsafe {
         SetWindowLongPtrW(hwnd, GWL_EXSTYLE, tool_window_style);
+    }
+
+    // GPUI 以 WS_EX_APPWINDOW 创建窗口；若创建时已显示（启动时恢复贴边状态），任务栏按钮
+    // 在显示那一刻就已登记，事后修改扩展样式不会移除它。任务栏只在显示/隐藏时重新判断，
+    // 因此对已可见的窗口同步隐藏再无激活显示一次，让工具窗口样式生效。
+    // SAFETY: hwnd 来自当前 GPUI 窗口句柄，只切换该窗口的可见状态，不激活窗口。
+    unsafe {
+        if IsWindowVisible(hwnd).as_bool() {
+            let _ = ShowWindow(hwnd, SW_HIDE);
+            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        }
     }
 
     // Normal 窗口和工具窗口的 DWM 默认圆角策略可能不同，这里固定使用标准圆角。
