@@ -468,6 +468,8 @@ impl MainWindow {
         self.list_drag_origin_position = Some(source_position);
         self.list_hovered_item_id = None;
         self.list_drop_target = None;
+        // 拖拽期间绝不消费可见性刷新留下的锚点；否则首帧会重建布局并抢走动画。
+        self.pending_list_anchor = None;
     }
 
     pub(crate) fn set_reorder_target(

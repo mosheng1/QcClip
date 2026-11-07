@@ -2,6 +2,9 @@ use super::*;
 use crate::services::sync::ReceivedChange;
 use crate::windows::list_order::nearest_survivor;
 
+/// 拖拽/加载阻塞时的轮询间隔。50ms 级唤醒会持续抢拖拽动画帧。
+const BLOCKED_REFRESH_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
 #[cfg(test)]
 mod tests;
 
@@ -156,7 +159,7 @@ impl MainWindow {
                 let Some(next) = next else { break };
                 let Some((tab, query_generation, previous_order, task)) = next else {
                     cx.background_executor()
-                        .timer(Duration::from_millis(50))
+                        .timer(BLOCKED_REFRESH_POLL_INTERVAL)
                         .await;
                     continue;
                 };
@@ -248,7 +251,7 @@ impl MainWindow {
                     NextUpdate::Stop => break,
                     NextUpdate::Wait => {
                         cx.background_executor()
-                            .timer(Duration::from_millis(50))
+                            .timer(BLOCKED_REFRESH_POLL_INTERVAL)
                             .await;
                     }
                     NextUpdate::Load(batch, task) => {

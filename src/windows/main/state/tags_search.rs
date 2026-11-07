@@ -577,13 +577,6 @@ impl MainWindow {
         );
         let activation_subscription = cx.observe_window_activation(window, |_, window, cx| {
             if window.is_window_active() {
-                // A file restored while the window was already open is only observed
-                // when a scan runs; refresh on focus so recovery reaches the list.
-                // Activation can fire while MainWindow is still being updated, so
-                // defer the scan until the entity is returned to the app.
-                cx.defer(|cx| {
-                    crate::windows::main::MainWindowService::request_missing_scan(cx);
-                });
                 return;
             }
             window.blur(cx);

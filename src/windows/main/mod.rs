@@ -45,6 +45,7 @@ pub(crate) struct MainWindowService {
     missing_scan_pending: bool,
     missing_scan_generation: u64,
     last_missing_scan_started: Option<Instant>,
+    missing_refresh_after_drag: bool,
     blocking_operation: Option<&'static str>,
     mouse_event_listener_id: Option<u64>,
     #[cfg(target_os = "windows")]
@@ -147,7 +148,6 @@ impl MainWindowService {
             service.main_view = Some(main_view);
             service.history_repository = Some(history_repository);
         });
-        Self::request_missing_scan_now(cx);
     }
 
     pub(crate) fn missing_file_setting_changed(enabled: bool, cx: &mut App) {
@@ -302,12 +302,51 @@ impl MainWindowService {
     }
 
     fn refresh_missing_ui(cx: &mut App, changed: bool) {
-        Self::refresh_missing_visibility(cx, changed);
+        if changed {
+            let main_view = cx
+                .try_global::<Self>()
+                .and_then(|service| service.main_view.clone());
+            if let Some(main_view) = main_view {
+                if main_view.read(cx).list_drag_source_id.is_some() {
+                    // 拖拽期间整表刷新会取消拖拽；等放下后再刷新，期间不碰列表。
+                    let schedule = cx.update_global::<Self, _>(|service, _| {
+                        if service.missing_refresh_after_drag {
+                            false
+                        } else {
+                            service.missing_refresh_after_drag = true;
+                            true
+                        }
+                    });
+                    if schedule {
+                        cx.spawn(async move |cx| {
+                            loop {
+                                cx.background_executor()
+                                    .timer(std::time::Duration::from_millis(500))
+                                    .await;
+                                let dragging = cx
+                                    .update(|cx| main_view.read(cx).list_drag_source_id.is_some());
+                                if !dragging {
+                                    cx.update(|cx| {
+                                        cx.update_global::<Self, _>(|service, _| {
+                                            service.missing_refresh_after_drag = false;
+                                        });
+                                        Self::refresh_history(cx);
+                                    });
+                                    break;
+                                }
+                            }
+                        })
+                        .detach();
+                    }
+                } else {
+                    Self::refresh_history(cx);
+                }
+            }
+        }
         crate::windows::quick_paste::QuickPasteWindowService::refresh_missing_files(cx, changed);
     }
 
     pub(crate) fn handle_window_shown(window: &mut Window, cx: &mut App) {
-        Self::request_missing_scan(cx);
         let main_view = cx
             .try_global::<Self>()
             .and_then(|service| service.main_view.clone());
@@ -342,21 +381,6 @@ impl MainWindowService {
             .and_then(|service| service.main_view.clone());
         if let Some(main_view) = main_view {
             main_view.update(cx, |view, cx| view.refresh_history(cx));
-        }
-    }
-
-    fn refresh_missing_visibility(cx: &mut App, changed: bool) {
-        let main_view = cx
-            .try_global::<Self>()
-            .and_then(|service| service.main_view.clone());
-        if let Some(main_view) = main_view {
-            main_view.update(cx, |view, cx| {
-                if changed {
-                    view.refresh_missing_visibility(cx);
-                } else {
-                    view.retry_missing_visibility(cx);
-                }
-            });
         }
     }
 

@@ -29,18 +29,12 @@ impl MainWindow {
         );
     }
 
-    /// Sort loaded rows by the authoritative query order.
+    /// Sort loaded rows with the same comparator as the main branch.
     fn sorted_items_by_list_order(
         &self,
         mut items: Vec<ClipboardListItem>,
     ) -> Vec<ClipboardListItem> {
-        let positions = &self.list_order_positions;
-        items.sort_by_key(|item| {
-            positions
-                .get(&item.history_id)
-                .copied()
-                .unwrap_or(usize::MAX)
-        });
+        items.sort_by(compare_list_items);
         items
     }
 
@@ -1271,8 +1265,7 @@ impl MainWindow {
         item.is_selected = self.selected_item_id == Some(history_id);
         self.items
             .retain(|existing| existing.history_id != history_id);
-        self.items.push(item.clone());
-        self.sort_items_by_list_order();
+        insert_sorted_item(&mut self.items, item.clone());
         self.loaded_items.insert(history_id, item);
         if presentation_changed || source_position != Some(destination_position) {
             self.adaptive_item_heights.remove(&history_id);
@@ -1555,12 +1548,11 @@ impl MainWindow {
                     self.loaded_items.insert(item.history_id, item.clone());
                     self.items
                         .retain(|existing| existing.history_id != item.history_id);
-                    self.items.push(item);
+                    insert_sorted_item(&mut self.items, item);
                     if !was_loaded {
                         newly_loaded.push(history_id);
                     }
                 }
-                self.sort_items_by_list_order();
                 if animate_loaded {
                     self.mark_list_items_loaded(newly_loaded);
                 } else {
@@ -1599,6 +1591,39 @@ impl MainWindow {
         self.invalidate_list_layout_cache();
         // 被更新或删除的内容可能改变预览高度，其他行的缓存可以继续复用。
         self.adaptive_item_heights.remove(&list_item_id);
+        let updated_item = record
+            .as_ref()
+            .map(|record| record_to_list_item(record.clone()));
+        if let Some(updated_item) = updated_item.as_ref()
+            && let Some(existing) = self
+                .items
+                .iter()
+                .find(|item| item.history_id == list_item_id)
+            && compare_list_items(existing, updated_item) == std::cmp::Ordering::Equal
+        {
+            let mut updated_item = updated_item.clone();
+            updated_item.shortcut = existing.shortcut.clone();
+            for item in &mut self.items {
+                if item.history_id == list_item_id {
+                    *item = updated_item.clone();
+                }
+            }
+            for item in self.loaded_items.values_mut() {
+                if item.history_id == list_item_id {
+                    *item = updated_item.clone();
+                }
+            }
+            self.total_item_count = total;
+            self.has_more_items = self.loaded_items.len() < total;
+            self.list_status = if self.items.is_empty() {
+                ListStatus::Empty
+            } else {
+                ListStatus::Ready
+            };
+            self.reconcile_selection();
+            return;
+        }
+
         if record.is_none()
             && !self
                 .items
@@ -1620,9 +1645,8 @@ impl MainWindow {
         let previous_len = self.items.len();
         self.items.retain(|item| item.history_id != list_item_id);
         if let Some(record) = record {
-            self.items.push(record_to_list_item(record));
+            insert_sorted_item(&mut self.items, record_to_list_item(record));
         }
-        self.sort_items_by_list_order();
         if self.has_more_items && self.items.len() > previous_len {
             self.items.pop();
         }

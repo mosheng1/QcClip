@@ -14,6 +14,7 @@ pub(super) use history::ClipboardListenerToggleResult;
 
 use std::{
     cell::RefCell,
+    cmp::Ordering,
     collections::{HashMap, HashSet, VecDeque},
     ops::Range,
     path::{Path, PathBuf},
@@ -715,6 +716,22 @@ fn split_page(
     let has_more = records.len() > page_size;
     records.truncate(page_size);
     (records, has_more)
+}
+
+fn compare_list_items(left: &ClipboardListItem, right: &ClipboardListItem) -> Ordering {
+    right
+        .is_pinned
+        .cmp(&left.is_pinned)
+        .then_with(|| right.sort_order.cmp(&left.sort_order))
+        .then_with(|| right.last_seen_at.cmp(&left.last_seen_at))
+        .then_with(|| right.history_id.cmp(&left.history_id))
+}
+
+fn insert_sorted_item(items: &mut Vec<ClipboardListItem>, item: ClipboardListItem) {
+    let index = items
+        .binary_search_by(|existing| compare_list_items(existing, &item))
+        .unwrap_or_else(|index| index);
+    items.insert(index, item);
 }
 
 #[derive(Clone, Copy, Debug)]

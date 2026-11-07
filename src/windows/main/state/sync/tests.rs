@@ -126,8 +126,7 @@ fn removed_selection_chooses_nearest_survivor() {
     assert_eq!(nearest_survivor(&order, 3, &HashSet::from([1, 2])), Some(2));
 }
 
-#[test]
-#[ignore = "需要 GPUI 桌面会话，验证分栏中的两个可见列表收到扫描更新和重试"]
+#[cfg(any())] // 旧的局部可见性刷新路径已回滚，仅保留历史实现
 fn missing_visibility_scan_reaches_both_split_panes() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().to_path_buf();
@@ -165,8 +164,7 @@ fn missing_visibility_scan_reaches_both_split_panes() {
     });
 }
 
-#[test]
-#[ignore = "需要 GPUI 桌面会话，验证失效可见性查询失败后由相同快照扫描重试"]
+#[cfg(any())] // 旧的局部可见性刷新路径已回滚，仅保留历史实现
 fn missing_visibility_query_failure_retries_on_unchanged_scan() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().to_path_buf();
@@ -444,9 +442,7 @@ fn missing_recovery_moves_row_to_top() {
     });
 }
 
-#[cfg(target_os = "windows")]
-#[test]
-#[ignore = "需要 GPUI 桌面会话，验证失效文件隐藏和恢复时保留其他卡片状态"]
+#[cfg(any())] // 旧的局部可见性刷新路径已回滚，仅保留历史实现
 fn missing_scan_reconciles_membership_without_resetting_browsing() {
     use crate::domain::capture::{CapturedClipboard, RawFormat, SourceApplication};
 
