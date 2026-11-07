@@ -66,6 +66,10 @@ impl MainWindow {
             self.cancel_hover_preview(cx);
             self.list_query_task = None;
             self.sync_refresh_task = None;
+            self.missing_visibility_task = None;
+            self.missing_visibility_generation = self.missing_visibility_generation.wrapping_add(1);
+            self.missing_visibility_dirty = false;
+            self.pending_list_anchor = None;
             self.sync_changes.clear();
             self.query_generation = self.query_generation.wrapping_add(1);
             self.items.clear();

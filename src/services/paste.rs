@@ -129,6 +129,8 @@ pub enum PasteError {
     HistoryReorder(#[from] HistoryReorderError),
     #[error("调整收藏排序失败：{0}")]
     FavoriteReorder(#[from] FavoriteReorderError),
+    #[error("读取历史排序失败：{0}")]
+    HistoryQuery(#[from] crate::services::database::query::HistoryQueryError),
     #[error("历史内容没有可恢复的格式")]
     NoRestorableFormat,
     #[error("原始数据哈希长度无效：{0} 字节")]
@@ -342,27 +344,15 @@ impl PasteService {
         self.record_paste(&connection, item_id, move_to_first)
     }
 
-    /// 将历史排序中的首个剪贴板条目以纯文本粘贴到当前活动窗口。
+    /// 将历史排序中的首个可见剪贴板条目以纯文本粘贴到当前活动窗口。
     pub(crate) fn paste_latest_plain_text(
         &self,
+        policy: &crate::config::HistoryConfig,
         move_to_first: Option<PasteOrderTarget>,
     ) -> Result<ClipboardItemId, PasteError> {
-        let connection = self.database.connect()?;
-        let item_id = connection
-            .query_row(
-                "SELECT h.item_id
-                 FROM clipboard_history AS h
-                 JOIN clipboard_items AS i ON i.id = h.item_id
-                 WHERE i.capture_state = 'ready'
-                 ORDER BY h.is_pinned DESC,
-                          h.sort_order DESC,
-                          h.last_seen_at DESC,
-                          h.id DESC
-                 LIMIT 1",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?
+        let repository = HistoryRepository::new(self.database.clone(), self.blob_store.clone());
+        let item_id = repository
+            .first_item_id(policy)?
             .ok_or(PasteError::NoRestorableFormat)?;
         self.paste_item_plain_text(item_id, move_to_first)
             .map(|()| item_id)

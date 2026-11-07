@@ -459,6 +459,7 @@ impl SettingsWindowView {
                 },
             ),
         );
+        let missing_toggle_view = view.clone();
         let mut section = v_flex()
             .w_full()
             .min_w_0()
@@ -535,6 +536,62 @@ impl SettingsWindowView {
                         .on_click(move |checked, _, cx| {
                             let mut next = config_runtime::history_config(cx);
                             next.cleanup_on_startup = *checked;
+                            save_history_config(missing_toggle_view.clone(), next, cx);
+                        }),
+                ),
+            )
+            .child(
+                self.setting_row(
+                    theme,
+                    translator.translate("settings.data_management.auto_hide_missing_files"),
+                    Some(
+                        translator
+                            .translate(
+                                "settings.data_management.auto_hide_missing_files_description",
+                            )
+                            .into(),
+                    ),
+                    Switch::new("settings-data-auto-hide-missing-files")
+                        .large()
+                        .checked(config.auto_hide_missing_files)
+                        .disabled(self.data_busy)
+                        .accessibility_label(
+                            translator
+                                .translate("settings.data_management.auto_hide_missing_files"),
+                        )
+                        .on_click({
+                            let view = view.clone();
+                            move |checked, _, cx| {
+                                let mut next = config_runtime::history_config(cx);
+                                next.auto_hide_missing_files = *checked;
+                                save_history_config(view.clone(), next, cx);
+                            }
+                        }),
+                ),
+            )
+            .child(
+                self.setting_row(
+                    theme,
+                    translator.translate(
+                        "settings.data_management.move_recovered_missing_files_to_top",
+                    ),
+                    Some(
+                        translator
+                            .translate(
+                                "settings.data_management.move_recovered_missing_files_to_top_description",
+                            )
+                            .into(),
+                    ),
+                    Switch::new("settings-data-move-recovered-missing-files-to-top")
+                        .large()
+                        .checked(config.move_recovered_missing_files_to_top)
+                        .disabled(self.data_busy || !config.auto_hide_missing_files)
+                        .accessibility_label(translator.translate(
+                            "settings.data_management.move_recovered_missing_files_to_top",
+                        ))
+                        .on_click(move |checked, _, cx| {
+                            let mut next = config_runtime::history_config(cx);
+                            next.move_recovered_missing_files_to_top = *checked;
                             save_history_config(view.clone(), next, cx);
                         }),
                 ),
@@ -2044,6 +2101,7 @@ fn start_history_cleanup(view: Entity<SettingsWindowView>, clear_all: bool, cx: 
         });
         if cleaned {
             cx.update(crate::windows::main::MainWindowService::refresh_history);
+            cx.update(crate::windows::main::MainWindowService::request_missing_scan);
         }
         if clear_all {
             cx.update(crate::windows::main::MainWindowService::restart_clipboard_listener);

@@ -9,6 +9,7 @@ use rusqlite::{
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::config::HistoryConfig;
 use crate::domain::clipboard::ClipboardItemId;
 use crate::services::storage::RawBlobStore;
 
@@ -307,6 +308,22 @@ impl FavoriteRepository {
     }
 
     pub fn count(&self, query: &HistoryQuery) -> Result<usize, HistoryQueryError> {
+        self.count_with_policy(query, None)
+    }
+
+    pub fn count_scoped(
+        &self,
+        query: &HistoryQuery,
+        policy: &HistoryConfig,
+    ) -> Result<usize, HistoryQueryError> {
+        self.count_with_policy(query, Some(policy))
+    }
+
+    fn count_with_policy(
+        &self,
+        query: &HistoryQuery,
+        policy: Option<&HistoryConfig>,
+    ) -> Result<usize, HistoryQueryError> {
         let connection = self.database.connect()?;
         let mut conditions = vec!["i.capture_state = 'ready'".to_owned()];
         let mut parameters = Vec::new();
@@ -342,6 +359,12 @@ impl FavoriteRepository {
             None => {}
         }
         append_tag_filter(&mut conditions, &mut parameters, query);
+        super::missing_files::append_hidden_filter(
+            &mut conditions,
+            &self.database,
+            policy,
+            "f.item_id",
+        );
 
         let sql = format!(
             "SELECT COUNT(*)
@@ -365,10 +388,42 @@ impl FavoriteRepository {
         let mut query = query.clone();
         query.offset = 0;
         query.limit = 1;
-        Ok(self.query_internal(&query, Some(favorite_id), None)?.pop())
+        Ok(self
+            .query_internal(&query, Some(favorite_id), None, None)?
+            .pop())
+    }
+
+    pub fn find_by_id_scoped(
+        &self,
+        favorite_id: i64,
+        query: &HistoryQuery,
+        policy: &HistoryConfig,
+    ) -> Result<Option<HistoryListRecord>, HistoryQueryError> {
+        let mut query = query.clone();
+        query.offset = 0;
+        query.limit = 1;
+        Ok(self
+            .query_internal(&query, Some(favorite_id), None, Some(policy))?
+            .pop())
     }
 
     pub fn pinned_count(&self, query: &HistoryQuery) -> Result<usize, HistoryQueryError> {
+        self.pinned_count_with_policy(query, None)
+    }
+
+    pub fn pinned_count_scoped(
+        &self,
+        query: &HistoryQuery,
+        policy: &HistoryConfig,
+    ) -> Result<usize, HistoryQueryError> {
+        self.pinned_count_with_policy(query, Some(policy))
+    }
+
+    fn pinned_count_with_policy(
+        &self,
+        query: &HistoryQuery,
+        policy: Option<&HistoryConfig>,
+    ) -> Result<usize, HistoryQueryError> {
         let connection = self.database.connect()?;
         let mut conditions = vec![
             "i.capture_state = 'ready'".to_owned(),
@@ -406,6 +461,12 @@ impl FavoriteRepository {
             None => {}
         }
         append_tag_filter(&mut conditions, &mut parameters, query);
+        super::missing_files::append_hidden_filter(
+            &mut conditions,
+            &self.database,
+            policy,
+            "f.item_id",
+        );
         let sql = format!(
             "SELECT COUNT(*)
              FROM favorites AS f
@@ -440,7 +501,7 @@ impl FavoriteRepository {
     }
 
     pub fn query(&self, query: &HistoryQuery) -> Result<Vec<HistoryListRecord>, HistoryQueryError> {
-        self.query_internal(query, None, None)
+        self.query_internal(query, None, None, None)
     }
 
     pub fn query_by_ids(
@@ -451,24 +512,53 @@ impl FavoriteRepository {
         if favorite_ids.is_empty() {
             return Ok(Vec::new());
         }
-        self.query_internal(query, None, Some(favorite_ids))
+        self.query_internal(query, None, Some(favorite_ids), None)
+    }
+
+    pub fn query_by_ids_scoped(
+        &self,
+        query: &HistoryQuery,
+        favorite_ids: &[i64],
+        policy: &HistoryConfig,
+    ) -> Result<Vec<HistoryListRecord>, HistoryQueryError> {
+        if favorite_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.query_internal(query, None, Some(favorite_ids), Some(policy))
     }
 
     pub fn ordered_ids(&self, query: &HistoryQuery) -> Result<Vec<i64>, HistoryQueryError> {
-        Ok(self.query_order(query, false)?.ids)
+        Ok(self.query_order(query, false, None)?.ids)
     }
 
     pub fn ordered_snapshot(
         &self,
         query: &HistoryQuery,
     ) -> Result<ListOrderSnapshot, HistoryQueryError> {
-        self.query_order(query, true)
+        self.query_order(query, true, None)
+    }
+
+    pub fn ordered_snapshot_scoped(
+        &self,
+        query: &HistoryQuery,
+        policy: &HistoryConfig,
+    ) -> Result<ListOrderSnapshot, HistoryQueryError> {
+        self.query_order(query, true, Some(policy))
+    }
+
+    pub fn ordered_ids_scoped(
+        &self,
+        query: &HistoryQuery,
+        policy: &HistoryConfig,
+    ) -> Result<Vec<i64>, HistoryQueryError> {
+        Ok(self.query_order(query, false, Some(policy))?.ids)
     }
 
     fn query_order(
         &self,
         query: &HistoryQuery,
         include_heat: bool,
+        policy: Option<&HistoryConfig>,
     ) -> Result<ListOrderSnapshot, HistoryQueryError> {
         // 只读取排序和热度元数据，避免加载完整预览文本及原始内容。
         let connection = self.database.connect()?;
@@ -507,12 +597,19 @@ impl FavoriteRepository {
             None => {}
         }
         append_tag_filter(&mut conditions, &mut parameters, query);
+        super::missing_files::append_hidden_filter(
+            &mut conditions,
+            &self.database,
+            policy,
+            "f.item_id",
+        );
 
         let history_join = query
             .search
             .as_deref()
             .map(str::trim)
-            .is_some_and(|value| !value.is_empty())
+            .is_some_and(|value| !value.is_empty());
+        let history_join = history_join
             .then_some("LEFT JOIN clipboard_history AS h ON h.item_id = f.item_id\n             ")
             .unwrap_or_default();
         let columns = if include_heat {
@@ -543,6 +640,7 @@ impl FavoriteRepository {
         query: &HistoryQuery,
         favorite_id: Option<i64>,
         favorite_ids: Option<&[i64]>,
+        policy: Option<&HistoryConfig>,
     ) -> Result<Vec<HistoryListRecord>, HistoryQueryError> {
         if query.limit == 0 {
             return Ok(Vec::new());
@@ -582,6 +680,12 @@ impl FavoriteRepository {
             None => {}
         }
         append_tag_filter(&mut conditions, &mut parameters, query);
+        super::missing_files::append_hidden_filter(
+            &mut conditions,
+            &self.database,
+            policy,
+            "f.item_id",
+        );
         if let Some(favorite_id) = favorite_id {
             conditions.push("f.id = ?".to_owned());
             parameters.push(Value::Integer(favorite_id));

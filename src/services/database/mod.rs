@@ -4,6 +4,7 @@ mod connection;
 mod favorite_repository;
 mod history_repository;
 mod migrations;
+pub(crate) mod missing_files;
 mod models;
 mod note_repository;
 pub mod query;

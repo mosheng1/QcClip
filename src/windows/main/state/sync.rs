@@ -1,5 +1,6 @@
 use super::*;
 use crate::services::sync::ReceivedChange;
+use crate::windows::list_order::nearest_survivor;
 
 #[cfg(test)]
 mod tests;
@@ -8,6 +9,7 @@ struct UpdateBatch {
     changes: Vec<ReceivedChange>,
     tab: TabId,
     generation: u64,
+    visibility_generation: u64,
     tag_generation: u64,
     previous_order: Vec<HistoryItemId>,
     ids: Vec<HistoryItemId>,
@@ -25,7 +27,195 @@ enum NextUpdate {
     Load(UpdateBatch, Task<Result<UpdateData, String>>),
 }
 
+fn anchor_in_layout(
+    order: &[HistoryItemId],
+    visible_ids: Option<&HashSet<HistoryItemId>>,
+    axis_offset: Pixels,
+    leading_padding: Pixels,
+    item_offset: impl Fn(usize) -> Option<Pixels>,
+) -> Option<(HistoryItemId, Pixels)> {
+    let viewport_start = -(axis_offset + leading_padding);
+    let positions = order
+        .iter()
+        .enumerate()
+        .filter(|(_, id)| visible_ids.is_none_or(|visible| visible.contains(id)))
+        .filter_map(|(index, id)| Some((*id, item_offset(index)?, item_offset(index + 1)?)))
+        .collect::<Vec<_>>();
+    positions
+        .iter()
+        .find(|(_, _, end)| *end > viewport_start)
+        .or_else(|| positions.last())
+        .map(|(id, origin, _)| (*id, *origin))
+}
+
 impl MainWindow {
+    pub(crate) fn refresh_missing_visibility(&mut self, cx: &mut Context<Self>) {
+        if let Some(panes) = self.split_panes.clone() {
+            for pane in panes {
+                pane.update(cx, |pane, cx| pane.refresh_missing_visibility(cx));
+            }
+            return;
+        }
+        if self.active_tab == TabId::Emoji {
+            return;
+        }
+        self.missing_visibility_dirty = true;
+        self.missing_visibility_generation = self.missing_visibility_generation.wrapping_add(1);
+        let visibility_generation = self.missing_visibility_generation;
+        self.missing_visibility_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                let Ok(next) = this.update(cx, |this, cx| {
+                    if this.missing_visibility_generation != visibility_generation {
+                        return None;
+                    }
+                    if this.sync_update_blocked() {
+                        return Some(None);
+                    }
+                    let tab = this.active_tab;
+                    let query_generation = this.query_generation;
+                    let previous_order = this.list_order_ids.clone();
+                    let loaded_ids: HashSet<_> = this.loaded_items.keys().copied().collect();
+                    let selected_id = this.selected_item_id;
+                    let viewport_index = this
+                        .pending_list_anchor
+                        .as_ref()
+                        .map(|anchor| anchor.history_id)
+                        .or_else(|| {
+                            this.visible_list_anchor(None)
+                                .map(|anchor| anchor.history_id)
+                        })
+                        .and_then(|id| previous_order.iter().position(|candidate| *candidate == id))
+                        .unwrap_or_default();
+                    let query = this.page_query(0, MAX_QUERY_PAGE_SIZE);
+                    let policy = crate::config_runtime::history_config(cx);
+                    let history = this.history_repository.clone();
+                    let favorites = this.favorite_repository.clone();
+                    let task = cx.background_spawn(async move {
+                        let snapshot = if tab == TabId::Favorites {
+                            favorites.ordered_snapshot_scoped(&query, &policy)?
+                        } else {
+                            history.ordered_snapshot_scoped(&query, &policy)?
+                        };
+                        if snapshot.ids == previous_order {
+                            return Ok::<_, HistoryQueryError>((snapshot, Vec::new(), Vec::new()));
+                        }
+                        let visible_ids: HashSet<_> = snapshot.ids.iter().copied().collect();
+                        let anchor_index =
+                            nearest_survivor(&previous_order, viewport_index, &visible_ids)
+                                .and_then(|id| {
+                                    snapshot.ids.iter().position(|candidate| *candidate == id)
+                                })
+                                .unwrap_or_default();
+                        let window_start = anchor_index.saturating_sub(MAX_QUERY_PAGE_SIZE / 4);
+                        let window_end =
+                            (window_start + MAX_QUERY_PAGE_SIZE).min(snapshot.ids.len());
+                        let mut fetch_ids = snapshot.ids[window_start..window_end]
+                            .iter()
+                            .copied()
+                            .filter(|id| !loaded_ids.contains(id))
+                            .collect::<Vec<_>>();
+                        let selected_id = selected_id.and_then(|id| {
+                            if visible_ids.contains(&id) {
+                                Some(id)
+                            } else {
+                                previous_order
+                                    .iter()
+                                    .position(|candidate| *candidate == id)
+                                    .and_then(|index| {
+                                        nearest_survivor(&previous_order, index, &visible_ids)
+                                    })
+                                    .or_else(|| snapshot.ids.first().copied())
+                            }
+                        });
+                        if let Some(selected_id) = selected_id.filter(|id| {
+                            visible_ids.contains(id)
+                                && !loaded_ids.contains(id)
+                                && !fetch_ids.contains(id)
+                        }) {
+                            fetch_ids.push(selected_id);
+                        }
+                        let mut records = Vec::new();
+                        for chunk in fetch_ids.chunks(MAX_QUERY_PAGE_SIZE) {
+                            records.extend(if tab == TabId::Favorites {
+                                favorites.query_by_ids_scoped(&query, chunk, &policy)?
+                            } else {
+                                history.query_by_ids_scoped(&query, chunk, &policy)?
+                            });
+                        }
+                        Ok::<_, HistoryQueryError>((snapshot, fetch_ids, records))
+                    });
+                    Some(Some((
+                        tab,
+                        query_generation,
+                        this.list_order_ids.clone(),
+                        task,
+                    )))
+                }) else {
+                    break;
+                };
+                let Some(next) = next else { break };
+                let Some((tab, query_generation, previous_order, task)) = next else {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(50))
+                        .await;
+                    continue;
+                };
+                let result = task.await;
+                let Ok(retry) = this.update(cx, |this, cx| {
+                    if this.missing_visibility_generation != visibility_generation
+                        || this.query_generation != query_generation
+                        || this.active_tab != tab
+                    {
+                        return false;
+                    }
+                    if this.list_order_ids != previous_order || this.sync_update_blocked() {
+                        return true;
+                    }
+                    match result {
+                        Ok((snapshot, fetch_ids, records)) => {
+                            if snapshot.ids != previous_order {
+                                this.apply_sync_records(&fetch_ids, records, snapshot, cx);
+                                cx.notify();
+                            }
+                            this.missing_visibility_dirty = false;
+                        }
+                        Err(HistoryQueryError::Database(
+                            crate::services::database::DatabaseError::DataSwitching,
+                        )) => {
+                            // The database is closed during a data switch. Keep the
+                            // dirty flag and let the refresh after the switch retry.
+                            tracing::debug!("失效文件列表更新等待数据切换完成");
+                        }
+                        Err(error) => tracing::error!("失效文件列表局部更新失败：{error}"),
+                    }
+                    false
+                }) else {
+                    break;
+                };
+                if !retry {
+                    break;
+                }
+            }
+            let _ = this.update(cx, |this, _| {
+                if this.missing_visibility_generation == visibility_generation {
+                    this.missing_visibility_task = None;
+                }
+            });
+        }));
+    }
+
+    pub(crate) fn retry_missing_visibility(&mut self, cx: &mut Context<Self>) {
+        if let Some(panes) = self.split_panes.clone() {
+            for pane in panes {
+                pane.update(cx, |pane, cx| pane.retry_missing_visibility(cx));
+            }
+            return;
+        }
+        if self.missing_visibility_dirty && self.missing_visibility_task.is_none() {
+            self.refresh_missing_visibility(cx);
+        }
+    }
+
     pub(crate) fn receive_sync_changes(
         &mut self,
         changes: Vec<ReceivedChange>,
@@ -65,6 +255,7 @@ impl MainWindow {
                         let result = task.await;
                         let _ = this.update(cx, |this, cx| {
                             if batch.generation != this.query_generation
+                                || batch.visibility_generation != this.missing_visibility_generation
                                 || batch.tab != this.active_tab
                                 || batch.previous_order != this.list_order_ids
                                 || batch.tag_generation != this.tags_query_generation
@@ -93,7 +284,12 @@ impl MainWindow {
                                         sort_tags(&mut this.tags);
                                     }
                                     if let Some(snapshot) = data.snapshot {
-                                        this.apply_sync_records(&batch.ids, data.records, snapshot);
+                                        this.apply_sync_records(
+                                            &batch.ids,
+                                            data.records,
+                                            snapshot,
+                                            cx,
+                                        );
                                     }
                                     cx.notify();
                                 }
@@ -141,6 +337,7 @@ impl MainWindow {
             changes,
             tab: self.active_tab,
             generation: self.query_generation,
+            visibility_generation: self.missing_visibility_generation,
             tag_generation: self.tags_query_generation,
             previous_order: self.list_order_ids.clone(),
             ids: ids.clone(),
@@ -158,7 +355,7 @@ impl MainWindow {
             } else if tab == TabId::Favorites {
                 Some(
                     favorites
-                        .ordered_snapshot(&query)
+                        .ordered_snapshot_scoped(&query, &policy)
                         .map_err(|e| e.to_string())?,
                 )
             } else {
@@ -172,7 +369,7 @@ impl MainWindow {
             for chunk in ids.chunks(MAX_QUERY_PAGE_SIZE) {
                 records.extend(if tab == TabId::Favorites {
                     favorites
-                        .query_by_ids(&query, chunk)
+                        .query_by_ids_scoped(&query, chunk, &policy)
                         .map_err(|e| e.to_string())?
                 } else {
                     history
@@ -199,9 +396,27 @@ impl MainWindow {
         changed_ids: &[HistoryItemId],
         records: Vec<HistoryListRecord>,
         snapshot: ListOrderSnapshot,
+        cx: &mut Context<Self>,
     ) {
         let changed_ids: HashSet<_> = changed_ids.iter().copied().collect();
         let visible_ids: HashSet<_> = snapshot.ids.iter().copied().collect();
+        if self.preview_hover_source.is_some_and(|source| {
+            let id = match source {
+                PreviewSource::History(id) | PreviewSource::Favorite(id) => id,
+            };
+            !visible_ids.contains(&id) || changed_ids.contains(&id)
+        }) {
+            self.cancel_hover_preview(cx);
+        }
+        let order_changed = self.list_order_ids != snapshot.ids;
+        let selected_position = self
+            .selected_item_id
+            .and_then(|id| self.list_order_positions.get(&id).copied());
+        let selected_fallback = selected_position
+            .and_then(|index| nearest_survivor(&self.list_order_ids, index, &visible_ids));
+        if order_changed {
+            self.pending_list_anchor = self.visible_list_anchor(Some(&visible_ids));
+        }
         let removed_items: Vec<_> = self
             .loaded_items
             .values()
@@ -243,12 +458,60 @@ impl MainWindow {
         self.has_more_items = self.loaded_items.len() < self.total_item_count;
         refresh_shortcuts_for_order(&mut self.items, &self.list_order_ids);
         self.sync_loaded_shortcuts();
+        if self
+            .selected_item_id
+            .is_some_and(|id| !visible_ids.contains(&id))
+        {
+            self.selected_item_id =
+                selected_fallback.or_else(|| self.list_order_ids.first().copied());
+        }
         self.reconcile_selection();
         self.list_status = if self.total_item_count == 0 {
             ListStatus::Empty
         } else {
             ListStatus::Ready
         };
-        self.invalidate_list_layout_cache();
+        if order_changed {
+            self.list_layout_generation = self.list_layout_generation.wrapping_add(1);
+            self.list_layout_cache = None;
+            self.list_smooth_scroll.reset();
+        } else {
+            self.invalidate_list_layout_cache();
+        }
+    }
+
+    fn visible_list_anchor(
+        &self,
+        visible_ids: Option<&HashSet<HistoryItemId>>,
+    ) -> Option<PendingListAnchor> {
+        let pending = self.pending_list_anchor.as_ref();
+        let layout_order_ids = pending
+            .map(|anchor| anchor.layout_order_ids.clone())
+            .unwrap_or_else(|| self.list_order_ids.clone());
+        let horizontal = pending
+            .map(|anchor| anchor.horizontal)
+            .unwrap_or(self.last_rendered_list_horizontal);
+        let axis_offset = pending.map(|anchor| anchor.axis_offset).unwrap_or_else(|| {
+            let offset = self.list_scroll_handle.offset();
+            if horizontal { offset.x } else { offset.y }
+        });
+        let leading_padding = pending
+            .map(|anchor| anchor.leading_padding)
+            .unwrap_or(self.last_rendered_list_leading_padding);
+        let (history_id, origin) = anchor_in_layout(
+            &layout_order_ids,
+            visible_ids,
+            axis_offset,
+            leading_padding,
+            |index| self.list_scroll_handle.item_offset(index),
+        )?;
+        Some(PendingListAnchor {
+            history_id,
+            screen_axis: origin + axis_offset,
+            horizontal,
+            layout_order_ids,
+            axis_offset,
+            leading_padding,
+        })
     }
 }

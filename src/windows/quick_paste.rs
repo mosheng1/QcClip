@@ -14,6 +14,7 @@ use crate::{
         paste::PasteService,
     },
     state_runtime::PersistedQuickPasteTab,
+    windows::list_order::nearest_survivor,
 };
 use gpui::prelude::*;
 use gpui::{
@@ -58,6 +59,18 @@ pub(crate) struct QuickPasteWindowService {
 impl Global for QuickPasteWindowService {}
 
 impl QuickPasteWindowService {
+    pub(crate) fn refresh_missing_files(cx: &mut App, changed: bool) {
+        let window = cx.try_global::<Self>().and_then(|service| service.window);
+        if let Some(window) = window {
+            let _ = window.update(cx, |view, window, cx| {
+                view.missing_visibility_dirty |= changed;
+                if view.missing_visibility_dirty {
+                    view.reload_source(view.source, true, window, cx);
+                }
+            });
+        }
+    }
+
     pub(crate) fn install(
         history_repository: HistoryRepository,
         favorite_repository: FavoriteRepository,
@@ -137,6 +150,7 @@ impl QuickPasteWindowService {
         if !should_show {
             return;
         }
+        crate::windows::main::MainWindowService::request_missing_scan(cx);
 
         let (repository, favorite_repository, image_preview_service) =
             cx.read_global::<Self, _>(|service, _| {
@@ -171,7 +185,9 @@ impl QuickPasteWindowService {
             PersistedQuickPasteTab::Clipboard => {
                 repository.ordered_ids_scoped(&query, &history_config)
             }
-            PersistedQuickPasteTab::Favorites => favorite_repository.ordered_ids(&query),
+            PersistedQuickPasteTab::Favorites => {
+                favorite_repository.ordered_ids_scoped(&query, &history_config)
+            }
         };
         let list_ids = match list_ids {
             Ok(list_ids) => list_ids,
@@ -219,7 +235,7 @@ impl QuickPasteWindowService {
                 return;
             }
         };
-        let initial_index_by_id = initial_ids
+        let initial_index_by_id = list_ids
             .iter()
             .enumerate()
             .map(|(index, history_id)| (*history_id, index))
@@ -544,6 +560,7 @@ struct QuickPasteWindowView {
     animation_generation: u64,
     closing: bool,
     source_generation: u64,
+    missing_visibility_dirty: bool,
 }
 
 #[derive(Clone)]
@@ -608,6 +625,7 @@ impl QuickPasteWindowView {
             animation_generation: 0,
             closing: false,
             source_generation: 0,
+            missing_visibility_dirty: false,
         }
     }
 
@@ -842,15 +860,35 @@ impl QuickPasteWindowView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.source == source || self.closing {
+        if self.source == source {
             return;
         }
+        self.reload_source(source, false, window, cx);
+    }
+
+    fn reload_source(
+        &mut self,
+        source: PersistedQuickPasteTab,
+        preserve_selection: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.closing {
+            return;
+        }
+        let history_config = crate::config_runtime::history_config(cx);
+        let selected_id = preserve_selection
+            .then(|| self.selected_list_id())
+            .flatten();
+        let selected_index = self.selected_index;
 
         let list_ids = match source {
             PersistedQuickPasteTab::Clipboard => self
                 .history_repository
-                .ordered_ids_scoped(&self.query, &self.history_config),
-            PersistedQuickPasteTab::Favorites => self.favorite_repository.ordered_ids(&self.query),
+                .ordered_ids_scoped(&self.query, &history_config),
+            PersistedQuickPasteTab::Favorites => self
+                .favorite_repository
+                .ordered_ids_scoped(&self.query, &history_config),
         };
         let list_ids = match list_ids {
             Ok(list_ids) => list_ids,
@@ -859,10 +897,24 @@ impl QuickPasteWindowView {
                 return;
             }
         };
+        if preserve_selection && list_ids == self.list_ids {
+            self.missing_visibility_dirty = false;
+            return;
+        }
+        let previous_records = preserve_selection
+            .then(|| {
+                self.records
+                    .values()
+                    .cloned()
+                    .map(|record| (record.history_id, record))
+                    .collect::<HashMap<_, _>>()
+            })
+            .unwrap_or_default();
         let initial_ids = list_ids
             .iter()
             .copied()
             .take(self.configured_rows)
+            .filter(|id| !previous_records.contains_key(id))
             .collect::<Vec<_>>();
         let initial_query = HistoryQuery {
             load_image_sources: false,
@@ -873,7 +925,7 @@ impl QuickPasteWindowView {
             &self.history_repository,
             &self.favorite_repository,
             &initial_query,
-            &self.history_config,
+            &history_config,
             &initial_ids,
         ) {
             Ok(records) => records,
@@ -882,32 +934,67 @@ impl QuickPasteWindowView {
                 return;
             }
         };
-        let initial_index_by_id = initial_ids
+        let initial_index_by_id = list_ids
             .iter()
             .enumerate()
             .map(|(index, list_id)| (*list_id, index))
             .collect::<HashMap<_, _>>();
-        let records = initial_records
-            .into_iter()
-            .filter_map(|record| {
-                let index = *initial_index_by_id.get(&record.history_id)?;
-                Some((index, QuickPasteRecord::from_initial(record)))
+        let mut records = list_ids
+            .iter()
+            .enumerate()
+            .filter_map(|(index, id)| {
+                previous_records
+                    .get(id)
+                    .cloned()
+                    .map(|record| (index, record))
             })
             .collect::<HashMap<_, _>>();
+        records.extend(
+            initial_records
+                .into_iter()
+                .filter_map(|record| {
+                    let index = *initial_index_by_id.get(&record.history_id)?;
+                    Some((index, QuickPasteRecord::from_initial(record)))
+                })
+                .collect::<HashMap<_, _>>(),
+        );
 
-        let mut persisted_state = crate::state_runtime::state(cx);
-        persisted_state.main_window.quick_paste_tab = source;
-        if let Err(error) = crate::state_runtime::set_state(persisted_state, cx) {
-            tracing::error!("保存便捷粘贴列表选项失败：{error}");
+        if !preserve_selection {
+            let mut persisted_state = crate::state_runtime::state(cx);
+            persisted_state.main_window.quick_paste_tab = source;
+            if let Err(error) = crate::state_runtime::set_state(persisted_state, cx) {
+                tracing::error!("保存便捷粘贴列表选项失败：{error}");
+            }
         }
 
+        let previous_list_ids = self.list_ids.clone();
         self.source = source;
+        self.missing_visibility_dirty = false;
+        self.history_config = history_config;
         self.list_ids = list_ids;
         self.records = records;
         self.loading_preview_indices.clear();
         self.loading_image_indices.clear();
         self.source_generation = self.source_generation.wrapping_add(1);
-        self.selected_index = 0;
+        self.selected_index = if preserve_selection {
+            let anchor_index = selected_id
+                .and_then(|id| {
+                    previous_list_ids
+                        .iter()
+                        .position(|candidate| *candidate == id)
+                })
+                .unwrap_or(selected_index);
+            selected_id
+                .and_then(|id| self.list_ids.iter().position(|candidate| *candidate == id))
+                .or_else(|| {
+                    let visible_ids: HashSet<_> = self.list_ids.iter().copied().collect();
+                    nearest_survivor(&previous_list_ids, anchor_index, &visible_ids)
+                        .and_then(|id| self.list_ids.iter().position(|candidate| *candidate == id))
+                })
+                .unwrap_or_else(|| selected_index.min(self.list_ids.len().saturating_sub(1)))
+        } else {
+            0
+        };
         self.visible_rows = self
             .list_ids
             .len()
@@ -1689,7 +1776,9 @@ fn query_list_records(
         PersistedQuickPasteTab::Clipboard => {
             history_repository.query_by_ids_scoped(query, list_ids, history_config)
         }
-        PersistedQuickPasteTab::Favorites => favorite_repository.query_by_ids(query, list_ids),
+        PersistedQuickPasteTab::Favorites => {
+            favorite_repository.query_by_ids_scoped(query, list_ids, history_config)
+        }
     }
 }
 
@@ -1800,4 +1889,17 @@ fn content_kind_label(kind: ContentKind, translator: &crate::i18n::Translator) -
         ContentKind::Custom | ContentKind::Unknown => "quick_paste.kind.other",
     };
     translator.translate(key)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hidden_selected_item_uses_nearest_survivor() {
+        let previous = vec![1, 2, 3, 4, 5];
+        let visible = HashSet::from([1, 4, 5]);
+        assert_eq!(nearest_survivor(&previous, 2, &visible), Some(4));
+        assert_eq!(nearest_survivor(&previous, 1, &visible), Some(1));
+    }
 }

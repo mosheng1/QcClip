@@ -152,6 +152,13 @@ fn read_application_filter(
 
 fn read_history(object: &Map<String, Value>, warnings: &mut Vec<String>) -> HistoryConfig {
     let default = HistoryConfig::default();
+    let move_recovered_missing_files_to_top = read_field(
+        object,
+        "moveRecoveredMissingFilesToTop",
+        "history.moveRecoveredMissingFilesToTop",
+        default.move_recovered_missing_files_to_top,
+        warnings,
+    );
     HistoryConfig {
         retention_days: read_field(
             object,
@@ -174,6 +181,14 @@ fn read_history(object: &Map<String, Value>, warnings: &mut Vec<String>) -> Hist
             default.cleanup_on_startup,
             warnings,
         ),
+        auto_hide_missing_files: read_field(
+            object,
+            "autoHideMissingFiles",
+            "history.autoHideMissingFiles",
+            default.auto_hide_missing_files,
+            warnings,
+        ),
+        move_recovered_missing_files_to_top,
     }
 }
 
@@ -1145,6 +1160,30 @@ mod tests {
         let invalid = super::from_str(r#"{"history":{"cleanupOnStartup":"invalid"}}"#)
             .expect("无法读取无效配置");
         assert!(!invalid.config.history.cleanup_on_startup);
+        assert_eq!(invalid.warnings.len(), 1);
+    }
+
+    #[test]
+    fn auto_hide_missing_files_defaults_off_and_round_trips() {
+        for content in ["{}", r#"{"history":{"retentionDays":7}}"#] {
+            let loaded = super::from_str(content).unwrap();
+            assert!(!loaded.config.history.auto_hide_missing_files);
+            assert!(!loaded.config.history.move_recovered_missing_files_to_top);
+        }
+        let loaded = super::from_str(r#"{"history":{"autoHideMissingFiles":true}}"#).unwrap();
+        assert!(loaded.config.history.auto_hide_missing_files);
+        let loaded = super::from_str(
+            r#"{"history":{"autoHideMissingFiles":true,"moveRecoveredMissingFilesToTop":true}}"#,
+        )
+        .unwrap();
+        assert!(loaded.config.history.move_recovered_missing_files_to_top);
+        let encoded = serde_json::to_string(&loaded.config).unwrap();
+        let reloaded = super::from_str(&encoded).unwrap().config;
+        assert!(reloaded.history.auto_hide_missing_files);
+        assert!(reloaded.history.move_recovered_missing_files_to_top);
+        let invalid =
+            super::from_str(r#"{"history":{"moveRecoveredMissingFilesToTop":"invalid"}}"#).unwrap();
+        assert!(!invalid.config.history.move_recovered_missing_files_to_top);
         assert_eq!(invalid.warnings.len(), 1);
     }
 

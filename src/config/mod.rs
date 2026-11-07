@@ -925,6 +925,9 @@ pub struct HistoryConfig {
     pub retention_days: Option<u32>,
     pub max_items: Option<u32>,
     pub cleanup_on_startup: bool,
+    pub auto_hide_missing_files: bool,
+    /// 失效图片或文件恢复后，将其移到主窗口历史列表和便捷粘贴首行。
+    pub move_recovered_missing_files_to_top: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1126,6 +1129,8 @@ impl Default for HistoryConfig {
             retention_days: None,
             max_items: None,
             cleanup_on_startup: false,
+            auto_hide_missing_files: false,
+            move_recovered_missing_files_to_top: false,
         }
     }
 }

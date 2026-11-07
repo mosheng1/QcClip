@@ -14,7 +14,6 @@ pub(super) use history::ClipboardListenerToggleResult;
 
 use std::{
     cell::RefCell,
-    cmp::Ordering,
     collections::{HashMap, HashSet, VecDeque},
     ops::Range,
     path::{Path, PathBuf},
@@ -70,6 +69,30 @@ const MAX_HTML_IMAGE_PATHS_PER_RANGE: usize = 64;
 const SEARCH_DEBOUNCE_DELAY: Duration = Duration::from_millis(200);
 const TAGS_PANEL_CLOSE_DELAY: Duration = Duration::from_millis(150);
 const WINDOW_SIZE_PERSIST_DELAY: Duration = Duration::from_millis(100);
+
+pub(crate) struct PendingListAnchor {
+    pub(crate) history_id: HistoryItemId,
+    pub(crate) screen_axis: Pixels,
+    pub(crate) horizontal: bool,
+    pub(crate) layout_order_ids: Vec<HistoryItemId>,
+    pub(crate) axis_offset: Pixels,
+    pub(crate) leading_padding: Pixels,
+}
+
+impl PendingListAnchor {
+    pub(crate) fn restored_offset(
+        &self,
+        mut offset: Point<Pixels>,
+        new_origin: Pixels,
+    ) -> Point<Pixels> {
+        if self.horizontal {
+            offset.x = self.screen_axis - new_origin;
+        } else {
+            offset.y = self.screen_axis - new_origin;
+        }
+        offset
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ListDropTarget {
@@ -247,6 +270,12 @@ pub struct MainWindow {
     pub(super) tab_bar_hover_task: Option<Task<()>>,
     pub(super) tab_bar_hover_hitbox: Option<(crate::config::TabBarButton, gpui::HitboxId)>,
     pub query_generation: u64,
+    pub(super) missing_visibility_generation: u64,
+    pub(super) missing_visibility_task: Option<Task<()>>,
+    pub(crate) pending_list_anchor: Option<PendingListAnchor>,
+    pub(crate) last_rendered_list_horizontal: bool,
+    pub(crate) last_rendered_list_leading_padding: Pixels,
+    pub(super) missing_visibility_dirty: bool,
     pub has_more_items: bool,
     pub is_loading_more: bool,
     pub(super) pending_selection_index: Option<usize>,
@@ -508,6 +537,12 @@ impl MainWindow {
             tab_bar_hover_task: None,
             tab_bar_hover_hitbox: None,
             query_generation: 0,
+            missing_visibility_generation: 0,
+            missing_visibility_task: None,
+            pending_list_anchor: None,
+            last_rendered_list_horizontal: false,
+            last_rendered_list_leading_padding: px(0.0),
+            missing_visibility_dirty: false,
             has_more_items: false,
             is_loading_more: false,
             pending_selection_index: None,
@@ -680,22 +715,6 @@ fn split_page(
     let has_more = records.len() > page_size;
     records.truncate(page_size);
     (records, has_more)
-}
-
-fn compare_list_items(left: &ClipboardListItem, right: &ClipboardListItem) -> Ordering {
-    right
-        .is_pinned
-        .cmp(&left.is_pinned)
-        .then_with(|| right.sort_order.cmp(&left.sort_order))
-        .then_with(|| right.last_seen_at.cmp(&left.last_seen_at))
-        .then_with(|| right.history_id.cmp(&left.history_id))
-}
-
-fn insert_sorted_item(items: &mut Vec<ClipboardListItem>, item: ClipboardListItem) {
-    let index = items
-        .binary_search_by(|existing| compare_list_items(existing, &item))
-        .unwrap_or_else(|index| index);
-    items.insert(index, item);
 }
 
 #[derive(Clone, Copy, Debug)]

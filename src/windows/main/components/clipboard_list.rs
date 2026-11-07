@@ -4,7 +4,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use std::{
     cell::{Cell, RefCell},
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     ops::Range,
     path::PathBuf,
     rc::Rc,
@@ -29,6 +29,7 @@ use gpui_component::{
 };
 
 use super::tags_panel::TagDrag;
+use crate::windows::list_order::nearest_survivor;
 
 #[cfg(target_os = "windows")]
 use crate::platform::drag_preview::DragPreviewService;
@@ -53,7 +54,7 @@ use crate::{
     ui::{hover_icon, html as html_preview, icon},
     windows::main::state::{
         FileListKey, ListDropTarget, ListItemLoadAnimation, ListLayoutCache, ListLayoutCacheKey,
-        ListReorderAnimation, ListStatus, MainWindow, display_priority_roles,
+        ListReorderAnimation, ListStatus, MainWindow, PendingListAnchor, display_priority_roles,
     },
     windows::main::{
         MainWindowService,
@@ -289,6 +290,9 @@ pub fn render(
     heat_scrollbar: &crate::windows::main::state::HeatScrollbarState,
     adaptive_item_heights: &mut HashMap<HistoryItemId, Pixels>,
     list_layout_cache: &mut Option<ListLayoutCache>,
+    pending_list_anchor: &mut Option<PendingListAnchor>,
+    last_rendered_list_horizontal: &mut bool,
+    last_rendered_list_leading_padding: &mut Pixels,
     list_layout_generation: u64,
     query_generation: u64,
     total_item_count: usize,
@@ -327,6 +331,9 @@ pub fn render(
             heat_scrollbar,
             adaptive_item_heights,
             list_layout_cache,
+            pending_list_anchor,
+            last_rendered_list_horizontal,
+            last_rendered_list_leading_padding,
             list_layout_generation,
             query_generation,
             total_item_count,
@@ -514,6 +521,9 @@ fn render_rows(
     heat_scrollbar: &crate::windows::main::state::HeatScrollbarState,
     adaptive_item_heights: &mut HashMap<HistoryItemId, Pixels>,
     list_layout_cache: &mut Option<ListLayoutCache>,
+    pending_list_anchor: &mut Option<PendingListAnchor>,
+    last_rendered_list_horizontal: &mut bool,
+    last_rendered_list_leading_padding: &mut Pixels,
     list_layout_generation: u64,
     query_generation: u64,
     total_item_count: usize,
@@ -535,6 +545,7 @@ fn render_rows(
     let hover_allowed = window.is_window_hovered() && MenuService::hover_animation_allowed(cx);
     let clipboard_config = config_runtime::clipboard_config(cx);
     let horizontal = clipboard_config.window_position.uses_horizontal_list();
+    *last_rendered_list_horizontal = horizontal;
     let item_display = config_runtime::appearance_config(cx).item_display;
     let show_horizontal_header = horizontal && horizontal_header_enabled(&item_display);
     let viewport_height = scroll_handle.bounds().size.height;
@@ -550,6 +561,11 @@ fn render_rows(
         )
     } else {
         metrics
+    };
+    *last_rendered_list_leading_padding = if list_item_style == ListItemStyle::Card && !horizontal {
+        metrics.card_vertical_inset
+    } else {
+        px(0.0)
     };
     let measured_width = scroll_handle.bounds().size.width;
     let viewport_width = if measured_width > px(0.0) {
@@ -615,9 +631,42 @@ fn render_rows(
                 || cache.key.show_info_row != layout_key.show_info_row
                 || cache.key.show_horizontal_header != layout_key.show_horizontal_header)
     });
+    let anchor_index = pending_list_anchor.as_ref().and_then(|anchor| {
+        if anchor.horizontal != horizontal {
+            return None;
+        }
+        list_order_ids
+            .iter()
+            .position(|id| *id == anchor.history_id)
+            .or_else(|| {
+                let old_index = anchor
+                    .layout_order_ids
+                    .iter()
+                    .position(|id| *id == anchor.history_id)?;
+                let visible_ids: HashSet<_> = list_order_ids.iter().copied().collect();
+                nearest_survivor(&anchor.layout_order_ids, old_index, &visible_ids)
+                    .and_then(|id| list_order_ids.iter().position(|candidate| *candidate == id))
+            })
+    });
+    if pending_list_anchor
+        .as_ref()
+        .is_some_and(|anchor| anchor.horizontal == horizontal)
+        && anchor_index.is_none()
+    {
+        *pending_list_anchor = None;
+    }
+    let needs_anchor = pending_list_anchor
+        .as_ref()
+        .is_some_and(|anchor| anchor.horizontal == horizontal);
+    let rebuild_for_anchor = needs_anchor && anchor_index.is_some();
+    let mut anchor_origin = None;
     let mut build_layout = || {
+        let mut origin = px(0.0);
         let sizes = (0..total_item_count)
             .map(|index| {
+                if Some(index) == anchor_index {
+                    anchor_origin = Some(origin);
+                }
                 let history_id = list_order_ids.get(index).copied();
                 let measured_row_height = history_id
                     .and_then(|history_id| loaded_items.get(&history_id))
@@ -643,6 +692,7 @@ fn render_rows(
                     metrics.row_height,
                     adaptive_item_heights,
                 );
+                origin += if horizontal { list_width } else { row_height };
                 size(list_width, row_height)
             })
             .collect::<Vec<_>>();
@@ -654,8 +704,17 @@ fn render_rows(
     if list_layout_cache
         .as_ref()
         .is_none_or(|cache| cache.key != layout_key)
+        || rebuild_for_anchor
     {
         *list_layout_cache = Some(build_layout());
+    }
+    drop(build_layout);
+    if let Some(anchor) = pending_list_anchor.as_ref()
+        && anchor.horizontal == horizontal
+        && let Some(origin) = anchor_origin
+    {
+        let anchor = pending_list_anchor.take().unwrap();
+        scroll_handle.set_offset(anchor.restored_offset(scroll_handle.offset(), origin));
     }
     let layout_cache = list_layout_cache
         .as_ref()

@@ -360,7 +360,9 @@ impl MainWindow {
         let task = cx.background_spawn(async move {
             let result = if active_tab == TabId::Favorites {
                 favorite_id
-                    .map(|favorite_id| favorite_repository.find_by_id(favorite_id, &query))
+                    .map(|favorite_id| {
+                        favorite_repository.find_by_id_scoped(favorite_id, &query, &policy)
+                    })
                     .unwrap_or(Ok(None))
             } else {
                 history_repository.find_by_id_scoped(history_id, &query, &policy)
@@ -383,7 +385,11 @@ impl MainWindow {
                     }
                     let item = match result {
                         Ok(Some(item)) => item,
-                        _ => fallback_item,
+                        Ok(None) => {
+                            this.cancel_hover_preview(cx);
+                            return;
+                        }
+                        Err(_) => fallback_item,
                     };
                     PreviewWindowService::show(
                         item,

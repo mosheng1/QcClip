@@ -7,6 +7,20 @@ use std::{
 };
 use thiserror::Error;
 
+#[cfg(test)]
+static FAIL_NEXT_VISIBILITY_QUERY: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(test)]
+pub(crate) struct VisibilityFailureGuard;
+
+#[cfg(test)]
+impl Drop for VisibilityFailureGuard {
+    fn drop(&mut self) {
+        FAIL_NEXT_VISIBILITY_QUERY.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 use crate::config::HistoryConfig;
 use crate::domain::clipboard::{ClipboardItemId, ContentKind, FormatPreview, HistoryItemId};
 use crate::platform::image_temp_file::remove_openable_image_files;
@@ -80,6 +94,115 @@ pub struct HistoryRetentionCounts {
 }
 
 impl HistoryRepository {
+    pub(crate) fn supports_missing_files(&self) -> bool {
+        self.database.has_hidden_items_table()
+    }
+
+    pub(crate) fn scan_missing_files(
+        &self,
+    ) -> Result<crate::services::missing_scan::MissingScanOutput, super::DatabaseError> {
+        crate::services::missing_scan::scan(&self.database, &self.blob_store)
+    }
+
+    /// Replace the hidden missing-item set with the last scan result. Recovery is
+    /// only reported for rows that left the set with a positive filesystem
+    /// confirmation; an item that merely became unknown is never promoted.
+    /// `move_recovered` promotes those confirmed recovery rows to the top of the
+    /// unpinned list inside the same transaction.
+    pub(crate) fn apply_missing_scan(
+        &self,
+        scan: crate::services::missing_scan::MissingScanOutput,
+        move_recovered: bool,
+    ) -> Result<super::missing_files::MissingFilesUpdate, super::missing_files::MissingFilesError>
+    {
+        if !self.database.has_hidden_items_table() {
+            return Ok(super::missing_files::MissingFilesUpdate::default());
+        }
+        let mut connection = self.database.connect_write()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let previous = {
+            let mut statement =
+                transaction.prepare("SELECT item_id FROM hidden_missing_items ORDER BY item_id")?;
+            statement
+                .query_map([], |row| row.get::<_, ClipboardItemId>(0))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let hidden: HashSet<ClipboardItemId> = scan.hidden.iter().copied().collect();
+        let changed = previous.iter().copied().collect::<HashSet<_>>() != hidden;
+        if changed {
+            transaction.execute("DELETE FROM hidden_missing_items", [])?;
+            let mut insert = transaction.prepare(
+                "INSERT OR IGNORE INTO hidden_missing_items (item_id)
+                 SELECT id FROM clipboard_items WHERE id = ?1",
+            )?;
+            for item_id in &scan.hidden {
+                insert.execute([*item_id])?;
+            }
+        }
+        let confirmed: HashSet<_> = scan.confirmed_present.iter().copied().collect();
+        let recovered: Vec<ClipboardItemId> = previous
+            .into_iter()
+            .filter(|item_id| !hidden.contains(item_id) && confirmed.contains(item_id))
+            .collect();
+        if move_recovered {
+            for item_id in &recovered {
+                move_item_to_top_in_transaction(&transaction, *item_id)?;
+            }
+        }
+        transaction.commit()?;
+        Ok(super::missing_files::MissingFilesUpdate { changed, recovered })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn publish_missing_files_with_recovery(
+        &self,
+        scan: crate::services::missing_scan::MissingScanOutput,
+        move_recovered: bool,
+    ) -> super::missing_files::MissingFilesUpdate {
+        self.apply_missing_scan(scan, move_recovered).unwrap()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn publish_missing_files(
+        &self,
+        scan: crate::services::missing_scan::MissingScanOutput,
+    ) -> bool {
+        self.apply_missing_scan(scan, false).unwrap().changed
+    }
+
+    #[cfg(test)]
+    pub(crate) fn seed_missing_files(&self, hidden: Vec<ClipboardItemId>) {
+        let connection = self.database.connect_write().unwrap();
+        connection
+            .execute("DELETE FROM hidden_missing_items", [])
+            .unwrap();
+        let mut insert = connection
+            .prepare("INSERT INTO hidden_missing_items (item_id) VALUES (?1)")
+            .unwrap();
+        for item_id in hidden {
+            insert.execute([item_id]).unwrap();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hidden_missing_files_len(&self) -> usize {
+        let count: i64 = self
+            .database
+            .connect_read()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM hidden_missing_items", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        usize::try_from(count).unwrap_or(0)
+    }
+
+    pub(crate) fn clear_missing_files(
+        &self,
+    ) -> Result<bool, super::missing_files::MissingFilesError> {
+        self.database.clear_hidden_missing_items()
+    }
+
     pub fn note_repository(&self) -> super::NoteRepository {
         super::NoteRepository::new(self.database.clone())
     }
@@ -102,6 +225,39 @@ impl HistoryRepository {
                 [item_id],
                 |row| row.get(0),
             )
+            .optional()
+            .map_err(HistoryQueryError::from)
+    }
+
+    /// First visible history item in list order, applying retention and hidden policy.
+    pub fn first_item_id(
+        &self,
+        policy: &HistoryConfig,
+    ) -> Result<Option<ClipboardItemId>, HistoryQueryError> {
+        let connection = self.database.connect()?;
+        let mut conditions = vec!["i.capture_state = 'ready'".to_owned()];
+        let mut parameters = Vec::new();
+        append_history_scope_filter(&mut conditions, &mut parameters, Some(policy));
+        super::missing_files::append_hidden_filter(
+            &mut conditions,
+            &self.database,
+            Some(policy),
+            "h.item_id",
+        );
+        let sql = format!(
+            "SELECT h.item_id
+             FROM clipboard_history AS h
+             JOIN clipboard_items AS i ON i.id = h.item_id
+             WHERE {}
+             ORDER BY h.is_pinned DESC,
+                      h.sort_order DESC,
+                      h.last_seen_at DESC,
+                      h.id DESC
+             LIMIT 1",
+            conditions.join(" AND ")
+        );
+        connection
+            .query_row(&sql, params_from_iter(parameters.iter()), |row| row.get(0))
             .optional()
             .map_err(HistoryQueryError::from)
     }
@@ -144,7 +300,19 @@ impl HistoryRepository {
         query: &HistoryQuery,
         policy: &HistoryConfig,
     ) -> Result<ListOrderSnapshot, HistoryQueryError> {
+        #[cfg(test)]
+        if FAIL_NEXT_VISIBILITY_QUERY.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            return Err(HistoryQueryError::InvalidNonNegativeValue(
+                "injected visibility query failure".to_owned(),
+            ));
+        }
         self.query_order(query, Some(policy), true)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_visibility_query(&self) -> VisibilityFailureGuard {
+        FAIL_NEXT_VISIBILITY_QUERY.store(true, std::sync::atomic::Ordering::SeqCst);
+        VisibilityFailureGuard
     }
 
     fn query_order(
@@ -207,6 +375,12 @@ impl HistoryRepository {
         }
         append_history_scope_filter(&mut conditions, &mut parameters, policy);
         append_tag_filter_for_item(&mut conditions, &mut parameters, query, "h.item_id");
+        super::missing_files::append_hidden_filter(
+            &mut conditions,
+            &self.database,
+            policy,
+            "h.item_id",
+        );
 
         let item_join = needs_item_join
             .then_some("JOIN clipboard_items AS i ON i.id = h.item_id\n             ")
@@ -290,6 +464,12 @@ impl HistoryRepository {
         }
         append_history_scope_filter(&mut conditions, &mut parameters, policy);
         append_tag_filter(&mut conditions, &mut parameters, query);
+        super::missing_files::append_hidden_filter(
+            &mut conditions,
+            &self.database,
+            policy,
+            "h.item_id",
+        );
 
         let sql = format!(
             "SELECT COUNT(*)
@@ -332,6 +512,22 @@ impl HistoryRepository {
     }
 
     pub fn pinned_count(&self, query: &HistoryQuery) -> Result<usize, HistoryQueryError> {
+        self.pinned_count_with_policy(query, None)
+    }
+
+    pub fn pinned_count_scoped(
+        &self,
+        query: &HistoryQuery,
+        policy: &HistoryConfig,
+    ) -> Result<usize, HistoryQueryError> {
+        self.pinned_count_with_policy(query, Some(policy))
+    }
+
+    fn pinned_count_with_policy(
+        &self,
+        query: &HistoryQuery,
+        policy: Option<&HistoryConfig>,
+    ) -> Result<usize, HistoryQueryError> {
         let connection = self.database.connect()?;
         let mut conditions = vec![
             "i.capture_state = 'ready'".to_owned(),
@@ -369,6 +565,12 @@ impl HistoryRepository {
             conditions.push("h.paste_count > 0".to_owned());
         }
         append_tag_filter(&mut conditions, &mut parameters, query);
+        super::missing_files::append_hidden_filter(
+            &mut conditions,
+            &self.database,
+            policy,
+            "h.item_id",
+        );
         let sql = format!(
             "SELECT COUNT(*)
              FROM clipboard_history AS h
@@ -561,44 +763,9 @@ impl HistoryRepository {
     pub fn move_item_to_top(&self, item_id: ClipboardItemId) -> Result<bool, HistoryReorderError> {
         let mut connection = self.database.connect_write()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let source = transaction
-            .query_row(
-                "SELECT id, sort_order FROM clipboard_history
-                 WHERE item_id = ?1 AND is_pinned = 0",
-                [item_id],
-                |row| Ok((row.get::<_, HistoryItemId>(0)?, row.get::<_, i64>(1)?)),
-            )
-            .optional()?;
-        let Some((history_id, source_order)) = source else {
-            transaction.commit()?;
-            return Ok(false);
-        };
-        let target = transaction
-            .query_row(
-                "SELECT id, sort_order FROM clipboard_history
-                 WHERE is_pinned = 0 ORDER BY sort_order DESC, id DESC LIMIT 1",
-                [],
-                |row| Ok((row.get::<_, HistoryItemId>(0)?, row.get::<_, i64>(1)?)),
-            )
-            .optional()?;
-        let Some((target_history_id, target_order)) = target else {
-            transaction.commit()?;
-            return Ok(false);
-        };
-        if history_id == target_history_id {
-            transaction.commit()?;
-            return Ok(false);
-        }
-        shift_history_order(
-            &transaction,
-            false,
-            history_id,
-            target_history_id,
-            source_order,
-            target_order,
-        )?;
+        let moved = move_item_to_top_in_transaction(&transaction, item_id)?;
         transaction.commit()?;
-        Ok(true)
+        Ok(moved)
     }
 
     pub fn set_pinned(
@@ -877,6 +1044,12 @@ impl HistoryRepository {
         }
         append_history_scope_filter(&mut conditions, &mut parameters, policy);
         append_tag_filter(&mut conditions, &mut parameters, query);
+        super::missing_files::append_hidden_filter(
+            &mut conditions,
+            &self.database,
+            policy,
+            "h.item_id",
+        );
         if let Some(history_id) = history_id {
             conditions.push("h.id = ?".to_owned());
             parameters.push(Value::Integer(history_id));
@@ -1390,6 +1563,46 @@ fn load_unreferenced_blobs(
         .collect()
 }
 
+fn move_item_to_top_in_transaction(
+    transaction: &Transaction<'_>,
+    item_id: ClipboardItemId,
+) -> Result<bool, HistoryReorderError> {
+    let source = transaction
+        .query_row(
+            "SELECT id, sort_order FROM clipboard_history
+             WHERE item_id = ?1 AND is_pinned = 0",
+            [item_id],
+            |row| Ok((row.get::<_, HistoryItemId>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .optional()?;
+    let Some((history_id, source_order)) = source else {
+        return Ok(false);
+    };
+    let target = transaction
+        .query_row(
+            "SELECT id, sort_order FROM clipboard_history
+             WHERE is_pinned = 0 ORDER BY sort_order DESC, id DESC LIMIT 1",
+            [],
+            |row| Ok((row.get::<_, HistoryItemId>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .optional()?;
+    let Some((target_history_id, target_order)) = target else {
+        return Ok(false);
+    };
+    if history_id == target_history_id {
+        return Ok(false);
+    }
+    shift_history_order(
+        transaction,
+        false,
+        history_id,
+        target_history_id,
+        source_order,
+        target_order,
+    )?;
+    Ok(true)
+}
+
 fn shift_history_order(
     transaction: &Transaction<'_>,
     is_pinned: bool,
@@ -1605,6 +1818,1105 @@ mod tests {
             preview_candidate: Some("1 个文件 · test.txt".to_owned()),
             source_application: SourceApplication::default(),
         }
+    }
+
+    fn file_list_capture(paths: &[&std::path::Path]) -> CapturedClipboard {
+        let mut bytes = Vec::new();
+        for path in paths {
+            bytes.extend_from_slice(path.to_string_lossy().as_bytes());
+            bytes.push(0);
+        }
+        bytes.push(0);
+        let format = RawFormat::captured(
+            "windows",
+            "CF_HDROP",
+            "CF_HDROP",
+            FormatKind::FileList,
+            bytes,
+            0,
+            true,
+        );
+        CapturedClipboard {
+            primary_format_identity: Some((
+                format.format_namespace.clone(),
+                format.format_key.clone(),
+            )),
+            formats: vec![format],
+            preview_candidate: Some("files".to_owned()),
+            source_application: SourceApplication::default(),
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn missing_single_image_hdrop_with_global_memory_padding_is_hidden_without_deletion() {
+        let services = TestServices::new();
+        let image = services._directory.path().join("single-image.png");
+        std::fs::write(&image, b"image bytes").unwrap();
+
+        // ClipboardGuard::read_buffer reads GlobalSize bytes. A CF_HDROP allocation may
+        // therefore contain zero padding after the path list's terminating double NUL.
+        let mut bytes = crate::platform::image_temp_file::hdrop_bytes(&image);
+        bytes.extend_from_slice(&[0; 416]);
+        let format = RawFormat::captured(
+            "windows",
+            "CF_HDROP",
+            "CF_HDROP",
+            FormatKind::FileList,
+            bytes,
+            0,
+            true,
+        );
+        let history_id = services.store(CapturedClipboard {
+            primary_format_identity: Some(("windows".to_owned(), "CF_HDROP".to_owned())),
+            formats: vec![format],
+            preview_candidate: Some("1 个文件 · single-image.png".to_owned()),
+            source_application: SourceApplication::default(),
+        });
+        let mut policy = HistoryConfig::default();
+        policy.auto_hide_missing_files = true;
+        let query = HistoryQuery::default();
+
+        let connection = services.database.connect_read().unwrap();
+        let content_kind: String = connection
+            .query_row(
+                "SELECT i.content_kind FROM clipboard_history h
+                 JOIN clipboard_items i ON i.id = h.item_id WHERE h.id = ?1",
+                [history_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(content_kind, "image");
+        let original_counts: (i64, i64, i64) = connection
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM clipboard_history),
+                        (SELECT COUNT(*) FROM clipboard_formats),
+                        (SELECT COUNT(*) FROM binary_blobs)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        drop(connection);
+
+        services
+            .repository
+            .publish_missing_files(services.repository.scan_missing_files().unwrap());
+        assert_eq!(
+            services.repository.count_scoped(&query, &policy).unwrap(),
+            1
+        );
+
+        std::fs::remove_file(&image).unwrap();
+        services
+            .repository
+            .publish_missing_files(services.repository.scan_missing_files().unwrap());
+
+        assert_eq!(
+            services.repository.count_scoped(&query, &policy).unwrap(),
+            0
+        );
+        assert!(
+            services
+                .repository
+                .ordered_ids_scoped(&query, &policy)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            services
+                .repository
+                .query_by_ids_scoped(&query, &[history_id], &policy)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            services
+                .repository
+                .count_scoped(&query, &HistoryConfig::default())
+                .unwrap(),
+            1
+        );
+        assert!(
+            services
+                .repository
+                .find_by_id(history_id, &query)
+                .unwrap()
+                .is_some()
+        );
+        let connection = services.database.connect_read().unwrap();
+        let counts: (i64, i64, i64) = connection
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM clipboard_history),
+                        (SELECT COUNT(*) FROM clipboard_formats),
+                        (SELECT COUNT(*) FROM binary_blobs)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(counts, original_counts);
+        drop(connection);
+
+        std::fs::write(&image, b"restored image bytes").unwrap();
+        services
+            .repository
+            .publish_missing_files(services.repository.scan_missing_files().unwrap());
+        assert_eq!(
+            services.repository.count_scoped(&query, &policy).unwrap(),
+            1
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn missing_hdrop_keeps_a_multi_file_message_when_one_file_exists() {
+        let services = TestServices::new();
+        let existing = services._directory.path().join("existing.png");
+        let missing = services._directory.path().join("missing.png");
+        std::fs::write(&existing, b"image bytes").unwrap();
+        std::fs::write(&missing, b"image bytes").unwrap();
+        let mut bytes = crate::platform::image_temp_file::hdrop_bytes_for_paths(&[
+            existing.clone(),
+            missing.clone(),
+        ]);
+        bytes.extend_from_slice(&[0; 7]);
+        let format = RawFormat::captured(
+            "windows",
+            "CF_HDROP",
+            "CF_HDROP",
+            FormatKind::FileList,
+            bytes,
+            0,
+            true,
+        );
+        services.store(CapturedClipboard {
+            primary_format_identity: Some(("windows".to_owned(), "CF_HDROP".to_owned())),
+            formats: vec![format],
+            preview_candidate: Some("2 个文件".to_owned()),
+            source_application: SourceApplication::default(),
+        });
+        let mut policy = HistoryConfig::default();
+        policy.auto_hide_missing_files = true;
+
+        std::fs::remove_file(&missing).unwrap();
+        services
+            .repository
+            .publish_missing_files(services.repository.scan_missing_files().unwrap());
+        assert_eq!(
+            services
+                .repository
+                .count_scoped(&HistoryQuery::default(), &policy)
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn missing_file_with_text_fallback_stays_visible() {
+        let services = TestServices::new();
+        let missing = services._directory.path().join("missing-with-fallback.txt");
+        let mut captured = file_list_capture(&[&missing]);
+        // Deliberate conservatism: fallback content means the item is not fully
+        // missing. Do not turn this into a target-only gate without a product decision.
+        captured.formats.push(RawFormat::captured(
+            "mime",
+            "text/html",
+            "HTML Format",
+            FormatKind::Html,
+            b"<p>fallback</p>".to_vec(),
+            1,
+            true,
+        ));
+        services.store(captured);
+        // Control: the same missing file without the HTML fallback must be hidden.
+        // This proves the scan actually classified the fixture as missing.
+        let control = services
+            ._directory
+            .path()
+            .join("missing-without-fallback.txt");
+        services.store(file_list_capture(&[&control]));
+        let mut policy = HistoryConfig::default();
+        policy.auto_hide_missing_files = true;
+        services
+            .repository
+            .publish_missing_files(services.repository.scan_missing_files().unwrap());
+        assert_eq!(
+            services
+                .repository
+                .count_scoped(&HistoryQuery::default(), &policy)
+                .unwrap(),
+            1,
+            "only the fallback row survives; the control row must be hidden"
+        );
+    }
+
+    #[test]
+    fn missing_file_snapshot_filters_scoped_queries_without_deleting_and_recovers() {
+        let services = TestServices::new();
+        let first = services._directory.path().join("missing-1.txt");
+        let second = services._directory.path().join("missing-2.txt");
+        std::fs::write(&first, b"first").unwrap();
+        std::fs::write(&second, b"second").unwrap();
+        let history_id = services.store(file_list_capture(&[&first, &second]));
+        let original_counts: (i64, i64, i64) = services.database.connect_read().unwrap().query_row(
+            "SELECT (SELECT COUNT(*) FROM clipboard_history), (SELECT COUNT(*) FROM clipboard_formats), (SELECT COUNT(*) FROM binary_blobs)",
+            [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        let mut policy = HistoryConfig::default();
+        policy.auto_hide_missing_files = true;
+        let query = HistoryQuery::default();
+
+        std::fs::remove_file(&first).unwrap();
+        assert!(
+            !services
+                .repository
+                .publish_missing_files(services.repository.scan_missing_files().unwrap())
+        );
+        assert_eq!(
+            services.repository.count_scoped(&query, &policy).unwrap(),
+            1
+        );
+
+        std::fs::remove_file(&second).unwrap();
+        assert!(
+            services
+                .repository
+                .publish_missing_files(services.repository.scan_missing_files().unwrap())
+        );
+        assert!(
+            !services
+                .repository
+                .publish_missing_files(services.repository.scan_missing_files().unwrap())
+        );
+        assert_eq!(
+            services.repository.count_scoped(&query, &policy).unwrap(),
+            0
+        );
+        assert!(
+            services
+                .repository
+                .ordered_ids_scoped(&query, &policy)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            services
+                .repository
+                .query_by_ids_scoped(&query, &[history_id], &policy)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            services
+                .repository
+                .count_scoped(&query, &HistoryConfig::default())
+                .unwrap(),
+            1
+        );
+        let connection = services.database.connect_read().unwrap();
+        let counts: (i64, i64, i64) = connection.query_row(
+            "SELECT (SELECT COUNT(*) FROM clipboard_history), (SELECT COUNT(*) FROM clipboard_formats), (SELECT COUNT(*) FROM binary_blobs)",
+            [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        assert_eq!(counts.0, 1);
+        assert_eq!(counts.1, 1);
+        assert_eq!(counts, original_counts);
+        drop(connection);
+
+        assert!(services.repository.clear_missing_files().unwrap());
+        assert!(!services.repository.clear_missing_files().unwrap());
+        assert_eq!(
+            services.repository.count_scoped(&query, &policy).unwrap(),
+            1
+        );
+        assert!(
+            services
+                .repository
+                .publish_missing_files(services.repository.scan_missing_files().unwrap())
+        );
+
+        // Stable identity keeps the row hidden when only its timestamps change.
+        services
+            .database
+            .connect()
+            .unwrap()
+            .execute(
+                "UPDATE clipboard_history SET last_seen_at = last_seen_at + 1 WHERE id = ?1",
+                [history_id],
+            )
+            .unwrap();
+        assert_eq!(
+            services.repository.count_scoped(&query, &policy).unwrap(),
+            0
+        );
+        assert!(
+            !services
+                .repository
+                .publish_missing_files(services.repository.scan_missing_files().unwrap())
+        );
+        assert_eq!(
+            services.repository.count_scoped(&query, &policy).unwrap(),
+            0
+        );
+
+        // The item timestamp is diagnostic too; it must not unhide the row.
+        services
+            .database
+            .connect()
+            .unwrap()
+            .execute(
+                "UPDATE clipboard_items SET updated_at = updated_at + 1 WHERE id =
+                 (SELECT item_id FROM clipboard_history WHERE id = ?1)",
+                [history_id],
+            )
+            .unwrap();
+        assert_eq!(
+            services.repository.count_scoped(&query, &policy).unwrap(),
+            0
+        );
+        assert!(
+            !services
+                .repository
+                .publish_missing_files(services.repository.scan_missing_files().unwrap())
+        );
+        assert_eq!(
+            services.repository.count_scoped(&query, &policy).unwrap(),
+            0
+        );
+
+        std::fs::write(&first, b"restored").unwrap();
+        assert!(
+            services
+                .repository
+                .publish_missing_files(services.repository.scan_missing_files().unwrap())
+        );
+        assert_eq!(
+            services.repository.count_scoped(&query, &policy).unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn missing_row_timestamp_change_is_not_a_recovery() {
+        let services = TestServices::new();
+        let missing = services._directory.path().join("missing-timestamp.txt");
+        std::fs::write(&missing, b"present").unwrap();
+        let history_id = services.store(file_list_capture(&[&missing]));
+        let mut policy = HistoryConfig::default();
+        policy.auto_hide_missing_files = true;
+        let query = HistoryQuery::default();
+
+        std::fs::remove_file(&missing).unwrap();
+        services.repository.publish_missing_files_with_recovery(
+            services.repository.scan_missing_files().unwrap(),
+            false,
+        );
+        assert_eq!(
+            services.repository.count_scoped(&query, &policy).unwrap(),
+            0
+        );
+
+        services
+            .database
+            .connect()
+            .unwrap()
+            .execute(
+                "UPDATE clipboard_history SET last_seen_at = last_seen_at + 1 WHERE id = ?1",
+                [history_id],
+            )
+            .unwrap();
+        assert_eq!(
+            services.repository.count_scoped(&query, &policy).unwrap(),
+            0
+        );
+        let update = services.repository.publish_missing_files_with_recovery(
+            services.repository.scan_missing_files().unwrap(),
+            false,
+        );
+        assert!(!update.changed);
+        assert!(
+            update.recovered.is_empty(),
+            "timestamp-only change is not a recovery"
+        );
+        assert_eq!(
+            services.repository.count_scoped(&query, &policy).unwrap(),
+            0
+        );
+
+        services
+            .database
+            .connect()
+            .unwrap()
+            .execute(
+                "UPDATE clipboard_items SET updated_at = updated_at + 1 WHERE id =
+                 (SELECT item_id FROM clipboard_history WHERE id = ?1)",
+                [history_id],
+            )
+            .unwrap();
+        assert_eq!(
+            services.repository.count_scoped(&query, &policy).unwrap(),
+            0
+        );
+        let update = services.repository.publish_missing_files_with_recovery(
+            services.repository.scan_missing_files().unwrap(),
+            false,
+        );
+        assert!(!update.changed);
+        assert!(
+            update.recovered.is_empty(),
+            "item timestamp-only change is not a recovery"
+        );
+        assert_eq!(
+            services.repository.count_scoped(&query, &policy).unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn unknown_file_list_is_not_counted_as_recovered() {
+        let services = TestServices::new();
+        let missing = services._directory.path().join("unknown-recovery.txt");
+        let history_id = services.store(file_list_capture(&[&missing]));
+        let mut policy = HistoryConfig::default();
+        policy.auto_hide_missing_files = true;
+        let query = HistoryQuery::default();
+
+        services.repository.publish_missing_files_with_recovery(
+            services.repository.scan_missing_files().unwrap(),
+            false,
+        );
+        assert_eq!(
+            services.repository.count_scoped(&query, &policy).unwrap(),
+            0
+        );
+
+        let connection = services.database.connect().unwrap();
+        let item_id: i64 = connection
+            .query_row(
+                "SELECT item_id FROM clipboard_history WHERE id = ?1",
+                [history_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let changed = connection
+            .execute(
+                "UPDATE clipboard_formats SET inline_data = zeroblob(byte_length)
+                 WHERE item_id = ?1 AND format_kind = 'file_list' AND storage_kind = 'inline'",
+                [item_id],
+            )
+            .unwrap();
+        assert_eq!(changed, 1, "the fixture should store the file list inline");
+        drop(connection);
+
+        let update = services.repository.publish_missing_files_with_recovery(
+            services.repository.scan_missing_files().unwrap(),
+            false,
+        );
+        assert!(
+            update.recovered.is_empty(),
+            "an unknown file list is not a confirmed recovery"
+        );
+        assert_eq!(
+            services.repository.count_scoped(&query, &policy).unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn first_item_id_respects_hidden_policy() {
+        let services = TestServices::new();
+        let capture = |text: &str| {
+            let format = RawFormat::captured(
+                "mime",
+                "text/plain",
+                "Text",
+                FormatKind::Text,
+                text.as_bytes().to_vec(),
+                0,
+                true,
+            );
+            CapturedClipboard {
+                primary_format_identity: Some(("mime".to_owned(), "text/plain".to_owned())),
+                formats: vec![format],
+                preview_candidate: Some(text.to_owned()),
+                source_application: SourceApplication::default(),
+            }
+        };
+        let older = services.store(capture("older"));
+        let newer = services.store(capture("newer"));
+        let item_ids = services
+            .repository
+            .item_ids_for_history_ids(&[older, newer])
+            .unwrap();
+        services
+            .repository
+            .seed_missing_files(vec![item_ids[&newer]]);
+
+        let mut policy = HistoryConfig::default();
+        assert_eq!(
+            services.repository.first_item_id(&policy).unwrap(),
+            Some(item_ids[&newer])
+        );
+        policy.auto_hide_missing_files = true;
+        assert_eq!(
+            services.repository.first_item_id(&policy).unwrap(),
+            Some(item_ids[&older]),
+            "hidden rows must not win the latest-item lookup"
+        );
+    }
+
+    #[test]
+    fn synced_managed_file_metadata_does_not_block_hiding() {
+        let services = TestServices::new();
+        let missing = services._directory.path().join("synced-missing.txt");
+        let mut captured = file_list_capture(&[&missing]);
+        // The app-owned metadata lists managed copies; it must not count as
+        // evidence that the original files still exist.
+        captured.formats.push(RawFormat::captured(
+            "qcclip",
+            crate::domain::capture::SYNC_MANAGED_FILES_FORMAT_KEY,
+            "sync-managed-files",
+            FormatKind::Custom,
+            b"[]".to_vec(),
+            1,
+            false,
+        ));
+        services.store(captured);
+
+        let mut policy = HistoryConfig::default();
+        policy.auto_hide_missing_files = true;
+        let query = HistoryQuery::default();
+        services
+            .repository
+            .publish_missing_files(services.repository.scan_missing_files().unwrap());
+        assert_eq!(
+            services.repository.count_scoped(&query, &policy).unwrap(),
+            0
+        );
+        assert_eq!(
+            services
+                .repository
+                .count_scoped(&query, &HistoryConfig::default())
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn recovered_missing_file_moves_to_top_only_when_enabled() {
+        let services = TestServices::new();
+        let missing = services._directory.path().join("missing-recovered.txt");
+        let present = services._directory.path().join("present-recovered.txt");
+        std::fs::write(&present, b"present").unwrap();
+        let missing_history = services.store(file_list_capture(&[&missing]));
+        let present_history = services.store(file_list_capture(&[&present]));
+        let mut policy = HistoryConfig::default();
+        policy.auto_hide_missing_files = true;
+
+        let update = services.repository.publish_missing_files_with_recovery(
+            services.repository.scan_missing_files().unwrap(),
+            false,
+        );
+        assert!(update.changed);
+        assert!(update.recovered.is_empty());
+        let query = HistoryQuery::default();
+        assert_eq!(
+            services
+                .repository
+                .ordered_ids_scoped(&query, &policy)
+                .unwrap(),
+            vec![present_history]
+        );
+        assert_eq!(
+            services.repository.count_scoped(&query, &policy).unwrap(),
+            1
+        );
+
+        // With the promotion switch off, recovery restores the original order.
+        std::fs::write(&missing, b"restored").unwrap();
+        let update = services.repository.publish_missing_files_with_recovery(
+            services.repository.scan_missing_files().unwrap(),
+            false,
+        );
+        assert_eq!(update.recovered.len(), 1);
+        assert_eq!(
+            services
+                .repository
+                .ordered_ids_scoped(&query, &policy)
+                .unwrap(),
+            vec![present_history, missing_history]
+        );
+
+        // Hide again, then recover with the promotion switch on.
+        std::fs::remove_file(&missing).unwrap();
+        services.repository.publish_missing_files_with_recovery(
+            services.repository.scan_missing_files().unwrap(),
+            false,
+        );
+        assert_eq!(
+            services
+                .repository
+                .ordered_ids_scoped(&query, &policy)
+                .unwrap(),
+            vec![present_history]
+        );
+
+        std::fs::write(&missing, b"restored again").unwrap();
+        let update = services.repository.publish_missing_files_with_recovery(
+            services.repository.scan_missing_files().unwrap(),
+            true,
+        );
+        assert_eq!(update.recovered.len(), 1);
+        assert_eq!(
+            services
+                .repository
+                .ordered_ids_scoped(&query, &policy)
+                .unwrap(),
+            vec![missing_history, present_history]
+        );
+        assert_eq!(
+            services.repository.count_scoped(&query, &policy).unwrap(),
+            2
+        );
+    }
+
+    #[test]
+    fn multiple_recovered_missing_files_move_to_top_in_one_batch() {
+        let services = TestServices::new();
+        let first = services._directory.path().join("missing-first.txt");
+        let second = services._directory.path().join("missing-second.txt");
+        let present = services._directory.path().join("present-batch.txt");
+        std::fs::write(&present, b"present").unwrap();
+        let first_history = services.store(file_list_capture(&[&first]));
+        let second_history = services.store(file_list_capture(&[&second]));
+        let present_history = services.store(file_list_capture(&[&present]));
+        let mut policy = HistoryConfig::default();
+        policy.auto_hide_missing_files = true;
+        let query = HistoryQuery::default();
+
+        let update = services.repository.publish_missing_files_with_recovery(
+            services.repository.scan_missing_files().unwrap(),
+            false,
+        );
+        assert!(update.recovered.is_empty());
+        assert_eq!(
+            services
+                .repository
+                .ordered_ids_scoped(&query, &policy)
+                .unwrap(),
+            vec![present_history]
+        );
+
+        std::fs::write(&first, b"restored").unwrap();
+        std::fs::write(&second, b"restored").unwrap();
+        let update = services.repository.publish_missing_files_with_recovery(
+            services.repository.scan_missing_files().unwrap(),
+            true,
+        );
+        assert_eq!(update.recovered.len(), 2);
+
+        let order = services
+            .repository
+            .ordered_ids_scoped(&query, &policy)
+            .unwrap();
+        assert_eq!(order.len(), 3);
+        let mut top = order[..2].to_vec();
+        top.sort_unstable();
+        let mut expected = vec![first_history, second_history];
+        expected.sort_unstable();
+        assert_eq!(top, expected);
+        assert_eq!(order[2], present_history, "only recovered rows move");
+    }
+
+    #[test]
+    fn missing_file_snapshot_survives_database_reopen() {
+        let services = TestServices::new();
+        let missing = services._directory.path().join("missing-restart.txt");
+        let present = services._directory.path().join("present-restart.txt");
+        std::fs::write(&present, b"present").unwrap();
+        let missing_history = services.store(file_list_capture(&[&missing]));
+        let present_history = services.store(file_list_capture(&[&present]));
+        let mut policy = HistoryConfig::default();
+        policy.auto_hide_missing_files = true;
+        let update = services.repository.publish_missing_files_with_recovery(
+            services.repository.scan_missing_files().unwrap(),
+            false,
+        );
+        assert!(update.recovered.is_empty());
+        let query = HistoryQuery::default();
+        assert_eq!(
+            services
+                .repository
+                .ordered_ids_scoped(&query, &policy)
+                .unwrap(),
+            vec![present_history]
+        );
+
+        // A new Database at the same path keeps the hidden rows.
+        let reopened = Database::open(services._directory.path().join("test.sqlite3")).unwrap();
+        let blobs = RawBlobStore::new(services._directory.path()).unwrap();
+        let repository = HistoryRepository::new(reopened, blobs);
+        assert_eq!(repository.hidden_missing_files_len(), 1);
+
+        std::fs::write(&missing, b"restored while closed").unwrap();
+        let update = repository
+            .publish_missing_files_with_recovery(repository.scan_missing_files().unwrap(), true);
+        assert_eq!(update.recovered.len(), 1);
+        assert_eq!(
+            repository.ordered_ids_scoped(&query, &policy).unwrap(),
+            vec![missing_history, present_history]
+        );
+    }
+
+    #[test]
+    fn deleted_history_row_keeps_missing_favorite_hidden_and_recovers_by_item() {
+        let services = TestServices::new();
+        let missing = services
+            ._directory
+            .path()
+            .join("missing-favorite-deleted.txt");
+        let history_id = services.store(file_list_capture(&[&missing]));
+        let item_id = services
+            .repository
+            .item_ids_for_history_ids(&[history_id])
+            .unwrap()[&history_id];
+        let favorites = super::super::FavoriteRepository::new(services.database.clone());
+        favorites.add_to_favorites(item_id).unwrap();
+        let mut policy = HistoryConfig::default();
+        policy.auto_hide_missing_files = true;
+        let query = HistoryQuery::default();
+
+        services.repository.publish_missing_files_with_recovery(
+            services.repository.scan_missing_files().unwrap(),
+            false,
+        );
+        assert_eq!(favorites.count_scoped(&query, &policy).unwrap(), 0);
+
+        services.repository.delete_many(&[history_id]).unwrap();
+        assert_eq!(
+            favorites.count_scoped(&query, &policy).unwrap(),
+            0,
+            "favorite-only row must stay hidden after its history row is deleted"
+        );
+
+        std::fs::write(&missing, b"restored").unwrap();
+        let update = services.repository.publish_missing_files_with_recovery(
+            services.repository.scan_missing_files().unwrap(),
+            true,
+        );
+        assert_eq!(
+            update.recovered.len(),
+            1,
+            "history deletion must not lose the recovery identity"
+        );
+        assert_eq!(favorites.count_scoped(&query, &policy).unwrap(), 1);
+    }
+
+    #[test]
+    fn missing_image_hides_pins_and_favorites_but_keeps_inline_fallbacks() {
+        let mut services = TestServices::new();
+        services.capture = CaptureService::with_inline_threshold(
+            services.database.clone(),
+            services.repository.blob_store.clone(),
+            0,
+        );
+        let image = RawFormat::captured(
+            "windows",
+            "registered:PNG",
+            "PNG",
+            FormatKind::Image,
+            vec![1, 2, 3, 4],
+            0,
+            true,
+        );
+        let first = services.store(CapturedClipboard {
+            primary_format_identity: Some((
+                image.format_namespace.clone(),
+                image.format_key.clone(),
+            )),
+            formats: vec![image.clone()],
+            preview_candidate: None,
+            source_application: SourceApplication::default(),
+        });
+        let second = services.store(CapturedClipboard {
+            primary_format_identity: Some((
+                image.format_namespace.clone(),
+                image.format_key.clone(),
+            )),
+            formats: vec![RawFormat::captured(
+                "windows",
+                "registered:PNG",
+                "PNG",
+                FormatKind::Image,
+                vec![9, 8, 7, 6],
+                0,
+                true,
+            )],
+            preview_candidate: None,
+            source_application: SourceApplication::default(),
+        });
+        services.repository.set_pinned(second, true).unwrap();
+        let connection = services.database.connect_read().unwrap();
+        let paths: Vec<String> = connection
+            .prepare("SELECT relative_path FROM binary_blobs")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        drop(connection);
+        for path in paths {
+            std::fs::remove_file(services._directory.path().join(path)).unwrap();
+        }
+        services.capture = CaptureService::with_inline_threshold(
+            services.database.clone(),
+            services.repository.blob_store.clone(),
+            usize::MAX,
+        );
+        let inline = services.store(CapturedClipboard {
+            primary_format_identity: Some((
+                image.format_namespace.clone(),
+                image.format_key.clone(),
+            )),
+            formats: vec![RawFormat::captured(
+                "windows",
+                "registered:PNG",
+                "PNG",
+                FormatKind::Image,
+                vec![4, 3, 2, 1],
+                0,
+                true,
+            )],
+            preview_candidate: None,
+            source_application: SourceApplication::default(),
+        });
+        let mut policy = HistoryConfig::default();
+        policy.auto_hide_missing_files = true;
+        services
+            .repository
+            .publish_missing_files(services.repository.scan_missing_files().unwrap());
+        let ids = services
+            .repository
+            .ordered_ids_scoped(&HistoryQuery::default(), &policy)
+            .unwrap();
+        assert!(!ids.contains(&second));
+        assert!(ids.contains(&inline));
+        assert!(!ids.contains(&first));
+        let item_id = services
+            .repository
+            .find_by_id(first, &HistoryQuery::default())
+            .unwrap()
+            .unwrap()
+            .item_id;
+        super::super::FavoriteRepository::new(services.database.clone())
+            .add_to_favorites(item_id)
+            .unwrap();
+        let ids = services
+            .repository
+            .ordered_ids_scoped(&HistoryQuery::default(), &policy)
+            .unwrap();
+        assert!(!ids.contains(&first));
+    }
+
+    #[test]
+    fn missing_favorite_only_items_and_pins_follow_the_same_visibility_policy() {
+        let services = TestServices::new();
+        let missing = services._directory.path().join("missing-favorite.txt");
+        let present = services._directory.path().join("present-favorite.txt");
+        std::fs::write(&present, b"present").unwrap();
+        let missing_history = services.store(file_list_capture(&[&missing]));
+        let present_history = services.store(file_list_capture(&[&present]));
+        let mixed_history = services.store(file_list_capture(&[&missing, &present]));
+        let favorites = super::super::FavoriteRepository::new(services.database.clone());
+        let item_ids = services
+            .repository
+            .item_ids_for_history_ids(&[missing_history, present_history, mixed_history])
+            .unwrap();
+        let favorite_ids = [missing_history, present_history, mixed_history].map(|id| {
+            let item_id = item_ids[&id];
+            favorites.add_to_favorites(item_id).unwrap();
+            favorites.favorite_id_for_item(item_id).unwrap().unwrap()
+        });
+        favorites.set_pinned(favorite_ids[0], true).unwrap();
+        services.repository.clear_all().unwrap();
+        assert_eq!(
+            services.repository.count(&HistoryQuery::default()).unwrap(),
+            0
+        );
+
+        let pinned_history = services.store(file_list_capture(&[&services
+            ._directory
+            .path()
+            .join("other-missing.txt")]));
+        services
+            .repository
+            .set_pinned(pinned_history, true)
+            .unwrap();
+        let mut policy = HistoryConfig::default();
+        policy.auto_hide_missing_files = true;
+        services
+            .repository
+            .publish_missing_files(services.repository.scan_missing_files().unwrap());
+
+        let query = HistoryQuery {
+            search: Some("files".to_owned()),
+            ..HistoryQuery::default()
+        };
+        assert_eq!(
+            services.repository.count_scoped(&query, &policy).unwrap(),
+            0
+        );
+        assert_eq!(
+            services
+                .repository
+                .pinned_count_scoped(&query, &policy)
+                .unwrap(),
+            0
+        );
+        assert!(
+            services
+                .repository
+                .ordered_ids_scoped(&query, &policy)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            services
+                .repository
+                .find_by_id_scoped(pinned_history, &query, &policy)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(favorites.count_scoped(&query, &policy).unwrap(), 2);
+        assert_eq!(favorites.pinned_count_scoped(&query, &policy).unwrap(), 0);
+        let visible_favorites = favorites.ordered_ids_scoped(&query, &policy).unwrap();
+        assert_eq!(
+            visible_favorites.iter().copied().collect::<HashSet<_>>(),
+            HashSet::from([favorite_ids[1], favorite_ids[2]])
+        );
+        assert_eq!(
+            favorites
+                .ordered_snapshot_scoped(&query, &policy)
+                .unwrap()
+                .ids,
+            visible_favorites
+        );
+        assert_eq!(
+            favorites
+                .query_by_ids_scoped(&query, &favorite_ids, &policy)
+                .unwrap()
+                .into_iter()
+                .map(|record| record.history_id)
+                .collect::<HashSet<_>>(),
+            HashSet::from([favorite_ids[1], favorite_ids[2]])
+        );
+        assert!(
+            favorites
+                .find_by_id_scoped(favorite_ids[0], &query, &policy)
+                .unwrap()
+                .is_none()
+        );
+
+        // The raw repository APIs remain available for maintenance and for the disabled setting.
+        assert_eq!(favorites.count(&query).unwrap(), 3);
+        assert_eq!(favorites.pinned_count(&query).unwrap(), 1);
+        assert_eq!(
+            favorites.query_by_ids(&query, &favorite_ids).unwrap().len(),
+            3
+        );
+        assert_eq!(services.repository.count(&query).unwrap(), 1);
+        assert_eq!(
+            favorites
+                .count_scoped(&query, &HistoryConfig::default())
+                .unwrap(),
+            3
+        );
+
+        // Hidden state belongs to the content, not to one history row. Recreating
+        // a history row for the still-missing item does not unhide it; only a
+        // confirmed filesystem recovery does.
+        let new_history = services.store(file_list_capture(&[&missing]));
+        assert!(
+            services
+                .repository
+                .find_by_id_scoped(new_history, &query, &policy)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(favorites.count_scoped(&query, &policy).unwrap(), 2);
+        services
+            .repository
+            .publish_missing_files(services.repository.scan_missing_files().unwrap());
+        assert!(
+            services
+                .repository
+                .find_by_id_scoped(new_history, &query, &policy)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(favorites.count_scoped(&query, &policy).unwrap(), 2);
+
+        std::fs::write(&missing, b"restored").unwrap();
+        services
+            .repository
+            .publish_missing_files(services.repository.scan_missing_files().unwrap());
+        assert_eq!(favorites.count_scoped(&query, &policy).unwrap(), 3);
+        assert_eq!(favorites.pinned_count_scoped(&query, &policy).unwrap(), 1);
+    }
+
+    #[test]
+    fn missing_snapshot_keeps_search_page_count_and_order_consistent() {
+        let services = TestServices::new();
+        let existing = services._directory.path().join("existing.txt");
+        std::fs::write(&existing, b"present").unwrap();
+        let missing = services._directory.path().join("missing.txt");
+        let first = services.store(file_list_capture(&[&existing]));
+        let hidden = services.store(file_list_capture(&[&missing]));
+        let mut policy = HistoryConfig::default();
+        policy.auto_hide_missing_files = true;
+        services
+            .repository
+            .publish_missing_files(services.repository.scan_missing_files().unwrap());
+
+        let mut query = HistoryQuery {
+            search: Some("files".to_owned()),
+            limit: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            services.repository.count_scoped(&query, &policy).unwrap(),
+            1
+        );
+        assert_eq!(
+            services
+                .repository
+                .ordered_ids_scoped(&query, &policy)
+                .unwrap(),
+            vec![first]
+        );
+        assert_eq!(
+            services
+                .repository
+                .query_by_ids_scoped(&query, &[first, hidden], &policy)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            services
+                .repository
+                .query_internal(&query, None, None, Some(&policy))
+                .unwrap()
+                .len(),
+            1
+        );
+        query.offset = 1;
+        assert!(
+            services
+                .repository
+                .query_internal(&query, None, None, Some(&policy))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

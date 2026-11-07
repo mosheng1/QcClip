@@ -180,12 +180,13 @@ impl MainWindow {
 
     pub(crate) fn paste_latest_item_as_plain_text(&mut self, cx: &mut Context<Self>) {
         let move_to_first = paste_order_target(TabId::Clipboard, cx);
+        let policy = crate::config_runtime::history_config(cx);
         let paste_service = self.paste_service.clone();
         cx.defer(move |cx| {
             crate::windows::main::prepare_paste_target("纯文本粘贴", cx);
             let paste_task = cx.background_spawn(async move {
                 paste_service
-                    .paste_latest_plain_text(move_to_first)
+                    .paste_latest_plain_text(&policy, move_to_first)
                     .map(|_| ())
             });
             spawn_plain_text_paste(paste_task, cx);

@@ -433,9 +433,14 @@ pub(crate) fn set_history_config(
     if current == history {
         return Ok(false);
     }
+    let missing_changed = current.auto_hide_missing_files != history.auto_hide_missing_files;
+    let missing_enabled = history.auto_hide_missing_files;
     next.history = history;
     persist_config(&path, &next)?;
     cx.update_global::<ConfigRuntime, _>(|runtime, _| runtime.config = next);
+    if missing_changed {
+        crate::windows::main::MainWindowService::missing_file_setting_changed(missing_enabled, cx);
+    }
     crate::windows::main::MainWindowService::refresh_history(cx);
     Ok(true)
 }

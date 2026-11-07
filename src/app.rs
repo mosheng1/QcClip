@@ -65,12 +65,12 @@ pub fn run() {
         "QcClip 数据目录已确定"
     );
     crate::platform::system_info::log_in_background();
-    let import_error = match apply_pending_import(app_paths.data_root()) {
+    let (imported, import_error) = match apply_pending_import(app_paths.data_root()) {
         Ok(true) => {
             tracing::info!("已应用暂存的数据导入内容");
-            None
+            (true, None)
         }
-        Ok(false) => None,
+        Ok(false) => (false, None),
         Err(error) => {
             tracing::error!("应用暂存的数据导入失败：{error}");
             if matches!(
@@ -79,13 +79,18 @@ pub fn run() {
             ) {
                 panic!("无法恢复导入前的数据，应用已停止启动：{error}");
             }
-            Some(error.to_string())
+            (false, Some(error.to_string()))
         }
     };
     let _database = initialize_database(&app_paths).unwrap_or_else(|error| {
         tracing::error!("无法初始化数据库：{error}");
         panic!("无法初始化数据库：{error}");
     });
+    if imported {
+        if let Err(error) = _database.clear_hidden_missing_items() {
+            tracing::warn!(%error, "清除导入数据的失效文件隐藏状态失败");
+        }
+    }
     let _raw_blob_store = RawBlobStore::new(app_paths.data_root()).unwrap_or_else(|error| {
         tracing::error!("无法初始化原始数据存储：{error}");
         panic!("无法初始化原始数据存储：{error}");

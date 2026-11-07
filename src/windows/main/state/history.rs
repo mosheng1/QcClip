@@ -220,6 +220,9 @@ impl MainWindow {
     }
 
     pub fn refresh_history(&mut self, cx: &mut Context<Self>) {
+        if self.preview_hover_source.is_some() {
+            self.cancel_hover_preview(cx);
+        }
         if self.split_panes.is_some() {
             self.refresh_split_panes(cx);
             if self.active_tab != TabId::Emoji {
@@ -228,6 +231,8 @@ impl MainWindow {
             }
         }
         self.query_generation = self.query_generation.wrapping_add(1);
+        self.missing_visibility_task = None;
+        self.pending_list_anchor = None;
         // 丢弃上一次刷新任务。任务拥有后台查询句柄，丢弃后会取消仍在排队的查询，
         // 防止连续切换列表或筛选时过期查询挤占后台执行器。
         self.list_query_task = None;
@@ -245,6 +250,7 @@ impl MainWindow {
         self.emoji_smooth_scroll.reset();
         self.symbol_smooth_scroll.reset();
         let generation = self.query_generation;
+        let visibility_generation = self.missing_visibility_generation;
         if self.active_tab == TabId::Emoji {
             self.items.clear();
             self.loaded_items.clear();
@@ -289,7 +295,7 @@ impl MainWindow {
         let favorite_repository = self.favorite_repository.clone();
         let query_task = cx.background_spawn(async move {
             let snapshot = if active_tab == TabId::Favorites {
-                favorite_repository.ordered_snapshot(&query)?
+                favorite_repository.ordered_snapshot_scoped(&query, &policy)?
             } else {
                 history_repository.ordered_snapshot_scoped(&query, &policy)?
             };
@@ -300,7 +306,7 @@ impl MainWindow {
                 .copied()
                 .collect::<Vec<_>>();
             let records = if active_tab == TabId::Favorites {
-                favorite_repository.query_by_ids(&query, &initial_ids)?
+                favorite_repository.query_by_ids_scoped(&query, &initial_ids, &policy)?
             } else {
                 history_repository.query_by_ids_scoped(&query, &initial_ids, &policy)?
             };
@@ -310,7 +316,18 @@ impl MainWindow {
             let result = query_task.await;
             if let Some(this) = this.upgrade() {
                 this.update(cx, |this, cx| {
+                    if this.missing_visibility_generation != visibility_generation {
+                        // Reject this older full query instead of applying rows
+                        // filtered with a superseded visibility snapshot.
+                        this.missing_visibility_dirty = true;
+                        this.refresh_history(cx);
+                        cx.notify();
+                        return;
+                    }
                     if this.accept_query_result(generation, result) {
+                        if this.list_status != ListStatus::Error {
+                            this.missing_visibility_dirty = false;
+                        }
                         cx.notify();
                     }
                 });
