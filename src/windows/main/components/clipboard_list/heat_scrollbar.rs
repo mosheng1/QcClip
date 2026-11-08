@@ -245,7 +245,7 @@ pub(super) fn render(
         && config_runtime::animation_enabled(cx, crate::config::AnimationKind::ListItemHover);
     let motion = Duration::from_millis(180).with_easing(gpui::ease_in_out);
     let mut rail_background = theme.background;
-    rail_background.alpha = 0.5;
+    rail_background.alpha = 1.0;
     let rail_background = crate::window_material::overlay_surface_color(cx, rail_background);
     let thumb_color = gpui::rgb_to_hsla(gpui::rgb(if dark { 0xafc9b5 } else { 0x4f6658 }));
 

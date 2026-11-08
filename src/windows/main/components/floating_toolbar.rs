@@ -66,7 +66,7 @@ pub fn render(
     };
     let show_scroll_top = scroll_offset < px(-SCROLL_TOP_THRESHOLD);
     let mut toolbar_background = theme.popover;
-    toolbar_background.alpha = 0.5;
+    toolbar_background.alpha = 1.0;
     let toolbar_background = crate::window_material::overlay_surface_color(cx, toolbar_background);
     let ui_scale = crate::ui::scale::theme_scale(cx);
     let toolbar_height = toolbar_height(show_scroll_top, show_new_favorite) * ui_scale;

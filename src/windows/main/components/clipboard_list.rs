@@ -36,7 +36,7 @@ use crate::{
     config::{
         ADAPTIVE_MAX_LINES_MAX, ADAPTIVE_MAX_LINES_MIN, CardItemGap, ClipboardDisplayPriority,
         ClipboardMouseAction, ClipboardMouseBehavior, ItemDisplayField, ItemRegionVisibility,
-        ListItemHeight, ListItemStyle, SearchEngine,
+        ListItemHeight, ListItemStyle, SearchEngine, WindowMaterial,
     },
     config_runtime,
     domain::{
@@ -1879,7 +1879,7 @@ fn render_item_surface<T>(
         gpui::transparent_black()
     } else if !metrics.horizontal {
         let mut background = theme.popover;
-        background.alpha = 0.5;
+        background.alpha = 1.0;
         crate::window_material::overlay_surface_color(cx, background)
     } else {
         theme.popover
@@ -2150,7 +2150,14 @@ fn render_item_surface<T>(
     if metrics.horizontal {
         let surface_theme = crate::window_material::excluded_window_theme(cx);
         let mut background = surface_theme.background;
-        background.alpha = 0.5;
+        let material = crate::window_material::supported_material(
+            config_runtime::appearance_config(cx).window_material,
+        );
+        background.alpha = if material == WindowMaterial::Disabled {
+            1.0
+        } else {
+            0.5
+        };
         row = crate::window_material::with_backdrop_blur(row.bg(background), cx);
         if has_toolbar {
             row = row.child(

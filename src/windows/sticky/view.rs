@@ -25,6 +25,7 @@ use super::{
     selection::TokenSelection,
 };
 use crate::{
+    config::WindowMaterial,
     domain::clipboard::{ClipboardItemId, FormatPreview},
     i18n,
     services::word_split::{self, JoinSeparator, SplitGranularity, SplitResult, TokenKind},
@@ -1336,6 +1337,13 @@ impl StickyNote {
             .image_bounds(viewport.get().size, image_size);
         let zoomed = self.image_view.is_zoomed();
         let dragging = self.image_drag.is_some();
+        let material = crate::window_material::supported_material(
+            crate::config_runtime::appearance_config(cx).window_material,
+        );
+        let mut hint_background = paper.background.opacity(0.62);
+        if material == WindowMaterial::Disabled {
+            hint_background.alpha = 1.0;
+        }
         let hint = {
             let text = if zoomed {
                 translator.translate_with_args(
@@ -1357,7 +1365,7 @@ impl StickyNote {
                 .px(px(10.0))
                 .py(px(5.0))
                 .rounded(px(8.0))
-                .bg(paper.background.opacity(0.62))
+                .bg(hint_background)
                 .map(|this| crate::window_material::with_backdrop_blur(this, cx))
                 .border_1()
                 .border_color(paper.border.opacity(0.6))
@@ -2027,6 +2035,13 @@ impl Render for StickyNote {
             self.render_footer(paper, cx)
         };
         let toast = self.toast.clone().map(|message| {
+            let material = crate::window_material::supported_material(
+                crate::config_runtime::appearance_config(cx).window_material,
+            );
+            let mut background = paper.foreground.opacity(0.85);
+            if material == WindowMaterial::Disabled {
+                background.alpha = 1.0;
+            }
             div()
                 .absolute()
                 .bottom(px(if footer.is_some() { 44.0 } else { 12.0 }))
@@ -2039,7 +2054,7 @@ impl Render for StickyNote {
                         .px(px(12.0))
                         .py(px(4.0))
                         .rounded_full()
-                        .bg(paper.foreground.opacity(0.85))
+                        .bg(background)
                         .text_color(gpui::Hsla {
                             alpha: 1.0,
                             ..paper.background
