@@ -16,11 +16,11 @@ use std::{
 use gpui::Bounds;
 use gpui::prelude::*;
 use gpui::{
-    Animation, AnimationExt, AnyElement, AnyWindowHandle, App, ClickEvent, Context, DragMoveEvent,
-    DurationWithEasing, Element, ElementId, Entity, GlobalElementId, InspectorElementId,
-    IntoElement, LayoutId, MouseButton, ObjectFit, Pixels, Point, PromptLevel, Render, RenderImage,
-    ScrollWheelEvent, SharedString, Size, StatefulInteractiveElement, Window, canvas, div, img,
-    linear_color_stop, linear_gradient, point, px, size,
+    Along as _, Animation, AnimationExt, AnyElement, AnyWindowHandle, App, ClickEvent, Context,
+    DragMoveEvent, DurationWithEasing, Element, ElementId, Entity, GlobalElementId,
+    InspectorElementId, IntoElement, LayoutId, MouseButton, ObjectFit, Pixels, Point, PromptLevel,
+    Render, RenderImage, ScrollWheelEvent, SharedString, Size, StatefulInteractiveElement, Window,
+    canvas, div, img, linear_color_stop, linear_gradient, point, px, size,
 };
 use gpui_component::scroll::ScrollableElement as _;
 use gpui_component::{
@@ -92,6 +92,8 @@ const ROW_VERTICAL_PADDING_SCALE: f32 = 0.5;
 const MAX_ROW_BORDER_WIDTH: f32 = 2.0;
 const CARD_HORIZONTAL_INSET: f32 = 8.0;
 const CARD_RADIUS: f32 = 8.0;
+const CARD_BORDER_WIDTH: f32 = 1.5;
+const STATUS_BORDER_WIDTH: f32 = 3.0;
 const ROW_HORIZONTAL_PADDING: f32 = 10.0;
 const IMAGE_PREVIEW_OVERSAMPLE: u32 = 2;
 const IMAGE_PREVIEW_MAX_WIDTH: u32 = 4096;
@@ -1665,6 +1667,7 @@ fn render_selection_indicator(
     row_id: HistoryItemId,
     selection_number: Option<usize>,
     list_item_style: ListItemStyle,
+    status_inset: Point<Pixels>,
     theme: ThemeColor,
     selection_window: Option<Entity<MainWindow>>,
     hover_allowed: bool,
@@ -1672,8 +1675,8 @@ fn render_selection_indicator(
     let group_name = format!("clipboard-row-hover-{row_id}");
     let mut indicator = div()
         .absolute()
-        .top(px(0.0))
-        .left(px(0.0))
+        .top(status_inset.y)
+        .left(status_inset.x)
         .w_auto()
         .min_w(ui_rem(13.0))
         .h(ui_rem(13.0))
@@ -1683,42 +1686,24 @@ fn render_selection_indicator(
         .rounded_br(px(6.0))
         .border_r_1()
         .border_b_1()
-        .border_color(theme.border)
-        .bg(theme.secondary);
+        .border_color(theme.list_active_border)
+        .bg(theme.background);
     if list_item_style == ListItemStyle::Card {
         indicator = indicator.rounded_tl(px(6.0));
     }
-    let marker = if let Some(number) = selection_number {
-        div()
-            .min_w(ui_rem(11.0))
-            .h(ui_rem(11.0))
+    if let Some(number) = selection_number {
+        indicator = indicator
             .px(px(1.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .flex_none()
-            .rounded_full()
-            .border_1()
-            .border_color(theme.border)
             .bg(theme.primary)
             .text_size(ui_rem(9.0))
             .text_color(theme.primary_foreground)
-            .child(number.to_string())
-            .into_any_element()
+            .child(number.to_string());
     } else {
-        indicator = indicator.invisible().border_color(theme.border);
+        indicator = indicator.invisible();
         if hover_allowed {
             indicator = indicator.group_hover(group_name, |style| style.visible());
         }
-        div()
-            .size(ui_rem(11.0))
-            .rounded_full()
-            .border_1()
-            .border_color(theme.muted_foreground)
-            .bg(theme.background)
-            .into_any_element()
-    };
-    indicator = indicator.child(marker);
+    }
     if let Some(selection_window) = selection_window {
         let mut indicator = indicator
             .id(("clipboard-selection", row_id as u64))
@@ -2240,6 +2225,28 @@ fn render_item_surface<T>(
             meta.mt(metrics.rem_size * 0.25)
         }));
     }
+    let status_inset = if item_status_colors(
+        item.is_pinned,
+        item.paste_count,
+        config_runtime::item_status_borders(cx),
+        theme,
+        metrics.horizontal,
+    )
+    .is_some()
+    {
+        // 卡片的绝对定位已包含普通边框占位，只补偿状态边框额外增厚的部分。
+        let inset = px(match list_item_style {
+            ListItemStyle::Card => STATUS_BORDER_WIDTH - CARD_BORDER_WIDTH,
+            ListItemStyle::Seamless => STATUS_BORDER_WIDTH + 1.0,
+        });
+        if metrics.horizontal {
+            point(px(0.0), inset)
+        } else {
+            point(inset, px(0.0))
+        }
+    } else {
+        Point::default()
+    };
     row = row
         .children(info_bar)
         .child(
@@ -2250,6 +2257,7 @@ fn render_item_surface<T>(
             item.history_id,
             selection_number,
             list_item_style,
+            status_inset,
             theme,
             selection_window.clone(),
             hover_allowed,
@@ -2268,8 +2276,8 @@ fn render_item_surface<T>(
         ListItemStyle::Card => row
             .overflow_hidden()
             .rounded(px(CARD_RADIUS))
-            .border(px(1.5))
-            .border_color(item_border_color),
+            .border(px(CARD_BORDER_WIDTH))
+            .border_color(gpui::transparent_black()),
     };
     if !drag_preview && hover_allowed {
         let hover_color = if metrics.horizontal {
@@ -2317,10 +2325,88 @@ fn render_item_surface<T>(
 
 fn render_item_border(
     list_item_style: ListItemStyle,
-    color: Option<gpui::Background>,
+    status_colors: Option<[gpui::Hsla; 2]>,
+    border_color: gpui::Hsla,
     horizontal: bool,
 ) -> Option<AnyElement> {
-    let color = color?;
+    if list_item_style == ListItemStyle::Card {
+        return Some(
+            canvas(
+                |_, _, _| (),
+                move |bounds, _, window, _| {
+                    if let Some([first, second]) = status_colors
+                        && first != second
+                    {
+                        let axis = if horizontal {
+                            gpui::Axis::Horizontal
+                        } else {
+                            gpui::Axis::Vertical
+                        };
+                        let scale = window.scale_factor();
+                        // 分色位置对齐物理像素，两个区域共用同一个完整描边轮廓。
+                        let split = px((f32::from(
+                            bounds.origin.along(axis) + bounds.size.along(axis) / 2.0,
+                        ) * scale)
+                            .round()
+                            / scale);
+                        let end = bounds.bottom_right();
+                        let regions = [
+                            (
+                                first,
+                                gpui::Bounds::from_corners(
+                                    bounds.origin,
+                                    end.apply_along(axis, |_| split),
+                                ),
+                            ),
+                            (
+                                second,
+                                gpui::Bounds::from_corners(
+                                    bounds.origin.apply_along(axis, |_| split),
+                                    end,
+                                ),
+                            ),
+                        ];
+                        for (status_color, region) in regions {
+                            window.with_content_mask(
+                                Some(gpui::ContentMask { bounds: region }),
+                                |window| {
+                                    paint_card_border(
+                                        window,
+                                        bounds,
+                                        border_color,
+                                        Some(status_color),
+                                        horizontal,
+                                    );
+                                },
+                            );
+                        }
+                    } else {
+                        paint_card_border(
+                            window,
+                            bounds,
+                            border_color,
+                            status_colors.map(|colors| colors[0]),
+                            horizontal,
+                        );
+                    }
+                },
+            )
+            .absolute()
+            .inset_0()
+            .into_any_element(),
+        );
+    }
+
+    let [first, second] = status_colors?;
+    let color = if first == second {
+        first.into()
+    } else {
+        linear_gradient(
+            if horizontal { 90.0 } else { 180.0 },
+            linear_color_stop(first, 0.49),
+            linear_color_stop(second, 0.51),
+        )
+    };
 
     let mut border = div().absolute().inset_0().border_color(color);
     border = if horizontal {
@@ -2335,27 +2421,79 @@ fn render_item_border(
             border.left(px(1.0))
         };
     }
-    if list_item_style == ListItemStyle::Card {
-        border = border.rounded(px(CARD_RADIUS));
-    }
     Some(border.into_any_element())
 }
 
-fn item_border_color(
+fn paint_card_border(
+    window: &mut Window,
+    bounds: gpui::Bounds<Pixels>,
+    border_color: gpui::Hsla,
+    status_color: Option<gpui::Hsla>,
+    horizontal: bool,
+) {
+    let quad = card_border_quad(bounds, border_color, status_color, horizontal);
+    if status_color.is_some() {
+        // 共用几何轮廓，底层保留普通边框，上层只让状态色淡出。
+        window.paint_quad(quad.clone().border_color(border_color));
+    }
+    window.paint_quad(quad);
+}
+
+fn card_border_quad(
+    bounds: gpui::Bounds<Pixels>,
+    border_color: gpui::Hsla,
+    status_color: Option<gpui::Hsla>,
+    horizontal: bool,
+) -> gpui::PaintQuad {
+    let radius = px(CARD_RADIUS)
+        .min(bounds.size.width / 2.0)
+        .min(bounds.size.height / 2.0);
+    let mut widths = gpui::Edges::all(px(CARD_BORDER_WIDTH));
+    let color = if let Some(status_color) = status_color {
+        let length = if horizontal {
+            widths.top = px(STATUS_BORDER_WIDTH);
+            bounds.size.height
+        } else {
+            widths.left = px(STATUS_BORDER_WIDTH);
+            bounds.size.width
+        };
+        let length = f32::from(length).max(1.0);
+        let mut transparent_status = status_color;
+        transparent_status.alpha = 0.0;
+        // 保持状态色的色相，仅降低透明度，避免半透明深色边框把接缝染黑。
+        linear_gradient(
+            if horizontal { 180.0 } else { 90.0 },
+            linear_color_stop(status_color, STATUS_BORDER_WIDTH / length),
+            linear_color_stop(transparent_status, (f32::from(radius) + 2.0) / length),
+        )
+    } else {
+        border_color.into()
+    };
+    gpui::quad(
+        bounds,
+        radius,
+        gpui::transparent_black(),
+        widths,
+        color,
+        gpui::BorderStyle::Solid,
+    )
+}
+
+fn item_status_colors(
     is_pinned: bool,
     paste_count: u64,
     (pinned_border, pasted_border): (bool, bool),
     theme: ThemeColor,
     horizontal: bool,
-) -> Option<gpui::Background> {
+) -> Option<[gpui::Hsla; 2]> {
     match (is_pinned && pinned_border, paste_count > 0 && pasted_border) {
-        (true, true) => Some(linear_gradient(
-            if horizontal { 90.0 } else { 0.0 },
-            linear_color_stop(theme.yellow, 0.49),
-            linear_color_stop(theme.blue, 0.51),
-        )),
-        (true, false) => Some(theme.blue.into()),
-        (false, true) => Some(theme.yellow.into()),
+        (true, true) => Some(if horizontal {
+            [theme.yellow, theme.blue]
+        } else {
+            [theme.blue, theme.yellow]
+        }),
+        (true, false) => Some([theme.blue; 2]),
+        (false, true) => Some([theme.yellow; 2]),
         (false, false) => None,
     }
 }
@@ -2415,13 +2553,18 @@ fn render_drag_preview(
         .child(surface)
         .children(render_item_border(
             drag.list_item_style,
-            item_border_color(
+            item_status_colors(
                 item.is_pinned,
                 item.paste_count,
                 crate::config_runtime::item_status_borders(cx),
                 theme,
                 drag.metrics.horizontal,
             ),
+            if drag.selected {
+                theme.list_active_border
+            } else {
+                theme.border
+            },
             drag.metrics.horizontal,
         ));
     let card_inset_x = if drag.metrics.horizontal {
@@ -3393,13 +3536,18 @@ fn render_row(
         .child(row)
         .children(render_item_border(
             list_item_style,
-            item_border_color(
+            item_status_colors(
                 item.is_pinned,
                 item.paste_count,
                 crate::config_runtime::item_status_borders(cx),
                 cx.theme().colors,
                 metrics.horizontal,
             ),
+            if selected {
+                cx.theme().list_active_border
+            } else {
+                cx.theme().border
+            },
             metrics.horizontal,
         ))
         .child(render_tag_indicators(
@@ -3823,6 +3971,98 @@ mod tests {
     use crate::i18n::{Locale, Translator};
     use gpui::px;
     use std::collections::HashMap;
+
+    #[test]
+    fn card_border_normal_and_selected_colors_are_solid() {
+        let bounds = gpui::Bounds::new(
+            gpui::point(px(12.0), px(24.0)),
+            gpui::size(px(320.0), px(80.0)),
+        );
+        let normal_color = gpui::rgb_to_hsla(gpui::rgb(0x808080));
+        let selected_color = gpui::rgb_to_hsla(gpui::rgb(0x4080ff));
+        let normal = super::card_border_quad(bounds, normal_color, None, false);
+        for color in [normal_color, selected_color] {
+            let quad = super::card_border_quad(bounds, color, None, false);
+            assert_eq!(quad.bounds, normal.bounds);
+            assert_eq!(quad.corner_radii, normal.corner_radii);
+            assert!(quad.background.is_transparent());
+            assert_eq!(quad.border_widths, gpui::Edges::all(px(1.5)));
+            assert!(quad.border_color.as_solid().is_some());
+            assert_eq!(quad.border_color, gpui::Background::from(color));
+        }
+    }
+
+    #[test]
+    fn card_border_corner_transition_keeps_a_fixed_pixel_length() {
+        let normal_color = gpui::rgb_to_hsla(gpui::rgb(0x4080ff));
+        let status_color = gpui::rgb_to_hsla(gpui::rgb(0xf0a000));
+        for (width, height) in [(320.0, 80.0), (640.0, 160.0)] {
+            for horizontal in [false, true] {
+                let bounds = gpui::Bounds::new(
+                    gpui::point(px(0.0), px(0.0)),
+                    gpui::size(px(width), px(height)),
+                );
+                let normal = super::card_border_quad(bounds, normal_color, None, horizontal);
+                let status =
+                    super::card_border_quad(bounds, normal_color, Some(status_color), horizontal);
+                assert_eq!(status.bounds, normal.bounds);
+                assert_eq!(status.corner_radii, normal.corner_radii);
+                assert_eq!(
+                    status.border_widths.left,
+                    px(if horizontal { 1.5 } else { 3.0 })
+                );
+                assert_eq!(
+                    status.border_widths.top,
+                    px(if horizontal { 3.0 } else { 1.5 })
+                );
+                let gpui::BackgroundKind::LinearGradient { angle, stops } =
+                    status.border_color.kind()
+                else {
+                    panic!("状态边框应使用渐变衔接普通边框");
+                };
+                let length = if horizontal { height } else { width };
+                assert_eq!(angle, if horizontal { 180.0 } else { 90.0 });
+                assert!((stops[0].percentage * length - 3.0).abs() < 0.001);
+                assert!((stops[1].percentage * length - 10.0).abs() < 0.001);
+                assert_eq!(
+                    status.border_color.interpolation_space(),
+                    gpui::ColorSpace::Oklab
+                );
+                assert_eq!(stops[0].color, status_color.into());
+                let mut transparent_status = status_color;
+                transparent_status.alpha = 0.0;
+                assert_eq!(stops[1].color, transparent_status.into());
+            }
+        }
+    }
+
+    #[test]
+    fn card_border_fade_does_not_interpolate_toward_the_dark_translucent_border() {
+        let bounds = gpui::Bounds::new(
+            gpui::point(px(0.0), px(0.0)),
+            gpui::size(px(320.0), px(80.0)),
+        );
+        let border_color = gpui::rgb_to_hsla(gpui::rgba(0x1118271f));
+        let status_color = gpui::rgb_to_hsla(gpui::rgb(0xe48100));
+        for horizontal in [false, true] {
+            let quad =
+                super::card_border_quad(bounds, border_color, Some(status_color), horizontal);
+            let gpui::BackgroundKind::LinearGradient { stops, .. } = quad.border_color.kind()
+            else {
+                panic!("状态边框应使用透明度渐变");
+            };
+            let from: gpui::Hsla = stops[0].color.into();
+            let to: gpui::Hsla = stops[1].color.into();
+            assert_eq!(from.color, to.color);
+            assert_eq!(from.alpha, 1.0);
+            assert_eq!(to.alpha, 0.0);
+            let base = quad.clone().border_color(border_color);
+            assert_eq!(base.bounds, quad.bounds);
+            assert_eq!(base.corner_radii, quad.corner_radii);
+            assert_eq!(base.border_widths, quad.border_widths);
+            assert_eq!(base.border_color, border_color.into());
+        }
+    }
 
     #[test]
     fn color_preview_requires_complete_plain_text() {
