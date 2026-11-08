@@ -254,6 +254,10 @@ impl ListItemMetrics {
             );
         }
 
+        if preview_color(preview).is_some() {
+            return self.with_preview_line_count(1);
+        }
+
         if let Some(html) = preview
             .filter(|preview| preview.role() == FormatRole::Html)
             .and_then(|preview| preview.html_content.as_deref())

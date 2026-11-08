@@ -1756,6 +1756,55 @@ fn image_meta_byte_length(
     })
 }
 
+fn preview_color(preview: Option<&FormatPreview>) -> Option<gpui::Rgba> {
+    let preview = preview.filter(|preview| preview.role() == FormatRole::PlainText)?;
+    let [r, g, b, a] = crate::domain::color::parse_color_code(&preview.text)?;
+    // 列表查询可能截断文本，不能把长文本开头的色号当成完整颜色条目。
+    if preview.text.graphemes(true).count() != preview.char_count {
+        return None;
+    }
+    Some(gpui::Rgba::new(r, g, b, a))
+}
+
+fn color_swatch(color: gpui::Rgba, size: Pixels, border: gpui::Hsla) -> gpui::Div {
+    let radius = px(4.0);
+    div()
+        .relative()
+        .size(size)
+        .flex_shrink_0()
+        .rounded(radius)
+        .bg(gpui::rgb(0xffffff))
+        .when(color.alpha < 1.0, |this| {
+            this.child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size(size / 2.0)
+                    .rounded_tl(radius)
+                    .bg(gpui::rgb(0xbfbfbf)),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .bottom_0()
+                    .right_0()
+                    .size(size / 2.0)
+                    .rounded_br(radius)
+                    .bg(gpui::rgb(0xbfbfbf)),
+            )
+        })
+        .child(div().absolute().inset_0().rounded(radius).bg(color))
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .rounded(radius)
+                .border_1()
+                .border_color(border),
+        )
+}
+
 fn render_item_surface<T>(
     item: &ClipboardListItem,
     selected: bool,
@@ -2006,6 +2055,36 @@ fn render_item_surface<T>(
                         content_metrics.preview_line_count
                     },
                 ));
+    } else if let Some(color_preview) = display_preview
+        && let Some(color) = preview_color(Some(color_preview))
+    {
+        preview = preview.child(
+            div()
+                .w_full()
+                .h(metrics.preview_line_height)
+                .flex()
+                .items_center()
+                .gap(metrics.rem_size * 0.375)
+                .child(color_swatch(
+                    color,
+                    metrics.preview_line_height,
+                    theme.border,
+                ))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(metrics.preview_font_size)
+                        .line_height(metrics.preview_line_height)
+                        .text_color(if show_note_header {
+                            theme.muted_foreground
+                        } else {
+                            theme.foreground
+                        })
+                        .child(color_preview.text.trim().to_owned()),
+                ),
+        );
     } else {
         preview = preview
             .text_size(metrics.preview_font_size)
@@ -3737,6 +3816,35 @@ mod tests {
     use crate::i18n::{Locale, Translator};
     use gpui::px;
     use std::collections::HashMap;
+
+    #[test]
+    fn color_preview_requires_complete_plain_text() {
+        use crate::domain::capture::FormatKind;
+        use crate::domain::clipboard::{ContentKind, FormatPreview};
+
+        let mut preview = FormatPreview {
+            format_namespace: "mime".into(),
+            format_key: "text/plain".into(),
+            format_name: "纯文本".into(),
+            format_order: 0,
+            format_kind: FormatKind::Text,
+            text: "#00aeeb".into(),
+            char_count: 7,
+            content_kind: ContentKind::Text,
+            html_content: None,
+            image_source: None,
+            image_dimensions: None,
+            is_restorable: true,
+        };
+        assert!(super::preview_color(Some(&preview)).is_some());
+        preview.char_count = 400;
+        assert!(super::preview_color(Some(&preview)).is_none());
+        preview.char_count = 7;
+        preview.format_kind = FormatKind::Html;
+        preview.format_key = "text/html".into();
+        assert!(super::preview_color(Some(&preview)).is_none());
+        assert!(super::preview_color(None).is_none());
+    }
 
     #[test]
     fn lazy_action_width_matches_available_buttons_and_display_settings() {
