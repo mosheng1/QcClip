@@ -4,21 +4,22 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "kebab-case")]
 pub enum ItemRegionVisibility {
     Always,
-    Active,
+    #[serde(alias = "active")]
+    Hover,
     Hidden,
 }
 
 impl ItemRegionVisibility {
-    pub const ALL: [Self; 3] = [Self::Always, Self::Active, Self::Hidden];
+    pub const ALL: [Self; 3] = [Self::Always, Self::Hover, Self::Hidden];
 
-    pub const fn is_visible(self, active: bool) -> bool {
-        matches!(self, Self::Always) || (matches!(self, Self::Active) && active)
+    pub const fn is_visible(self, hovered: bool) -> bool {
+        matches!(self, Self::Always) || (matches!(self, Self::Hover) && hovered)
     }
 
     pub const fn label_key(self) -> &'static str {
         match self {
             Self::Always => "settings.item_display.always",
-            Self::Active => "settings.item_display.active",
+            Self::Hover => "settings.item_display.hover",
             Self::Hidden => "settings.item_display.hidden",
         }
     }
@@ -108,7 +109,7 @@ impl Default for ItemDisplayConfig {
         Self {
             info_visibility: ItemRegionVisibility::Always,
             toolbar_visibility: ItemRegionVisibility::Always,
-            actions_visibility: ItemRegionVisibility::Active,
+            actions_visibility: ItemRegionVisibility::Hover,
             fields: ItemDisplayField::default_fields(),
         }
     }
@@ -180,7 +181,7 @@ impl ItemDisplayPreset {
             Self::Compact => ItemDisplayConfig {
                 info_visibility: Hidden,
                 toolbar_visibility: Always,
-                actions_visibility: Active,
+                actions_visibility: Hover,
                 fields: vec![Source, Shortcut, Favorite, Pin, Delete],
             },
             Self::Full => ItemDisplayConfig {
@@ -207,7 +208,7 @@ mod tests {
         assert_eq!(config.preset(), None);
         config.set_enabled(ItemDisplayField::Time, true);
         assert_eq!(config.preset(), Some(ItemDisplayPreset::Full));
-        config.actions_visibility = ItemRegionVisibility::Active;
+        config.actions_visibility = ItemRegionVisibility::Hover;
         assert_eq!(config.preset(), Some(ItemDisplayPreset::Standard));
     }
 
@@ -231,7 +232,7 @@ mod tests {
         assert!(default.actions_visibility.is_visible(true));
         let modes = [
             (ItemRegionVisibility::Always, [true, true]),
-            (ItemRegionVisibility::Active, [false, true]),
+            (ItemRegionVisibility::Hover, [false, true]),
             (ItemRegionVisibility::Hidden, [false, false]),
         ];
         for (identity, expected_identity) in modes {
@@ -241,13 +242,13 @@ mod tests {
                     actions_visibility: actions,
                     ..ItemDisplayConfig::default()
                 };
-                for (index, active) in [false, true].into_iter().enumerate() {
+                for (index, hovered) in [false, true].into_iter().enumerate() {
                     assert_eq!(
-                        config.toolbar_visibility.is_visible(active),
+                        config.toolbar_visibility.is_visible(hovered),
                         expected_identity[index]
                     );
                     assert_eq!(
-                        config.actions_visibility.is_visible(active),
+                        config.actions_visibility.is_visible(hovered),
                         expected_actions[index]
                     );
                 }
@@ -272,8 +273,37 @@ mod tests {
         config.info_visibility = ItemRegionVisibility::Hidden;
         assert!(!config.shows_info_row());
         config.set_enabled(ItemDisplayField::Time, true);
-        config.info_visibility = ItemRegionVisibility::Active;
+        config.info_visibility = ItemRegionVisibility::Hover;
         assert!(config.shows_info_row());
+    }
+
+    #[test]
+    fn hover_visibility_accepts_legacy_active_and_saves_as_hover() {
+        for value in ["active", "hover"] {
+            let json = serde_json::json!({
+                "appearance": {
+                    "itemDisplay": {
+                        "infoVisibility": value,
+                        "toolbarVisibility": value,
+                        "actionsVisibility": value,
+                    }
+                }
+            });
+            let loaded = crate::config::load::from_str(&json.to_string()).unwrap();
+            assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+            let display = &loaded.config.appearance.item_display;
+            assert_eq!(display.info_visibility, ItemRegionVisibility::Hover);
+            assert_eq!(display.toolbar_visibility, ItemRegionVisibility::Hover);
+            assert_eq!(display.actions_visibility, ItemRegionVisibility::Hover);
+
+            let saved = serde_json::to_value(&loaded.config).unwrap();
+            for field in ["infoVisibility", "toolbarVisibility", "actionsVisibility"] {
+                assert_eq!(saved["appearance"]["itemDisplay"][field], "hover");
+            }
+            let reloaded = crate::config::load::from_str(&saved.to_string()).unwrap();
+            assert!(reloaded.warnings.is_empty());
+            assert_eq!(reloaded.config.appearance.item_display, *display);
+        }
     }
 
     #[test]
@@ -320,7 +350,7 @@ mod tests {
                 .appearance
                 .item_display
                 .actions_visibility,
-            ItemRegionVisibility::Active
+            ItemRegionVisibility::Hover
         );
         assert_eq!(invalid_actions.warnings.len(), 1);
         for preset in ItemDisplayPreset::ALL {

@@ -14,7 +14,7 @@
   "settings.item_display.actions": "操作按钮",
   "settings.item_display.standard": "默认",
   "settings.item_display.always": "始终显示",
-  "settings.item_display.active": "悬停或选中",
+  "settings.item_display.hover": "悬停",
   "settings.item_display.hidden": "隐藏",
   "settings.item_display.pure": "纯净",
   "settings.item_display.compact": "精简",

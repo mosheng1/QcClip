@@ -14,7 +14,7 @@
   "settings.item_display.actions": "Action buttons",
   "settings.item_display.standard": "Default",
   "settings.item_display.always": "Always",
-  "settings.item_display.active": "Hover or select",
+  "settings.item_display.hover": "Hover",
   "settings.item_display.hidden": "Hidden",
   "settings.item_display.pure": "Pure",
   "settings.item_display.compact": "Compact",

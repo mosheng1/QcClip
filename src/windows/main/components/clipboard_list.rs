@@ -1195,7 +1195,6 @@ fn hover_action_fields(
 fn render_hover_actions(
     item: &ClipboardListItem,
     active_tab: TabId,
-    selected: bool,
     hover_allowed: bool,
     cx: &mut Context<MainWindow>,
 ) -> Option<(AnyElement, usize)> {
@@ -1210,7 +1209,7 @@ fn render_hover_actions(
     }
     let expanded_width =
         gpui_component::Theme::global(cx).font_size * (button_count as f32 * 20.0 / 16.0);
-    let visible = display.actions_visibility.is_visible(selected);
+    let visible = display.actions_visibility.is_visible(false);
     let animations_enabled =
         crate::config_runtime::animation_enabled(cx, crate::config::AnimationKind::ListActions);
     let motion = Duration::from_millis(160).with_easing(gpui::ease_in_out);
@@ -1254,7 +1253,7 @@ fn render_hover_actions(
                 this.transitions(|transitions| transitions.w(motion.clone()).opacity(motion))
             })
             .when(
-                hover_allowed && display.actions_visibility == ItemRegionVisibility::Active,
+                hover_allowed && display.actions_visibility == ItemRegionVisibility::Hover,
                 |this| {
                     this.group_hover(format!("clipboard-row-hover-{row_id}"), |style| {
                         style.w(expanded_width).opacity(1.0)
@@ -1880,8 +1879,9 @@ fn render_item_surface<T>(
     let identity_count = usize::from(show_source) + usize::from(show_shortcut);
     let has_toolbar = action_count + identity_count > 0;
     let mut identity = div()
+        .id(("clipboard-identity", item.history_id as u64))
         .h_full()
-        .when(!display.toolbar_visibility.is_visible(selected), |this| {
+        .when(!display.toolbar_visibility.is_visible(false), |this| {
             this.w_0()
         })
         .flex_none()
@@ -1913,7 +1913,7 @@ fn render_item_surface<T>(
                     .child(shortcut_number),
             )
         });
-    if hover_allowed && display.toolbar_visibility == ItemRegionVisibility::Active {
+    if hover_allowed && display.toolbar_visibility == ItemRegionVisibility::Hover {
         identity = identity.group_hover(row_hover_group.clone(), |style| style.w_auto());
     }
     let mut info_bar = div()
@@ -1936,15 +1936,16 @@ fn render_item_surface<T>(
         })
         .children(hover_actions)
         .when(identity_count > 0, |this| this.child(identity));
-    let toolbar_visible = (identity_count > 0 && display.toolbar_visibility.is_visible(selected))
-        || (action_count > 0 && display.actions_visibility.is_visible(selected));
+    let toolbar_visible = (identity_count > 0 && display.toolbar_visibility.is_visible(false))
+        || (action_count > 0 && display.actions_visibility.is_visible(false));
     if !toolbar_visible {
-        info_bar = info_bar.invisible();
+        // 保留子控件的绘制和悬停监听，确保收起的控件能在下一帧重新布局。
+        info_bar = info_bar.opacity(0.0);
         if hover_allowed
-            && ((identity_count > 0 && display.toolbar_visibility == ItemRegionVisibility::Active)
-                || (action_count > 0 && display.actions_visibility == ItemRegionVisibility::Active))
+            && ((identity_count > 0 && display.toolbar_visibility == ItemRegionVisibility::Hover)
+                || (action_count > 0 && display.actions_visibility == ItemRegionVisibility::Hover))
         {
-            info_bar = info_bar.group_hover(row_hover_group.clone(), |style| style.visible());
+            info_bar = info_bar.group_hover(row_hover_group.clone(), |style| style.opacity(1.0));
         }
     }
     if list_item_style == ListItemStyle::Card {
@@ -2111,7 +2112,7 @@ fn render_item_surface<T>(
             this.child(div().min_w_0().truncate().child(length))
         })
         .children(image_size.map(|label| div().flex_shrink_0().child(label)));
-    if display.info_visibility == ItemRegionVisibility::Active && !selected {
+    if display.info_visibility == ItemRegionVisibility::Hover {
         meta_row = meta_row.invisible();
         if hover_allowed {
             meta_row = meta_row.group_hover(row_hover_group.clone(), |style| style.visible());
@@ -2124,7 +2125,7 @@ fn render_item_surface<T>(
         .relative()
         .flex()
         .flex_col()
-        .group(row_hover_group)
+        .group(row_hover_group.clone())
         .cursor_pointer();
     row = if let Some(width) = width {
         row.w(width)
@@ -2163,6 +2164,16 @@ fn render_item_surface<T>(
                             .truncate()
                             .text_xs()
                             .text_color(theme.muted_foreground)
+                            .when(
+                                display.toolbar_visibility == ItemRegionVisibility::Hover,
+                                |this| {
+                                    this.invisible().when(hover_allowed, |this| {
+                                        this.group_hover(row_hover_group.clone(), |style| {
+                                            style.visible()
+                                        })
+                                    })
+                                },
+                            )
                             .child(if show_source {
                                 if item.source_device_name.is_some() {
                                     i18n::clipboard_source(
@@ -2890,7 +2901,7 @@ fn render_row(
         hover_group.clone()
     };
     let main_window = cx.entity();
-    let hover_actions = render_hover_actions(&item, active_tab, selected, hover_allowed, cx);
+    let hover_actions = render_hover_actions(&item, active_tab, hover_allowed, cx);
     let mut row = render_item_surface(
         &item,
         selected,
