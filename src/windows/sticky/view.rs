@@ -2040,7 +2040,11 @@ impl Render for StickyNote {
                         .py(px(4.0))
                         .rounded_full()
                         .bg(paper.foreground.opacity(0.85))
-                        .text_color(paper.background)
+
+                        .text_color(gpui::Hsla {
+                            alpha: 1.0,
+                            ..paper.background
+                        })
                         .text_size(ui_rem(12.0))
                         .shadow_md()
                         .child(message),
