@@ -520,6 +520,115 @@ fn search_content_filters_and_tag_filters_apply_to_both_panes(cx: &mut gpui::Tes
 }
 
 #[gpui::test]
+fn batch_tags_cover_unloaded_items_and_preserve_selection_in_both_panes(
+    cx: &mut gpui::TestAppContext,
+) {
+    let fixture = Fixture::new(cx);
+    let config_path = fixture.directory.path().join("config.json");
+    let mut config: crate::config::AppConfig =
+        serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+    config.general.global_notification_enabled = false;
+    std::fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+    cx.update(|cx| crate::config_runtime::ConfigRuntime::reload(config_path, cx));
+    let panes = fixture.panes(cx);
+
+    for source in 0..2 {
+        let tag = fixture
+            .tags
+            .create(&format!("批量标签{source}"), "#1677FF")
+            .unwrap();
+        let selected_ids = panes[source].read_with(cx, |pane, _| pane.list_order_ids.clone());
+        assert!(selected_ids.len() > 1);
+        let source_tab = if source == 0 {
+            TabId::Clipboard
+        } else {
+            TabId::Favorites
+        };
+        let item_ids = resolve_multi_selection_item_ids(
+            source_tab,
+            &selected_ids,
+            &fixture.history,
+            &fixture.favorites,
+        )
+        .unwrap();
+        let generation = panes[source].update(cx, |pane, cx| {
+            pane.items.truncate(1);
+            let loaded_id = pane.items[0].history_id;
+            pane.loaded_items.retain(|id, _| *id == loaded_id);
+            pane.multi_selected_item_ids = selected_ids.clone();
+            pane.multi_selection_anchor = selected_ids.first().copied();
+            pane.selected_item_id = selected_ids.first().copied();
+            pane.list_scroll_handle
+                .as_ref()
+                .set_offset(gpui::point(px(0.0), px(-48.0)));
+            pane.set_tag_for_multi_selected_items(item_ids.clone(), tag.id, true, cx)
+                .detach();
+            pane.query_generation
+        });
+        cx.run_until_parked();
+
+        for item_id in &item_ids {
+            assert!(
+                fixture
+                    .tags
+                    .item_tag_ids(*item_id)
+                    .unwrap()
+                    .contains(&tag.id)
+            );
+        }
+        panes[source].read_with(cx, |pane, _| {
+            assert_eq!(pane.multi_selected_item_ids, selected_ids);
+            assert_eq!(pane.selected_item_id, selected_ids.first().copied());
+            assert_eq!(pane.query_generation, generation);
+            assert_eq!(pane.list_scroll_handle.offset().y, px(-48.0));
+            assert!(pane.items.iter().all(|item| item.tag_ids.contains(&tag.id)));
+            assert!(
+                pane.loaded_items
+                    .values()
+                    .all(|item| item.tag_ids.contains(&tag.id))
+            );
+        });
+        panes[1 - source].read_with(cx, |pane, _| {
+            for item in &pane.items {
+                if item_ids.contains(&item.item_id) {
+                    assert!(item.tag_ids.contains(&tag.id));
+                }
+            }
+        });
+        panes[source].update(cx, |pane, cx| {
+            pane.set_tag_for_multi_selected_items(item_ids.clone(), tag.id, false, cx)
+                .detach();
+        });
+        cx.run_until_parked();
+        for item_id in &item_ids {
+            assert!(
+                !fixture
+                    .tags
+                    .item_tag_ids(*item_id)
+                    .unwrap()
+                    .contains(&tag.id)
+            );
+        }
+        panes[source].read_with(cx, |pane, _| {
+            assert_eq!(pane.multi_selected_item_ids, selected_ids);
+            assert_eq!(pane.list_scroll_handle.offset().y, px(-48.0));
+            assert!(
+                pane.items
+                    .iter()
+                    .all(|item| !item.tag_ids.contains(&tag.id))
+            );
+        });
+        panes[1 - source].read_with(cx, |pane, _| {
+            assert!(
+                pane.items
+                    .iter()
+                    .all(|item| !item.tag_ids.contains(&tag.id))
+            );
+        });
+    }
+}
+
+#[gpui::test]
 fn favorite_changes_update_peer_without_resetting_its_scroll(cx: &mut gpui::TestAppContext) {
     let fixture = Fixture::new(cx);
     let panes = fixture.panes(cx);

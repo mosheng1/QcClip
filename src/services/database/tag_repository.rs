@@ -1,4 +1,7 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    collections::{HashMap, HashSet},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use rusqlite::{OptionalExtension, Row, TransactionBehavior, params};
 use thiserror::Error;
@@ -127,6 +130,26 @@ impl TagRepository {
         let rows = statement.query_map([item_id], |row| row.get::<_, i64>(0))?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(TagQueryError::from)
+    }
+
+    pub fn item_tag_counts(
+        &self,
+        item_ids: &[ClipboardItemId],
+    ) -> Result<HashMap<i64, usize>, TagQueryError> {
+        let connection = self.database.connect()?;
+        let mut statement = connection
+            .prepare("SELECT tag_id FROM clipboard_item_tags WHERE item_id = ?1 ORDER BY tag_id")?;
+        let mut counts = HashMap::new();
+        let mut seen = HashSet::new();
+        for item_id in item_ids {
+            if !seen.insert(*item_id) {
+                continue;
+            }
+            for tag_id in statement.query_map([item_id], |row| row.get::<_, i64>(0))? {
+                *counts.entry(tag_id?).or_insert(0) += 1;
+            }
+        }
+        Ok(counts)
     }
 
     pub fn create(&self, name: &str, color: &str) -> Result<Tag, TagCreateError> {
@@ -319,6 +342,25 @@ impl TagRepository {
         Ok(inserted > 0)
     }
 
+    pub fn add_to_items(
+        &self,
+        item_ids: &[ClipboardItemId],
+        tag_id: i64,
+    ) -> Result<usize, TagItemWriteError> {
+        if item_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let mut connection = self.database.connect_write()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut inserted = 0;
+        for item_id in item_ids {
+            inserted += Self::append_item_tags_in_transaction(&transaction, *item_id, &[tag_id])?;
+        }
+        transaction.commit()?;
+        Ok(inserted)
+    }
+
     pub(crate) fn append_item_tags_in_transaction(
         transaction: &rusqlite::Transaction<'_>,
         item_id: ClipboardItemId,
@@ -336,6 +378,27 @@ impl TagRepository {
             )?;
         }
         Ok(inserted)
+    }
+
+    pub fn remove_from_items(
+        &self,
+        item_ids: &[ClipboardItemId],
+        tag_id: i64,
+    ) -> Result<usize, TagItemDeleteError> {
+        if item_ids.is_empty() {
+            return Ok(0);
+        }
+        let mut connection = self.database.connect_write()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut deleted = 0;
+        for item_id in item_ids {
+            deleted += transaction.execute(
+                "DELETE FROM clipboard_item_tags WHERE item_id = ?1 AND tag_id = ?2",
+                params![item_id, tag_id],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(deleted)
     }
 
     pub fn remove_from_item(
@@ -705,6 +768,154 @@ mod tests {
                 expected.sort_unstable();
                 expected
             }
+        );
+    }
+
+    #[test]
+    fn adding_tag_to_items_preserves_existing_tags_and_ignores_duplicates() {
+        let directory = tempfile::tempdir().expect("无法创建测试临时目录");
+        let database =
+            Database::open(directory.path().join("test.sqlite3")).expect("无法创建测试数据库");
+        let repository = TagRepository::new(database.clone());
+        let existing = repository
+            .create("已有", "#1677FF")
+            .expect("无法创建已有标签");
+        let added = repository
+            .create("批量", "#00FF00")
+            .expect("无法创建批量标签");
+        let connection = database.connect().expect("无法连接测试数据库");
+        let item_ids: Vec<_> = (1..=3)
+            .map(|index| {
+                connection.execute(
+                    "INSERT INTO clipboard_items (
+                        uuid, hash_version, content_hash, content_kind, capture_state, created_at, updated_at
+                     ) VALUES (?1, 1, ?2, 'text', 'pending', 1, 1)",
+                    params![format!("batch-tag-{index}"), vec![index as u8; 32]],
+                ).expect("无法创建测试内容");
+                connection.last_insert_rowid()
+            })
+            .collect();
+        repository
+            .add_to_item(item_ids[0], existing.id)
+            .expect("无法添加已有标签");
+        repository
+            .add_to_item(item_ids[0], added.id)
+            .expect("无法添加重复标签");
+
+        assert_eq!(
+            repository
+                .add_to_items(&[], added.id)
+                .expect("空选择处理失败"),
+            0
+        );
+        assert_eq!(
+            repository
+                .add_to_items(&[item_ids[0], item_ids[1], item_ids[1]], added.id)
+                .expect("批量添加标签失败"),
+            1
+        );
+        assert_eq!(
+            repository
+                .add_to_items(&item_ids[..2], added.id)
+                .expect("重复批量添加失败"),
+            0
+        );
+        assert_eq!(
+            repository
+                .item_tag_ids(item_ids[0])
+                .expect("无法查询已有标签"),
+            vec![existing.id, added.id]
+        );
+        assert_eq!(
+            repository
+                .item_tag_ids(item_ids[1])
+                .expect("无法查询新增标签"),
+            vec![added.id]
+        );
+        assert!(
+            repository
+                .item_tag_ids(item_ids[2])
+                .expect("无法查询未选内容标签")
+                .is_empty()
+        );
+        assert_eq!(
+            repository
+                .item_tag_counts(&item_ids[..2])
+                .expect("无法查询标签数量"),
+            HashMap::from([(existing.id, 1), (added.id, 2)])
+        );
+        assert_eq!(
+            repository
+                .item_tag_counts(&[item_ids[0], item_ids[1], item_ids[2], item_ids[0]])
+                .expect("无法查询混合标签数量"),
+            HashMap::from([(existing.id, 1), (added.id, 2)])
+        );
+        assert!(
+            repository
+                .item_tag_counts(&[])
+                .expect("无法查询空选择标签")
+                .is_empty()
+        );
+        assert_eq!(
+            repository
+                .remove_from_items(&[], added.id)
+                .expect("空选择移除失败"),
+            0
+        );
+        assert_eq!(
+            repository
+                .remove_from_items(&[item_ids[0], item_ids[1], item_ids[1]], added.id)
+                .expect("批量移除标签失败"),
+            2
+        );
+        assert_eq!(
+            repository
+                .remove_from_items(&item_ids[..2], added.id)
+                .expect("重复批量移除失败"),
+            0
+        );
+        assert_eq!(
+            repository
+                .item_tag_ids(item_ids[0])
+                .expect("无法查询保留标签"),
+            vec![existing.id]
+        );
+        assert!(
+            repository
+                .item_tag_ids(item_ids[1])
+                .expect("无法查询移除结果")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn adding_tag_to_items_rolls_back_when_an_item_is_missing() {
+        let directory = tempfile::tempdir().expect("无法创建测试临时目录");
+        let database =
+            Database::open(directory.path().join("test.sqlite3")).expect("无法创建测试数据库");
+        let repository = TagRepository::new(database.clone());
+        let tag = repository
+            .create("批量", "#1677FF")
+            .expect("无法创建测试标签");
+        let connection = database.connect().expect("无法连接测试数据库");
+        connection.execute(
+            "INSERT INTO clipboard_items (
+                uuid, hash_version, content_hash, content_kind, capture_state, created_at, updated_at
+             ) VALUES ('batch-rollback', 1, zeroblob(32), 'text', 'pending', 1, 1)",
+            [],
+        ).expect("无法创建测试内容");
+        let item_id = connection.last_insert_rowid();
+
+        assert!(
+            repository
+                .add_to_items(&[item_id, item_id + 1], tag.id)
+                .is_err()
+        );
+        assert!(
+            repository
+                .item_tag_ids(item_id)
+                .expect("无法验证事务回滚")
+                .is_empty()
         );
     }
 

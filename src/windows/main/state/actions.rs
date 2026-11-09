@@ -1,5 +1,40 @@
 use super::*;
 use crate::services::paste::PasteOrderTarget;
+use crate::windows::menu::{MenuActionId, MenuIcon, MenuItem, MenuModel, MenuPosition};
+
+fn multi_selection_tag_menu(
+    tags: &[Tag],
+    tag_counts: &HashMap<i64, usize>,
+    selected_count: usize,
+    translator: &i18n::Translator,
+) -> MenuModel {
+    let items = if tags.is_empty() {
+        vec![
+            MenuItem::action(
+                MenuActionId::new("empty"),
+                translator.translate("main.tags.empty"),
+            )
+            .disabled(),
+        ]
+    } else {
+        tags.iter()
+            .map(|tag| {
+                let color =
+                    u32::from_str_radix(tag.color.trim_start_matches('#'), 16).unwrap_or(0x6B7280);
+                let item =
+                    MenuItem::action(MenuActionId::new(tag.id.to_string()), tag.name.clone())
+                        .with_icon(MenuIcon::color(color))
+                        .keep_open_on_click();
+                match tag_counts.get(&tag.id).copied().unwrap_or(0) {
+                    0 => item,
+                    count if count == selected_count => item.checked(),
+                    _ => item.indeterminate(),
+                }
+            })
+            .collect()
+    };
+    MenuModel::new(items)
+}
 
 fn paste_order_target(source_tab: TabId, cx: &gpui::App) -> Option<PasteOrderTarget> {
     let clipboard = crate::config_runtime::clipboard_config(cx);
@@ -331,6 +366,148 @@ impl MainWindow {
         })
         .detach();
         cx.notify();
+    }
+
+    pub(crate) fn open_multi_selection_tag_menu(
+        &mut self,
+        position: MenuPosition,
+        cx: &mut Context<Self>,
+    ) {
+        let selected_ids = self.multi_selected_item_ids.clone();
+        let source_tab = self.active_tab;
+        if selected_ids.is_empty() || source_tab == TabId::Emoji {
+            return;
+        }
+        let history_repository = self.history_repository.clone();
+        let favorite_repository = self.favorite_repository.clone();
+        let tag_repository = self.tag_repository.clone();
+        let tags = self.tags.clone();
+        let translator = i18n::translator(cx);
+        let task = cx.background_spawn(async move {
+            let item_ids = resolve_multi_selection_item_ids(
+                source_tab,
+                &selected_ids,
+                &history_repository,
+                &favorite_repository,
+            )?;
+            let tag_counts = tag_repository
+                .item_tag_counts(&item_ids)
+                .map_err(|error| error.to_string())?;
+            Ok::<_, String>((item_ids, tag_counts))
+        });
+        cx.spawn(async move |this, cx| {
+            let (item_ids, tag_counts) = match task.await {
+                Ok(result) => result,
+                Err(error) => {
+                    tracing::error!("加载批量标签菜单失败：{error}");
+                    return;
+                }
+            };
+            let selected_count = item_ids.iter().copied().collect::<HashSet<_>>().len();
+            let menu = multi_selection_tag_menu(&tags, &tag_counts, selected_count, &translator);
+            let checked_tags = RefCell::new(
+                tag_counts
+                    .into_iter()
+                    .filter_map(|(tag_id, count)| (count == selected_count).then_some(tag_id))
+                    .collect::<HashSet<_>>(),
+            );
+            let (sender, receiver) = async_channel::unbounded();
+            cx.update(|cx| {
+                MenuService::open_context_menu(
+                    menu,
+                    position,
+                    move |action, _| {
+                        let Some(tag_id) = action.as_str().parse::<i64>().ok().filter(|id| *id > 0)
+                        else {
+                            return;
+                        };
+                        let add = !checked_tags.borrow_mut().remove(&tag_id);
+                        if add {
+                            checked_tags.borrow_mut().insert(tag_id);
+                        }
+                        sender.try_send((tag_id, add)).ok();
+                    },
+                    cx,
+                );
+            });
+            // 按点击顺序写入，避免连续勾选和取消时后台任务交错执行。
+            while let Ok((tag_id, add)) = receiver.recv().await {
+                let Ok(task) = this.update(cx, |this, cx| {
+                    this.set_tag_for_multi_selected_items(item_ids.clone(), tag_id, add, cx)
+                }) else {
+                    break;
+                };
+                task.await;
+            }
+        })
+        .detach();
+    }
+
+    pub(crate) fn set_tag_for_multi_selected_items(
+        &mut self,
+        item_ids: Vec<ClipboardItemId>,
+        tag_id: i64,
+        add: bool,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
+        let tag_repository = self.tag_repository.clone();
+        let translator = i18n::translator(cx);
+        let title = translator.translate("main.menu.tags");
+        let (success_key, failure_key) = if add {
+            (
+                "main.multi_selection.add_tag_success",
+                "main.multi_selection.add_tag_failed",
+            )
+        } else {
+            (
+                "main.multi_selection.remove_tag_success",
+                "main.multi_selection.remove_tag_failed",
+            )
+        };
+        let success_message = translator.translate(success_key);
+        let failure_message = translator.translate(failure_key);
+        let task = cx.background_spawn(async move {
+            if add {
+                tag_repository
+                    .add_to_items(&item_ids, tag_id)
+                    .map_err(|error| error.to_string())?;
+            } else {
+                tag_repository
+                    .remove_from_items(&item_ids, tag_id)
+                    .map_err(|error| error.to_string())?;
+            }
+            Ok::<_, String>(item_ids)
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await.map(|item_ids| {
+                this.update(cx, |this, cx| {
+                    let selected: HashSet<_> = item_ids.iter().copied().collect();
+                    for item in this.items.iter_mut().chain(this.loaded_items.values_mut()) {
+                        if !selected.contains(&item.item_id) {
+                            continue;
+                        }
+                        if !add {
+                            item.tag_ids.retain(|id| *id != tag_id);
+                        } else if !item.tag_ids.contains(&tag_id) {
+                            item.tag_ids.push(tag_id);
+                            item.tag_ids.sort_unstable();
+                        }
+                    }
+                    // 移除当前筛选标签时重新校验成员，其余情况保留多选和滚动位置。
+                    if !add && this.selected_tag_ids.contains(&tag_id) {
+                        for item_id in &item_ids {
+                            this.refresh_saved_item(*item_id, cx);
+                        }
+                    }
+                    this.refresh_peer_items(&item_ids, cx);
+                    cx.notify();
+                })
+                .ok();
+            });
+            cx.update(|cx| {
+                show_multi_selection_feedback(result, title, success_message, failure_message, cx);
+            });
+        })
     }
 
     pub(crate) fn delete_multi_selected_items(
@@ -1042,5 +1219,47 @@ impl MainWindow {
             Err(error) => tracing::error!("剪贴板历史删除失败：{error}"),
         })
         .detach();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn batch_tag_menu_distinguishes_none_some_and_all_selected_items() {
+        let tags: Vec<_> = (1..=3)
+            .map(|id| Tag {
+                id,
+                uuid: format!("tag-{id}"),
+                name: format!("标签{id}"),
+                normalized_name: format!("标签{id}"),
+                color: "#1677FF".to_owned(),
+                sort_order: id,
+                created_at: 1,
+                updated_at: 1,
+            })
+            .collect();
+        let counts = HashMap::from([(2, 1), (3, 3)]);
+        let menu = multi_selection_tag_menu(
+            &tags,
+            &counts,
+            3,
+            &i18n::Translator::builtin(Locale::zh_cn()),
+        );
+        let items = menu.items();
+
+        assert_eq!(items[0].check_state.icon_path(), None);
+        assert_eq!(
+            items[1].check_state.icon_path(),
+            Some("assets/icons/minus.svg")
+        );
+        assert_eq!(
+            items[2].check_state.icon_path(),
+            Some("assets/icons/check.svg")
+        );
+        assert!(items.iter().all(|item| !item.close_on_click));
+        assert_eq!(items[1].check_state.toggled(), items[2].check_state);
+        assert_eq!(items[2].check_state.toggled(), items[0].check_state);
     }
 }

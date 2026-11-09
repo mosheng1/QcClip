@@ -186,7 +186,6 @@ impl MenuWindowView {
             return;
         };
         let close_on_click = item.close_on_click;
-        let checked = item.checked;
         window.prevent_default();
         let on_action = self.on_action.clone();
         if close_on_click {
@@ -198,7 +197,7 @@ impl MenuWindowView {
             });
         } else {
             if let Some(item) = self.menu.item_mut(index) {
-                item.checked = !checked;
+                item.check_state = item.check_state.toggled();
             }
             cx.notify();
             cx.defer(move |cx| on_action(action_id, cx));
@@ -346,7 +345,7 @@ impl MenuWindowView {
         };
         let is_active = self.active_child.get() == Some(index);
         let icon = item.icon.clone();
-        let checked = item.checked;
+        let check_icon_path = item.check_state.icon_path();
         let icon_color = icon.as_ref().and_then(|icon| icon.color);
         let icon_path = icon.as_ref().map(|icon| icon.path.clone());
         let icon_group = format!("qcclip-menu-item-icon-{}-{index}", self.level);
@@ -432,13 +431,8 @@ impl MenuWindowView {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .when(checked, |view| {
-                            view.child(hover_icon_path(
-                                icon_group.clone(),
-                                "assets/icons/check.svg",
-                                12.0,
-                                foreground,
-                            ))
+                        .when_some(check_icon_path, |view, path| {
+                            view.child(hover_icon_path(icon_group.clone(), path, 12.0, foreground))
                         }),
                 )
             })

@@ -187,6 +187,30 @@ impl DropdownItem {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MenuCheckState {
+    Unchecked,
+    Checked,
+    Mixed,
+}
+
+impl MenuCheckState {
+    pub(crate) fn toggled(self) -> Self {
+        match self {
+            Self::Checked => Self::Unchecked,
+            Self::Unchecked | Self::Mixed => Self::Checked,
+        }
+    }
+
+    pub(crate) fn icon_path(self) -> Option<&'static str> {
+        match self {
+            Self::Unchecked => None,
+            Self::Checked => Some("assets/icons/check.svg"),
+            Self::Mixed => Some("assets/icons/minus.svg"),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MenuItem {
     pub(crate) kind: MenuItemKind,
@@ -194,7 +218,7 @@ pub struct MenuItem {
     pub(crate) label: SharedString,
     pub(crate) icon: Option<MenuIcon>,
     pub(crate) enabled: bool,
-    pub(crate) checked: bool,
+    pub(crate) check_state: MenuCheckState,
     pub(crate) close_on_click: bool,
     pub(crate) children: Vec<MenuItem>,
     pub(crate) centered: bool,
@@ -209,7 +233,7 @@ impl MenuItem {
             label: label.into(),
             icon: None,
             enabled: true,
-            checked: false,
+            check_state: MenuCheckState::Unchecked,
             close_on_click: true,
             children: Vec::new(),
             centered: false,
@@ -224,7 +248,7 @@ impl MenuItem {
             label: label.into(),
             icon: None,
             enabled: true,
-            checked: false,
+            check_state: MenuCheckState::Unchecked,
             close_on_click: true,
             children,
             centered: false,
@@ -245,7 +269,7 @@ impl MenuItem {
             label: label.into(),
             icon: None,
             enabled: true,
-            checked: false,
+            check_state: MenuCheckState::Unchecked,
             close_on_click: true,
             children,
             centered: false,
@@ -260,7 +284,7 @@ impl MenuItem {
             label: SharedString::default(),
             icon: None,
             enabled: false,
-            checked: false,
+            check_state: MenuCheckState::Unchecked,
             close_on_click: true,
             children: Vec::new(),
             centered: false,
@@ -289,7 +313,12 @@ impl MenuItem {
     }
 
     pub fn checked(mut self) -> Self {
-        self.checked = true;
+        self.check_state = MenuCheckState::Checked;
+        self
+    }
+
+    pub fn indeterminate(mut self) -> Self {
+        self.check_state = MenuCheckState::Mixed;
         self
     }
 
@@ -352,6 +381,21 @@ mod tests {
     fn keep_open_action_stays_open() {
         let item = MenuItem::action(MenuActionId::new("action"), "Action").keep_open_on_click();
 
+        assert!(!item.close_on_click);
+    }
+
+    #[test]
+    fn mixed_tag_menu_state_fills_before_it_clears() {
+        let item = MenuItem::action(MenuActionId::new("tag"), "混合标签")
+            .indeterminate()
+            .keep_open_on_click();
+
+        assert_eq!(item.check_state.icon_path(), Some("assets/icons/minus.svg"));
+        let checked = item.check_state.toggled();
+        assert_eq!(checked, MenuCheckState::Checked);
+        assert_eq!(checked.icon_path(), Some("assets/icons/check.svg"));
+        assert_eq!(checked.toggled(), MenuCheckState::Unchecked);
+        assert_eq!(checked.toggled().icon_path(), None);
         assert!(!item.close_on_click);
     }
 }
