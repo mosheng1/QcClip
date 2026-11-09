@@ -18,6 +18,7 @@ pub(super) struct ListItemMetrics {
     pub(super) adaptive_max_lines: usize,
     pub(super) preview_line_count: usize,
     pub(super) show_meta: bool,
+    pub(super) info_row_progress: f32,
     pub(super) only_show_notes: bool,
     pub(super) horizontal: bool,
     font_metrics: Option<crate::ui::fonts::AppFontMetrics>,
@@ -65,6 +66,7 @@ impl ListItemMetrics {
             adaptive_max_lines,
             preview_line_count,
             show_meta: height.shows_meta(),
+            info_row_progress: 1.0,
             only_show_notes: false,
             horizontal: false,
             font_metrics: None,
@@ -126,7 +128,7 @@ impl ListItemMetrics {
         self.preview_height = preview_height;
         self.content_height = self.vertical_padding * 2.0
             + if self.show_meta {
-                self.meta_row_height
+                self.meta_row_height * self.info_row_progress
             } else {
                 px(0.0)
             }
@@ -447,7 +449,7 @@ impl ListItemMetrics {
         let chrome = self.vertical_padding * 2.0
             + px(MAX_ROW_BORDER_WIDTH)
             + if self.show_meta {
-                self.meta_row_height
+                (self.meta_row_height + self.rem_size * 0.25) * self.info_row_progress
             } else {
                 px(0.0)
             }
@@ -458,8 +460,13 @@ impl ListItemMetrics {
             .floor()
             .max(1.0) as usize;
         let mut metrics = self.with_preview_height(preview_height, lines);
-        metrics.content_height += header_height;
-        metrics.row_height += header_height;
+        let info_gap = if self.show_meta {
+            self.rem_size * 0.25 * self.info_row_progress
+        } else {
+            px(0.0)
+        };
+        metrics.content_height += header_height + info_gap;
+        metrics.row_height += header_height + info_gap;
         if self.style == ListItemStyle::Seamless {
             metrics.row_height += self.card_vertical_inset * 2.0;
         }
@@ -473,6 +480,30 @@ impl ListItemMetrics {
     pub(super) fn with_info_row(mut self, show_meta: bool) -> Self {
         self.show_meta = show_meta;
         self.with_preview_height(self.preview_height, self.preview_line_count)
+    }
+
+    pub(super) fn with_info_row_progress(mut self, progress: f32) -> Self {
+        let progress = progress.clamp(0.0, 1.0);
+        let delta = if self.show_meta {
+            self.meta_row_height * (progress - self.info_row_progress)
+        } else {
+            px(0.0)
+        };
+        if self.horizontal && self.show_meta {
+            self.preview_height = (self.preview_height
+                - delta
+                - self.rem_size * 0.25 * (progress - self.info_row_progress))
+                .max(px(0.0));
+            self.preview_line_count = (f32::from(self.preview_height)
+                / f32::from(self.preview_line_height))
+            .floor()
+            .max(1.0) as usize;
+        } else {
+            self.content_height += delta;
+            self.row_height += delta;
+        }
+        self.info_row_progress = progress;
+        self
     }
 
     pub(super) fn with_note_display(mut self, only_show_notes: bool) -> Self {
@@ -605,6 +636,57 @@ mod item_display_tests {
             );
             assert_eq!(shown.preview_height, hidden.preview_height);
             assert_eq!(shown.preview_line_count, hidden.preview_line_count);
+        }
+    }
+
+    #[test]
+    fn hover_information_height_tracks_progress_without_changing_vertical_preview() {
+        for style in [ListItemStyle::Card, ListItemStyle::Seamless] {
+            for height in ListItemHeight::ALL {
+                let base =
+                    ListItemMetrics::from_rem_size(px(16.0), style, CardItemGap::Eight, height, 8)
+                        .with_info_row(true)
+                        .with_info_row_progress(0.0);
+                for progress in [0.0, 0.25, 0.5, 1.0] {
+                    let expanded = base.with_info_row_progress(progress);
+                    assert_eq!(
+                        expanded.row_height - base.row_height,
+                        base.meta_row_height * progress
+                    );
+                    assert_eq!(
+                        expanded.content_height - base.content_height,
+                        base.meta_row_height * progress
+                    );
+                    assert_eq!(expanded.preview_height, base.preview_height);
+                    assert_eq!(
+                        expanded.with_info_row_progress(0.0).row_height,
+                        base.row_height
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn horizontal_hover_information_uses_preview_space_within_fixed_card_height() {
+        let base = ListItemMetrics::from_rem_size(
+            px(16.0),
+            ListItemStyle::Card,
+            CardItemGap::Eight,
+            ListItemHeight::Large,
+            8,
+        )
+        .with_info_row(true)
+        .with_info_row_progress(0.0)
+        .with_horizontal_card(px(420.0), true);
+        for progress in [0.0, 0.5, 1.0] {
+            let expanded = base.with_info_row_progress(progress);
+            assert_eq!(expanded.row_height, base.row_height);
+            assert_eq!(expanded.content_height, base.content_height);
+            assert_eq!(
+                base.preview_height - expanded.preview_height,
+                (base.meta_row_height + base.rem_size * 0.25) * progress
+            );
         }
     }
 }

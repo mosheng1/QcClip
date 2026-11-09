@@ -72,6 +72,7 @@ use crate::platform::external_drag::ExternalDragService;
 
 mod context_menu;
 mod heat_scrollbar;
+mod info_row;
 mod metrics;
 
 pub(crate) use context_menu::confirm_remove_from_favorites;
@@ -80,6 +81,7 @@ use context_menu::{
     SPLIT_WORDS_ACTION, favorite_item_context_menu, history_item_context_menu,
     parse_toggle_tag_action, tag_color_value, truncate_link_label,
 };
+use info_row::InfoRowState;
 use metrics::*;
 
 const MIN_PREFETCH_ROWS: usize = 4;
@@ -223,11 +225,13 @@ impl Render for ClipboardRowView {
 
 fn render_cached_row(
     content: ClipboardRowContent,
+    info_row_state: Option<(Entity<InfoRowState>, usize)>,
     window: &mut Window,
     cx: &mut Context<MainWindow>,
 ) -> AnyElement {
     let main_window = cx.entity().downgrade();
     let row_height = content.metrics.row_height;
+    let row_id = content.item.history_id;
     let mut content = Some(content);
     let row = window.use_keyed_state(
         (
@@ -251,11 +255,40 @@ fn render_cached_row(
             }
         })
     });
-    if changed {
+    let element = if changed {
         row.into_any_element()
     } else {
         let mut slot = div().w_full().h(row_height);
         row.cached(slot.style().clone()).into_any_element()
+    };
+    if let Some((state, index)) = info_row_state {
+        let main_window = cx.entity().downgrade();
+        div()
+            .id(("clipboard-info-hover", row_id as u64))
+            .w_full()
+            .h(row_height)
+            .on_hover(move |hovered, window, cx| {
+                if *hovered
+                    && (!window.is_window_hovered()
+                        || !MenuService::hover_animation_allowed(cx)
+                        || cx.has_active_drag())
+                {
+                    return;
+                }
+                let animated = config_runtime::animation_enabled(
+                    cx,
+                    crate::config::AnimationKind::ListItemHover,
+                );
+                if state.update(cx, |state, _| {
+                    state.set_hovered(row_id, index, *hovered, animated, std::time::Instant::now())
+                }) {
+                    let _ = main_window.update(cx, |_, cx| cx.notify());
+                }
+            })
+            .child(element)
+            .into_any_element()
+    } else {
+        element
     }
 }
 
@@ -300,7 +333,7 @@ pub fn render(
     file_list_views: &HashMap<FileListKey, Entity<FileListView>>,
     toolbar_bottom: Pixels,
     toolbar_dragging: bool,
-    window: &Window,
+    window: &mut Window,
     cx: &mut Context<MainWindow>,
 ) -> AnyElement {
     let appearance = crate::config_runtime::appearance_config(cx);
@@ -314,7 +347,14 @@ pub fn render(
     )
     .with_info_row(appearance.item_display.shows_info_row())
     .with_font_metrics(crate::ui::fonts::AppFontMetrics::from_window(window, cx))
-    .with_note_display(appearance.only_show_notes);
+    .with_note_display(appearance.only_show_notes)
+    .with_info_row_progress(
+        if appearance.item_display.info_visibility == ItemRegionVisibility::Hover {
+            0.0
+        } else {
+            1.0
+        },
+    );
     let clipboard = crate::config_runtime::clipboard_config(cx);
     let display_priority = clipboard.display_priority;
     let preview_priority = clipboard.preview_priority.resolve(display_priority);
@@ -530,7 +570,7 @@ fn render_rows(
     preview_priority: ClipboardDisplayPriority,
     toolbar_bottom: Pixels,
     toolbar_dragging: bool,
-    window: &Window,
+    window: &mut Window,
     cx: &mut Context<MainWindow>,
 ) -> AnyElement {
     let translator = i18n::translator(cx);
@@ -590,7 +630,7 @@ fn render_rows(
         list_item_height: metrics.height,
         adaptive_max_lines: metrics.adaptive_max_lines as u8,
         only_show_notes: metrics.only_show_notes,
-        show_info_row: metrics.show_meta,
+        show_info_row: metrics.show_meta && metrics.info_row_progress > 0.0,
         show_horizontal_header,
         display_priority,
         query_generation,
@@ -663,6 +703,63 @@ fn render_rows(
         .as_ref()
         .expect("列表布局缓存应该已初始化");
     let item_sizes = layout_cache.sizes.clone();
+    let info_on_hover = item_display.shows_info_row()
+        && item_display.info_visibility == ItemRegionVisibility::Hover;
+    let info_row_state =
+        window.use_keyed_state("clipboard-info-rows", cx, |_, _| InfoRowState::default());
+    let now = std::time::Instant::now();
+    let (info_progress, info_animating) = info_row_state.update(cx, |state, cx| {
+        if state.query_generation != Some(query_generation) {
+            *state = InfoRowState::default();
+            state.query_generation = Some(query_generation);
+        }
+        let animated =
+            config_runtime::animation_enabled(cx, crate::config::AnimationKind::ListItemHover);
+        if !info_on_hover || !hover_allowed || cx.has_active_drag() {
+            state.collapse(info_on_hover && animated, now);
+        }
+        if !animated {
+            state.finish();
+        }
+        state.frame(now)
+    });
+    for (history_id, (previous_index, progress)) in &info_progress {
+        let index = if list_order_ids.get(*previous_index) == Some(history_id) {
+            Some(*previous_index)
+        } else {
+            list_order_ids.iter().position(|id| id == history_id)
+        };
+        if let Some(index) = index {
+            let base = loaded_items
+                .get(history_id)
+                .map(|item| {
+                    let file_count =
+                        file_list_view_for_item(item, display_priority, file_list_views)
+                            .map(|view| view.read(cx).path_count());
+                    metrics.for_item(
+                        item,
+                        display_priority,
+                        html_images,
+                        file_count,
+                        preview_width,
+                        window,
+                    )
+                })
+                .unwrap_or(metrics);
+            let row = if info_on_hover {
+                base.with_info_row_progress(*progress)
+            } else {
+                base
+            };
+            item_sizes.set_size(index, size(list_width, row.row_height));
+        }
+    }
+    if info_animating {
+        let main_window = cx.entity().downgrade();
+        window.on_next_frame(move |_, cx| {
+            let _ = main_window.update(cx, |_, cx| cx.notify());
+        });
+    }
     let multi_selected_item_ids = multi_selected_item_ids.to_vec();
     let mut list = v_virtual_list_reorderable(
         cx.entity(),
@@ -723,18 +820,26 @@ fn render_rows(
                                 .source_app_icon
                                 .as_ref()
                                 .and_then(|source| this.application_icon_for(source));
-                            let row_metrics = metrics.for_item(
-                                &item,
-                                display_priority,
-                                &this.loaded_html_images,
-                                file_count,
-                                available_preview_width(
-                                    list_width,
-                                    list_item_style,
-                                    window.rem_size(),
-                                ),
-                                window,
-                            );
+                            let row_metrics = metrics
+                                .for_item(
+                                    &item,
+                                    display_priority,
+                                    &this.loaded_html_images,
+                                    file_count,
+                                    available_preview_width(
+                                        list_width,
+                                        list_item_style,
+                                        window.rem_size(),
+                                    ),
+                                    window,
+                                )
+                                .with_info_row_progress(if info_on_hover {
+                                    info_progress
+                                        .get(&item_history_id)
+                                        .map_or(0.0, |(_, progress)| *progress)
+                                } else {
+                                    1.0
+                                });
                             let load_animation =
                                 if matches!(active_tab, TabId::Clipboard | TabId::Favorites) {
                                     this.list_item_load_animations
@@ -787,6 +892,8 @@ fn render_rows(
                                             .map(|duration| duration.as_secs() / 60)
                                             .unwrap_or_default(),
                                     },
+                                    (info_on_hover && hover_allowed)
+                                        .then(|| (info_row_state.clone(), index)),
                                     window,
                                     cx,
                                 )
@@ -1951,10 +2058,6 @@ fn render_item_surface<T>(
     if list_item_style == ListItemStyle::Card {
         info_bar = info_bar.rounded_tr(px(CARD_RADIUS));
     }
-    let inline_info_bar = !metrics.horizontal && !item.note_text.is_empty() && !metrics.show_meta;
-    if inline_info_bar {
-        info_bar = info_bar.relative().h(metrics.preview_line_height);
-    }
     let mut info_bar = has_toolbar.then_some(info_bar);
 
     let mut preview = div()
@@ -1976,9 +2079,6 @@ fn render_item_surface<T>(
                 .line_clamp(metrics.preview_line_count)
                 .child(item.note_text.clone()),
         );
-        if inline_info_bar {
-            preview = preview.children(info_bar.take());
-        }
     } else if let Some(file_list) = file_list {
         if show_note_header && metrics.height != ListItemHeight::Adaptive {
             preview = preview
@@ -2088,8 +2188,9 @@ fn render_item_surface<T>(
             );
     }
 
-    let mut meta_row = div()
-        .h(metrics.meta_row_height)
+    let meta_row = div()
+        .h(metrics.meta_row_height * metrics.info_row_progress)
+        .opacity(metrics.info_row_progress)
         .w_full()
         .min_w_0()
         .flex_none()
@@ -2112,12 +2213,6 @@ fn render_item_surface<T>(
             this.child(div().min_w_0().truncate().child(length))
         })
         .children(image_size.map(|label| div().flex_shrink_0().child(label)));
-    if display.info_visibility == ItemRegionVisibility::Hover {
-        meta_row = meta_row.invisible();
-        if hover_allowed {
-            meta_row = meta_row.group_hover(row_hover_group.clone(), |style| style.visible());
-        }
-    }
     let mut meta_row = Some(meta_row);
     let mut row = div()
         .h(metrics.content_height)
@@ -2202,7 +2297,7 @@ fn render_item_surface<T>(
         row = row.children(meta_row.take());
     }
     if show_note_header {
-        let mut header = div()
+        let header = div()
             .w_full()
             .h(metrics.preview_line_height)
             .flex_none()
@@ -2219,9 +2314,6 @@ fn render_item_surface<T>(
                         .join(" "),
                 ),
             );
-        if inline_info_bar {
-            header = header.children(info_bar.take());
-        }
         row = row.child(header);
     }
     row = row.child(preview);
@@ -2233,7 +2325,7 @@ fn render_item_surface<T>(
                     &[("count", item.paste_count.to_string())],
                 )));
             }
-            meta.mt(metrics.rem_size * 0.25)
+            meta.mt(metrics.rem_size * 0.25 * metrics.info_row_progress)
         }));
     }
     let status_inset = if item_status_colors(

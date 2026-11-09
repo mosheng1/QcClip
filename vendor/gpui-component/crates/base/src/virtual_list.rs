@@ -315,6 +315,22 @@ impl ReorderableVirtualListSizes {
         self.state.borrow().values.len()
     }
 
+    pub fn set_size(&self, index: usize, size: Size<Pixels>) {
+        let mut state = self.state.borrow_mut();
+        let Some(value) = state.values.get_mut(index) else {
+            return;
+        };
+        if *value == size {
+            return;
+        }
+        *value = size;
+        state.dirty_range = Some(match state.dirty_range.take() {
+            Some(previous) => previous.start.min(index)..previous.end.max(index + 1),
+            None => index..index + 1,
+        });
+        state.version = state.version.wrapping_add(1);
+    }
+
     pub fn move_item(&self, from: usize, to: usize) {
         if from == to {
             return;
@@ -405,7 +421,7 @@ fn update_reorderable_item_size_layout(
         None
     };
     if let Some(range) = moved_range {
-        // 区间内只重排行高，总高度不变，区间后的坐标无需重算。
+        let previous_size = layout.sizes[range.clone()].iter().copied().sum::<Pixels>();
         for index in range.clone() {
             let mut item_size = source.values[index].along(axis);
             if index + 1 < items_count {
@@ -413,10 +429,22 @@ fn update_reorderable_item_size_layout(
             }
             layout.sizes[index] = item_size;
         }
+        let delta = layout.sizes[range.clone()].iter().copied().sum::<Pixels>() - previous_size;
         let mut origin = layout.origins[range.start];
-        for index in range {
+        for index in range.clone() {
             layout.origins[index] = origin;
             origin += layout.sizes[index];
+        }
+        if delta != px(0.0) {
+            // 尺寸变化时同步移动后续条目；仅重排时总高度不变，无需更新后续坐标。
+            for origin in &mut layout.origins[range.end..] {
+                *origin += delta;
+            }
+            if axis.is_horizontal() {
+                layout.content_size.width += delta;
+            } else {
+                layout.content_size.height += delta;
+            }
         }
     } else {
         source.dirty_range = None;
@@ -977,6 +1005,21 @@ impl Element for VirtualList {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resized_item_updates_following_offsets_and_total_height() {
+        let sizes = ReorderableVirtualListSizes::new(vec![size(px(100.0), px(20.0)); 3]);
+        let mut layout = ItemSizeLayout::default();
+        update_reorderable_item_size_layout(&mut layout, &sizes, Axis::Vertical, px(0.0), 3);
+        sizes.set_size(1, size(px(100.0), px(36.0)));
+        update_reorderable_item_size_layout(&mut layout, &sizes, Axis::Vertical, px(0.0), 3);
+        assert_eq!(layout.origins, vec![px(0.0), px(20.0), px(56.0)]);
+        assert_eq!(layout.content_size.height, px(76.0));
+        sizes.set_size(1, size(px(100.0), px(20.0)));
+        update_reorderable_item_size_layout(&mut layout, &sizes, Axis::Vertical, px(0.0), 3);
+        assert_eq!(layout.origins, vec![px(0.0), px(20.0), px(40.0)]);
+        assert_eq!(layout.content_size.height, px(60.0));
+    }
 
     #[test]
     fn changing_axis_rebuilds_reorderable_offsets_before_the_next_move() {
