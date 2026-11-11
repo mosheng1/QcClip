@@ -21,6 +21,14 @@ impl MiddleMouseRuntime {
             let mut state = state_for_input
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
+            if matches!(
+                event,
+                Event::MouseDown {
+                    button: MouseButton::Middle
+                }
+            ) {
+                state.refresh_modifiers(crate::platform::input::modifier_is_physically_pressed);
+            }
             if let Some(press) = state.handle_event(event, Instant::now()) {
                 let _ = sender.try_send(press);
             }
@@ -34,10 +42,13 @@ impl MiddleMouseRuntime {
                         .timer(deadline.saturating_duration_since(Instant::now()))
                         .await;
                     cx.update(|cx| {
-                        let fire = state
-                            .lock()
-                            .unwrap_or_else(|error| error.into_inner())
-                            .complete(generation, Instant::now());
+                        let fire = {
+                            let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
+                            state.refresh_modifiers(
+                                crate::platform::input::modifier_is_physically_pressed,
+                            );
+                            state.complete(generation, Instant::now())
+                        };
                         if fire {
                             crate::windows::main::toggle_main_window(cx);
                         }
@@ -97,6 +108,26 @@ impl HoldState {
             middle_pressed: false,
             generation: 0,
             pending: None,
+        }
+    }
+
+    fn refresh_modifiers(&mut self, is_pressed: impl Fn(Key) -> bool) {
+        // 锁屏切换桌面时可能丢失松开事件，按系统当前状态校准，避免 Win 键一直残留。
+        for key in [
+            Key::ControlLeft,
+            Key::ControlRight,
+            Key::AltLeft,
+            Key::AltRight,
+            Key::ShiftLeft,
+            Key::ShiftRight,
+            Key::MetaLeft,
+            Key::MetaRight,
+        ] {
+            if is_pressed(key) {
+                self.keys.insert(key);
+            } else {
+                self.keys.remove(&key);
+            }
         }
     }
 
@@ -294,6 +325,43 @@ mod tests {
             );
             let (generation, deadline) = state.handle_event(DOWN, now).unwrap();
             assert!(state.complete(generation, deadline));
+        }
+    }
+
+    #[test]
+    fn middle_mouse_recovers_when_lock_screen_loses_modifier_key_up() {
+        for win_key in [Key::MetaLeft, Key::MetaRight] {
+            let mut state = state(None);
+            let now = Instant::now();
+            state.handle_event(
+                Event::KeyDown {
+                    key: win_key,
+                    code: None,
+                },
+                now,
+            );
+            state.handle_event(
+                Event::KeyDown {
+                    key: Key::KeyL,
+                    code: None,
+                },
+                now,
+            );
+            // 锁屏桌面吞掉松开事件，解锁后 Win 键实际上已松开。
+            state.refresh_modifiers(|_| false);
+            let (generation, deadline) = state.handle_event(DOWN, now).unwrap();
+            assert!(state.complete(generation, deadline));
+            state.handle_event(UP, deadline);
+
+            // 实际仍按着 Win 键时，中键不能误触发。
+            state.refresh_modifiers(|key| key == win_key);
+            assert!(state.handle_event(DOWN, deadline).is_none());
+            state.handle_event(UP, deadline);
+            state.refresh_modifiers(|_| false);
+            let (generation, deadline) = state.handle_event(DOWN, deadline).unwrap();
+            // 长按期间漏收修饰键按下事件，也必须在触发前取消。
+            state.refresh_modifiers(|key| key == Key::ControlLeft);
+            assert!(!state.complete(generation, deadline));
         }
     }
 

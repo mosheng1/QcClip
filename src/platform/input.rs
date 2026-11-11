@@ -346,7 +346,7 @@ mod windows_input {
         }
     }
 
-    fn modifier_is_physically_pressed(key: raw_input::Key) -> bool {
+    pub(crate) fn modifier_is_physically_pressed(key: raw_input::Key) -> bool {
         let virtual_key = match key {
             raw_input::Key::ControlLeft => VK_LCONTROL,
             raw_input::Key::ControlRight => VK_RCONTROL,
@@ -1010,6 +1010,7 @@ pub(crate) use windows_input::{
 
 #[cfg(target_os = "windows")]
 pub(crate) use windows_input::{
-    clear_trigger_key, set_pointer_change_notifier, set_trigger_key_code, simulate_ctrl_insert,
-    simulate_ctrl_v, simulate_shift_insert, trigger_shortcut_is_physically_pressed,
+    clear_trigger_key, modifier_is_physically_pressed, set_pointer_change_notifier,
+    set_trigger_key_code, simulate_ctrl_insert, simulate_ctrl_v, simulate_shift_insert,
+    trigger_shortcut_is_physically_pressed,
 };
