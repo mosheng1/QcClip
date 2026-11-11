@@ -58,9 +58,9 @@ pub(crate) enum NormalAnchor {
 /// 跟着运动的下边缘一起滑动，而不是静止不动、只被下边缘逐渐露出。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct ContentShift {
-    /// 内容排版高度：完整高度与窗口当前高度取较大值，过冲时内容随窗口拉伸、不露出空隙。
+    /// 内容排版高度：始终保持完整高度，避免过冲时改为拉伸内容而失去位移回弹。
     pub(crate) height: f32,
-    /// 内容顶边相对窗口顶边的偏移，始终不大于 0。
+    /// 内容顶边相对窗口顶边的偏移，过冲时为正，回落后归零。
     pub(crate) offset_y: f32,
 }
 

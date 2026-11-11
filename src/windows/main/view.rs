@@ -200,7 +200,6 @@ impl Render for MainWindow {
 
         let mut root = div()
             .size_full()
-            .bg(theme.background)
             .flex()
             .relative()
             .track_focus(&self.focus_handle);
@@ -282,6 +281,7 @@ impl Render for MainWindow {
         div()
             .size_full()
             .relative()
+            .bg(theme.background)
             .overflow_hidden()
             .child(content.child(root))
             .into_any_element()

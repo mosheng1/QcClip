@@ -1496,7 +1496,7 @@ fn normal_anchor_for_pointer(
 
 /// 内容跟随运动的那条边：底边锚定时运动的是上边缘，内容本来就贴着窗口顶部一起动，按窗口
 /// 实际尺寸排版即可；顶边锚定时运动的是下边缘，让内容按完整高度排版并贴住窗口底边，
-/// 从上边缘“滑出”，与向上展开时的观感对称。
+/// 从上边缘“滑出”；过冲时仍保持完整排版高度，让内容继续跟随下边缘移动并回弹。
 fn content_shift_for_frame(
     bounds: platform_window::PhysicalClientBounds,
     anchor: window_state::NormalAnchor,
@@ -1508,7 +1508,7 @@ fn content_shift_for_frame(
     }
     let scale_factor = scale_factor.max(f32::EPSILON);
     let window_height = client_height(frame) as f32 / scale_factor;
-    let height = (client_height(bounds) as f32 / scale_factor).max(window_height);
+    let height = client_height(bounds) as f32 / scale_factor;
     Some(window_state::ContentShift {
         height,
         offset_y: window_height - height,
@@ -2349,12 +2349,17 @@ mod tests {
         assert_eq!(shift.height, 400.0);
         assert_eq!(shift.offset_y, -100.0);
 
-        // 过冲时窗口比完整高度更高：内容随窗口拉伸，不留空隙。
+        // 过冲时保持完整排版高度，内容继续跟随下边缘移动。
         let overshoot = anchored_bounds(normal, window_state::NormalAnchor::Top, 630);
         let shift =
             content_shift_for_frame(normal, window_state::NormalAnchor::Top, overshoot, 1.5)
                 .unwrap();
-        assert_eq!((shift.height, shift.offset_y), (420.0, 0.0));
+        assert_eq!((shift.height, shift.offset_y), (400.0, 20.0));
+
+        // 回到目标高度时内容同步复位。
+        let settled =
+            content_shift_for_frame(normal, window_state::NormalAnchor::Top, normal, 1.5).unwrap();
+        assert_eq!((settled.height, settled.offset_y), (400.0, 0.0));
 
         // 底边锚定时内容本来就贴着运动的上边缘，按窗口实际尺寸排版。
         assert!(
