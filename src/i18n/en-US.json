@@ -270,6 +270,7 @@
   "main.form.cancel": "Cancel",
   "main.form.confirm": "Confirm",
   "main.editor.title": "Edit text",
+  "main.editor.zoom_wheel": "wheel",
   "main.editor.new_title": "New text",
   "main.editor.new_favorite_title": "New favorite",
   "main.editor.tags": "Tags",

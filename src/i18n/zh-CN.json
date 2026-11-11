@@ -270,6 +270,7 @@
   "main.form.cancel": "取消",
   "main.form.confirm": "确定",
   "main.editor.title": "编辑文本",
+  "main.editor.zoom_wheel": "滚轮",
   "main.editor.new_title": "新增文本",
   "main.editor.new_favorite_title": "新增收藏",
   "main.editor.tags": "标签",

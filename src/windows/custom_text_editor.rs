@@ -4,10 +4,10 @@ use gpui::prelude::*;
 use std::collections::HashSet;
 
 use gpui::{
-    AnyElement, App, Bounds, Context, DisplayId, ElementId, Entity, FontWeight, IntoElement,
-    PromptButton, PromptLevel, Render, Subscription, TitlebarOptions, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowDecorations, WindowHandle,
-    WindowKind, WindowOptions, div, px, relative, rgb, size,
+    AnyElement, App, Bounds, Context, DispatchPhase, DisplayId, ElementId, Entity, FontWeight,
+    IntoElement, KeyDownEvent, PromptButton, PromptLevel, Render, ScrollWheelEvent, Subscription,
+    TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds, WindowControlArea,
+    WindowDecorations, WindowHandle, WindowKind, WindowOptions, div, px, relative, rgb, size,
 };
 use gpui_component::{
     ActiveTheme as _, InteractiveElementExt as _, Root, Sizable as _,
@@ -15,11 +15,14 @@ use gpui_component::{
     collapsible::Collapsible,
     h_flex,
     input::{Editor, EditorState, Input, InputEvent, InputState},
+    kbd::Kbd,
     scroll::ScrollableElement,
     v_flex,
 };
 
 use crate::{
+    config::{EDITOR_ZOOM_PERCENT_MAX, EDITOR_ZOOM_PERCENT_MIN},
+    config_runtime,
     domain::clipboard::Tag,
     i18n,
     ui::{hover_icon, hover_icon_path},
@@ -219,6 +222,21 @@ impl CustomTextEditor {
             title,
             on_confirm: Some(on_confirm),
             on_restore,
+        }
+    }
+
+    fn change_text_zoom(&mut self, direction: i16, cx: &mut Context<Self>) {
+        let mut appearance = config_runtime::appearance_config(cx);
+        let zoom = appearance
+            .editor_zoom_percent
+            .saturating_add_signed(direction * 10)
+            .clamp(EDITOR_ZOOM_PERCENT_MIN, EDITOR_ZOOM_PERCENT_MAX);
+        if zoom == appearance.editor_zoom_percent {
+            return;
+        }
+        appearance.editor_zoom_percent = zoom;
+        if let Err(error) = config_runtime::set_appearance_config(appearance, cx) {
+            tracing::error!("保存文本编辑器缩放失败：{error}");
         }
     }
 
@@ -430,6 +448,48 @@ impl Render for CustomTextEditor {
         let editor_surface = material_surface(theme.background, material_enabled, 0.88);
         let editor_border = material_surface(theme.input, material_enabled, 0.82);
         let translator = i18n::translator(cx);
+        let zoom_percent = config_runtime::appearance_config(cx).editor_zoom_percent;
+        let editor_font_size = cx.theme().mono_font_size * (f32::from(zoom_percent) / 100.0);
+        let zoom_key = |key: &str| {
+            Kbd::new(gpui::Keystroke {
+                key: key.to_owned(),
+                ..Default::default()
+            })
+            .outline()
+            .h(ui_rem(20.0))
+            .min_w(ui_rem(20.0))
+            .py_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_size(ui_rem(10.0))
+        };
+        let editor_view = cx.entity();
+        // 在捕获阶段处理 Ctrl+滚轮，避免编辑器先滚动正文。
+        let zoom_listener = gpui::canvas(
+            |_, _, _| (),
+            move |bounds, _, window, _| {
+                let editor_view = editor_view.clone();
+                window.on_mouse_event(move |event: &ScrollWheelEvent, phase, _, cx| {
+                    if phase == DispatchPhase::Capture
+                        && bounds.contains(&event.position)
+                        && event.modifiers.control
+                        && !event.modifiers.alt
+                        && !event.modifiers.platform
+                    {
+                        let delta = f32::from(event.delta.pixel_delta(px(1.0)).y);
+                        if delta != 0.0 {
+                            cx.stop_propagation();
+                            editor_view.update(cx, |this, cx| {
+                                this.change_text_zoom(if delta > 0.0 { 1 } else { -1 }, cx);
+                            });
+                        }
+                    }
+                });
+            },
+        )
+        .absolute()
+        .inset_0();
         let mut footer_actions = Vec::with_capacity(3);
         if self.on_restore.is_some() {
             footer_actions.push(
@@ -536,14 +596,40 @@ impl Render for CustomTextEditor {
                             .border_color(editor_border)
                             .bg(editor_surface)
                             .child(
-                                div().flex_1().min_h_0().w_full().overflow_hidden().child(
-                                    Editor::new(&self.editor)
-                                        .appearance(false)
-                                        .bordered(false)
-                                        .editor_background(editor_surface)
-                                        .editor_gutter_background(gpui::transparent_black())
-                                        .h(relative(1.)),
-                                ),
+                                div()
+                                    .relative()
+                                    .flex_1()
+                                    .min_h_0()
+                                    .w_full()
+                                    .overflow_hidden()
+                                    .capture_key_down(cx.listener(
+                                        |this, event: &KeyDownEvent, window, cx| {
+                                            let key = &event.keystroke;
+                                            if key.modifiers.control
+                                                && !key.modifiers.alt
+                                                && !key.modifiers.platform
+                                            {
+                                                let direction = match key.key.as_str() {
+                                                    "+" | "=" => 1,
+                                                    "-" => -1,
+                                                    _ => return,
+                                                };
+                                                cx.stop_propagation();
+                                                window.prevent_default();
+                                                this.change_text_zoom(direction, cx);
+                                            }
+                                        },
+                                    ))
+                                    .child(zoom_listener)
+                                    .child(
+                                        Editor::new(&self.editor)
+                                            .appearance(false)
+                                            .bordered(false)
+                                            .text_size(editor_font_size)
+                                            .editor_background(editor_surface)
+                                            .editor_gutter_background(gpui::transparent_black())
+                                            .h(relative(1.)),
+                                    ),
                             )
                             .child(self.render_tags_section(
                                 window,
@@ -552,7 +638,61 @@ impl Render for CustomTextEditor {
                                 cx,
                             )),
                     )
-                    .child(dialog_footer(footer_actions, theme)),
+                    .child(dialog_footer(
+                        vec![
+                            h_flex()
+                                .w_full()
+                                .flex_wrap()
+                                .justify_end()
+                                .gap_2()
+                                .child(
+                                    h_flex()
+                                        .flex_1()
+                                        .flex_wrap()
+                                        .min_w(ui_rem(260.0))
+                                        .gap(ui_rem(8.0))
+                                        .text_size(ui_rem(11.0))
+                                        .text_color(theme.muted_foreground)
+                                        .child(
+                                            div()
+                                                .flex_none()
+                                                .min_w(ui_rem(48.0))
+                                                .px(ui_rem(6.0))
+                                                .py(ui_rem(3.0))
+                                                .rounded_md()
+                                                .bg(theme.secondary)
+                                                .text_center()
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .text_color(theme.foreground)
+                                                .child(format!("{zoom_percent}%")),
+                                        )
+                                        .child(
+                                            h_flex()
+                                                .flex_none()
+                                                .gap(ui_rem(4.0))
+                                                .child(zoom_key("ctrl"))
+                                                .child("+")
+                                                .child(
+                                                    translator.translate("main.editor.zoom_wheel"),
+                                                ),
+                                        )
+                                        .child("/")
+                                        .child(
+                                            h_flex()
+                                                .flex_none()
+                                                .gap(ui_rem(4.0))
+                                                .child(zoom_key("ctrl"))
+                                                .child("+")
+                                                .child(zoom_key("+"))
+                                                .child("/")
+                                                .child(zoom_key("-")),
+                                        ),
+                                )
+                                .child(h_flex().flex_none().gap(px(6.0)).children(footer_actions))
+                                .into_any_element(),
+                        ],
+                        theme,
+                    )),
             )
     }
 }
@@ -716,4 +856,96 @@ fn editor_window_control_button(
         .group(group.clone())
         .child(hover_icon_path(group, icon_path, 16.0, icon_color))
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{Modifiers, ScrollDelta, TestAppContext, VisualTestContext, point};
+
+    #[gpui::test]
+    fn editor_zoom_shortcuts_wheel_and_persistence(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.json");
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            i18n::install(i18n::Locale::zh_cn(), cx);
+            config_runtime::ConfigRuntime::install(&path, cx);
+        });
+        let text = "待编辑文本\n".repeat(100);
+        let mut view = None;
+        let window = cx.open_window(size(px(900.0), px(640.0)), |window, cx| {
+            let editor = cx.new(|cx| {
+                CustomTextEditor::new(
+                    window,
+                    cx,
+                    text.clone(),
+                    "编辑文本".into(),
+                    Vec::new(),
+                    Vec::new(),
+                    false,
+                    Box::new(|_, _, _| {}),
+                    None,
+                )
+            });
+            view = Some(editor.clone());
+            Root::new(editor, window, cx)
+        });
+        let view = view.unwrap();
+        let mut visual = VisualTestContext::from_window(window.into(), cx);
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        let editor = view.read_with(cx, |view, _| view.editor.clone());
+        let initial_line_height = editor.read_with(cx, |editor, _| editor.line_height().unwrap());
+        for (key, expected) in [("ctrl-=", 110), ("ctrl-+", 120), ("ctrl--", 110)] {
+            visual.simulate_keystrokes(key);
+            assert_eq!(
+                cx.read(config_runtime::appearance_config)
+                    .editor_zoom_percent,
+                expected
+            );
+        }
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(
+            editor.read_with(cx, |editor, _| editor.line_height().unwrap()) > initial_line_height
+        );
+        let offset = editor.read_with(cx, |editor, _| editor.scroll_offset());
+        visual.simulate_event(ScrollWheelEvent {
+            position: point(px(200.0), px(200.0)),
+            delta: ScrollDelta::Lines(point(0.0, -1.0)),
+            modifiers: Modifiers {
+                control: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        assert_eq!(
+            cx.read(config_runtime::appearance_config)
+                .editor_zoom_percent,
+            100
+        );
+        assert_eq!(
+            editor.read_with(cx, |editor, _| editor.scroll_offset()),
+            offset
+        );
+        assert_eq!(
+            editor.read_with(cx, |editor, _| editor.value().to_string()),
+            text
+        );
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            crate::config::load::from_str(&saved)
+                .unwrap()
+                .config
+                .appearance
+                .editor_zoom_percent,
+            100
+        );
+        cx.update(|cx| config_runtime::ConfigRuntime::reload(&path, cx));
+        assert_eq!(
+            cx.read(config_runtime::appearance_config)
+                .editor_zoom_percent,
+            100
+        );
+    }
 }

@@ -804,6 +804,7 @@ fn apply_appearance_change(previous: &AppearanceConfig, current: &AppearanceConf
         }
     } else if previous.preview_information != current.preview_information
         || previous.preview_scale_percent != current.preview_scale_percent
+        || previous.editor_zoom_percent != current.editor_zoom_percent
     {
         cx.refresh_windows();
     } else {
@@ -1126,6 +1127,7 @@ mod tests {
         let mut config = AppConfig::default();
         config.general.language = InterfaceLanguage::EnUs;
         config.clipboard.clear_tags_on_tab_switch = true;
+        config.appearance.editor_zoom_percent = 160;
 
         persist_config(&path, &config).expect("配置保存失败");
 

@@ -1624,6 +1624,8 @@ impl CardItemGap {
 pub struct AppearanceConfig {
     pub mode: AppearanceMode,
     pub ui_scale_percent: u16,
+    /// 文本编辑窗口输入区的缩放百分比。
+    pub editor_zoom_percent: u16,
     pub app_font_family: Option<String>,
     pub light_theme: String,
     pub dark_theme: String,
@@ -1658,6 +1660,7 @@ impl Default for AppearanceConfig {
         Self {
             mode: AppearanceMode::default(),
             ui_scale_percent: 100,
+            editor_zoom_percent: 100,
             app_font_family: None,
             light_theme: "QcClip Default Light".to_owned(),
             dark_theme: "QcClip Default Dark".to_owned(),
@@ -1920,6 +1923,9 @@ impl AnimationKind {
     }
 }
 
+pub const EDITOR_ZOOM_PERCENT_MIN: u16 = 50;
+pub const EDITOR_ZOOM_PERCENT_MAX: u16 = 300;
+
 pub const UI_SCALE_PERCENT_MIN: u16 = 80;
 pub const UI_SCALE_PERCENT_MAX: u16 = 200;
 pub const UI_SCALE_PRESETS: [u16; 8] = [80, 90, 100, 110, 125, 150, 175, 200];
@@ -1948,6 +1954,9 @@ impl AppearanceConfig {
         self.ui_scale_percent = self
             .ui_scale_percent
             .clamp(UI_SCALE_PERCENT_MIN, UI_SCALE_PERCENT_MAX);
+        self.editor_zoom_percent = self
+            .editor_zoom_percent
+            .clamp(EDITOR_ZOOM_PERCENT_MIN, EDITOR_ZOOM_PERCENT_MAX);
         self.preview_scale_percent = self
             .preview_scale_percent
             .clamp(UI_SCALE_PERCENT_MIN, UI_SCALE_PERCENT_MAX);

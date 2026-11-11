@@ -369,6 +369,13 @@ fn read_appearance(object: &Map<String, Value>, warnings: &mut Vec<String>) -> A
             default.ui_scale_percent,
             warnings,
         ),
+        editor_zoom_percent: read_field(
+            object,
+            "editorZoomPercent",
+            "appearance.editorZoomPercent",
+            default.editor_zoom_percent,
+            warnings,
+        ),
         app_font_family: read_field(
             object,
             "appFontFamily",
@@ -1423,6 +1430,23 @@ mod tests {
             from_str(&json).expect("无法重新加载缩放配置").config,
             default.config
         );
+    }
+
+    #[test]
+    fn editor_zoom_defaults_and_normalizes_without_changing_ui_scale() {
+        let old = from_str(r#"{"appearance":{"uiScalePercent":125}}"#).unwrap();
+        assert_eq!(old.config.appearance.editor_zoom_percent, 100);
+        for (input, expected) in [(0, 50), (150, 150), (65535, 300)] {
+            let loaded = from_str(&format!(
+                r#"{{"appearance":{{"editorZoomPercent":{input},"uiScalePercent":125}}}}"#
+            ))
+            .unwrap();
+            assert_eq!(loaded.config.appearance.editor_zoom_percent, expected);
+            assert_eq!(loaded.config.appearance.ui_scale_percent, 125);
+        }
+        let invalid = from_str(r#"{"appearance":{"editorZoomPercent":"大"}}"#).unwrap();
+        assert_eq!(invalid.config.appearance.editor_zoom_percent, 100);
+        assert_eq!(invalid.warnings.len(), 1);
     }
 
     #[test]
