@@ -15,9 +15,13 @@ pub(crate) enum WindowsVersion {
 }
 
 impl WindowsVersion {
-    /// 是否支持亚克力材质。
+    /// Windows 上与传统模糊互斥，非 Windows 保留原有支持。
     pub(crate) const fn supports_acrylic(self) -> bool {
-        !matches!(self, Self::Earlier)
+        match self {
+            #[cfg(not(target_os = "windows"))]
+            Self::NotWindows => true,
+            _ => !self.supports_blur(),
+        }
     }
 
     /// 是否支持传统的窗口背景模糊。
@@ -76,9 +80,9 @@ mod tests {
     }
 
     #[test]
-    fn windows10_supports_acrylic_and_blur_only() {
+    fn windows10_supports_blur_only() {
         let version = WindowsVersion::Windows10;
-        assert!(version.supports_acrylic());
+        assert!(!version.supports_acrylic());
         assert!(version.supports_blur());
     }
 

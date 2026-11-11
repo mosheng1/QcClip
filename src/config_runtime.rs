@@ -18,6 +18,7 @@ use crate::{
         default_window_material_opacity,
     },
     i18n::{self, Locale},
+    platform::os_version::{self, WindowsVersion},
 };
 
 #[derive(Debug, Error)]
@@ -955,6 +956,10 @@ pub(crate) fn reset_shortcuts_config(cx: &mut App) -> Result<bool, ConfigError> 
 }
 
 pub(crate) fn load_config(path: &Path) -> AppConfig {
+    load_config_for_version(path, os_version::current())
+}
+
+fn load_config_for_version(path: &Path, version: WindowsVersion) -> AppConfig {
     let content = match fs::read_to_string(path) {
         Ok(content) => content,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -967,9 +972,17 @@ pub(crate) fn load_config(path: &Path) -> AppConfig {
     };
 
     match crate::config::load::from_str(&content) {
-        Ok(loaded) => {
+        Ok(mut loaded) => {
             for warning in loaded.warnings {
                 warn!("配置加载警告：{warning}");
+            }
+            if !version.supports_acrylic()
+                && loaded.config.appearance.window_material == WindowMaterial::Acrylic
+            {
+                loaded.config.appearance.window_material = WindowMaterial::Blur;
+                if let Err(error) = persist_config(path, &loaded.config) {
+                    warn!("保存窗口材质配置失败，本次仍使用模糊效果：{error}");
+                }
             }
             loaded.config
         }
@@ -1059,9 +1072,52 @@ mod tests {
 
     use super::{
         appearance_requires_global_refresh, background_image_needs_refresh, load_config,
-        persist_config,
+        load_config_for_version, persist_config,
     };
-    use crate::config::{AppConfig, InterfaceLanguage, WindowMaterial};
+    use crate::{
+        config::{AppConfig, InterfaceLanguage, WindowMaterial},
+        platform::os_version::WindowsVersion,
+    };
+
+    #[test]
+    fn legacy_acrylic_config_is_migrated_where_acrylic_is_unavailable() {
+        let directory = tempdir().expect("无法创建临时目录");
+        let path = directory.path().join("config.json");
+        for (version, expected) in [
+            (WindowsVersion::Windows10, WindowMaterial::Blur),
+            (WindowsVersion::Earlier, WindowMaterial::Blur),
+            (WindowsVersion::Windows11, WindowMaterial::Acrylic),
+            #[cfg(not(target_os = "windows"))]
+            (WindowsVersion::NotWindows, WindowMaterial::Acrylic),
+        ] {
+            let mut original = serde_json::json!({
+                "schemaVersion": 9,
+                "appearance": {
+                    "windowMaterial": "acrylic",
+                    "windowMaterialOpacity": 0.5,
+                    "windowMaterialBrightness": 0.8,
+                    "futureOption": true
+                }
+            });
+            std::fs::write(&path, original.to_string()).expect("无法写入旧材质配置");
+            let config = load_config_for_version(&path, version);
+            if expected == WindowMaterial::Blur {
+                original["appearance"]["windowMaterial"] = "blur".into();
+            }
+            assert_eq!(config.appearance.window_material, expected);
+            let saved: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).expect("无法读取材质配置"))
+                    .expect("无法解析材质配置");
+            assert_eq!(saved["schemaVersion"], original["schemaVersion"]);
+            for (field, value) in original["appearance"]
+                .as_object()
+                .expect("外观配置应为对象")
+            {
+                assert_eq!(&saved["appearance"][field], value);
+            }
+            assert_eq!(load_config_for_version(&path, version), config);
+        }
+    }
 
     #[test]
     fn persisted_config_can_be_loaded_again() {

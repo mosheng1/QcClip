@@ -362,13 +362,20 @@ pub(crate) fn available_materials() -> Vec<WindowMaterial> {
 
 /// 把当前系统不支持的材质回退成可用材质，避免窗口失去背景。
 pub(crate) fn supported_material(material: WindowMaterial) -> WindowMaterial {
-    let version = os_version::current();
+    supported_material_for_version(material, os_version::current())
+}
+
+fn supported_material_for_version(
+    material: WindowMaterial,
+    version: WindowsVersion,
+) -> WindowMaterial {
     if is_supported(material, version) {
         return material;
     }
-    match version {
-        WindowsVersion::Earlier => WindowMaterial::Blur,
-        _ => WindowMaterial::Acrylic,
+    if version.supports_blur() {
+        WindowMaterial::Blur
+    } else {
+        WindowMaterial::Acrylic
     }
 }
 
@@ -572,6 +579,25 @@ fn with_alpha(mut color: Hsla, alpha: f32) -> Hsla {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_with_blur_exclude_acrylic_and_fall_back_to_blur() {
+        for version in [WindowsVersion::Windows10, WindowsVersion::Earlier] {
+            assert!(!is_supported(WindowMaterial::Acrylic, version));
+            assert_eq!(
+                supported_material_for_version(WindowMaterial::Acrylic, version),
+                WindowMaterial::Blur
+            );
+        }
+        assert!(is_supported(
+            WindowMaterial::Acrylic,
+            WindowsVersion::Windows11
+        ));
+        assert_eq!(
+            supported_material_for_version(WindowMaterial::Blur, WindowsVersion::Windows11),
+            WindowMaterial::Acrylic
+        );
+    }
 
     #[test]
     fn disabled_material_keeps_a_transparent_gpui_window() {
