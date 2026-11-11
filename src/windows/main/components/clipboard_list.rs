@@ -3383,10 +3383,16 @@ fn render_row(
                 return;
             };
 
-            menu_window.update(cx, |this, _| this.select_item(row_id));
             let position =
                 crate::windows::menu::MenuPosition::new(anchor.x, anchor.y, window.scale_factor());
             let owner_window = window.window_handle();
+            if !menu_window.read(cx).multi_selected_item_ids.is_empty() {
+                menu_window.update(cx, |this, cx| {
+                    this.open_multi_selection_menu(position, Some(owner_window), cx);
+                });
+                return;
+            }
+            menu_window.update(cx, |this, _| this.select_item(row_id));
             // 只有捕获时已标记为链接的纯文本内容，才读取完整原文解析链接。
             // 普通文本不触发原始大文本读取，避免右键菜单出现延迟。
             let can_open_in_browser = menu_item.all_format_options.iter().any(|preview| {

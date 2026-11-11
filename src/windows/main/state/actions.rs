@@ -36,6 +36,37 @@ fn multi_selection_tag_menu(
     MenuModel::new(items)
 }
 
+fn multi_selection_context_menu(
+    active_tab: TabId,
+    tag_menu: MenuModel,
+    translator: &i18n::Translator,
+) -> MenuModel {
+    let (delete_icon, delete_key) = if active_tab == TabId::Favorites {
+        ("star-off.svg", "main.multi_selection.remove_favorites")
+    } else {
+        ("trash.svg", "main.multi_selection.delete")
+    };
+    let items = [
+        ("paste", "clipboard-list.svg", "main.multi_selection.paste"),
+        ("copy", "copy-plus.svg", "main.multi_selection.copy"),
+        ("tags", "tags.svg", "main.multi_selection.add_tag"),
+        ("delete", delete_icon, delete_key),
+        ("clear", "cancel.svg", "main.multi_selection.deselect_all"),
+    ]
+    .into_iter()
+    .map(|(action, icon, key)| {
+        let label = translator.translate(key);
+        let item = if action == "tags" {
+            MenuItem::submenu(label, tag_menu.items().to_vec())
+        } else {
+            MenuItem::action(MenuActionId::new(action), label)
+        };
+        item.with_icon(MenuIcon::svg(icon))
+    })
+    .collect();
+    MenuModel::new(items)
+}
+
 fn paste_order_target(source_tab: TabId, cx: &gpui::App) -> Option<PasteOrderTarget> {
     let clipboard = crate::config_runtime::clipboard_config(cx);
     match source_tab {
@@ -373,6 +404,15 @@ impl MainWindow {
         position: MenuPosition,
         cx: &mut Context<Self>,
     ) {
+        self.open_multi_selection_menu(position, None, cx);
+    }
+
+    pub(crate) fn open_multi_selection_menu(
+        &mut self,
+        position: MenuPosition,
+        owner_window: Option<gpui::AnyWindowHandle>,
+        cx: &mut Context<Self>,
+    ) {
         let selected_ids = self.multi_selected_item_ids.clone();
         let source_tab = self.active_tab;
         if selected_ids.is_empty() || source_tab == TabId::Emoji {
@@ -404,7 +444,13 @@ impl MainWindow {
                 }
             };
             let selected_count = item_ids.iter().copied().collect::<HashSet<_>>().len();
-            let menu = multi_selection_tag_menu(&tags, &tag_counts, selected_count, &translator);
+            let tag_menu =
+                multi_selection_tag_menu(&tags, &tag_counts, selected_count, &translator);
+            let menu = if owner_window.is_some() {
+                multi_selection_context_menu(source_tab, tag_menu, &translator)
+            } else {
+                tag_menu
+            };
             let checked_tags = RefCell::new(
                 tag_counts
                     .into_iter()
@@ -412,20 +458,38 @@ impl MainWindow {
                     .collect::<HashSet<_>>(),
             );
             let (sender, receiver) = async_channel::unbounded();
+            let main_window = this.clone();
             cx.update(|cx| {
                 MenuService::open_context_menu(
                     menu,
                     position,
-                    move |action, _| {
-                        let Some(tag_id) = action.as_str().parse::<i64>().ok().filter(|id| *id > 0)
-                        else {
-                            return;
-                        };
-                        let add = !checked_tags.borrow_mut().remove(&tag_id);
-                        if add {
-                            checked_tags.borrow_mut().insert(tag_id);
+                    move |action, cx| {
+                        if let Some(tag_id) =
+                            action.as_str().parse::<i64>().ok().filter(|id| *id > 0)
+                        {
+                            let add = !checked_tags.borrow_mut().remove(&tag_id);
+                            if add {
+                                checked_tags.borrow_mut().insert(tag_id);
+                            }
+                            sender.try_send((tag_id, add)).ok();
+                        } else if let Some(owner_window) = owner_window {
+                            if let Err(error) = owner_window.update(cx, |_, window, cx| {
+                                main_window
+                                    .update(cx, |this, cx| match action.as_str() {
+                                        "paste" => this.paste_multi_selected_items(cx),
+                                        "copy" => this.copy_multi_selected_items(cx),
+                                        "delete" => this.delete_multi_selected_items(window, cx),
+                                        "clear" => {
+                                            this.clear_multi_selection();
+                                            cx.notify();
+                                        }
+                                        _ => {}
+                                    })
+                                    .ok();
+                            }) {
+                                tracing::error!("执行多选菜单操作失败：{error}");
+                            }
                         }
-                        sender.try_send((tag_id, add)).ok();
                     },
                     cx,
                 );
@@ -1261,5 +1325,15 @@ mod tests {
         assert!(items.iter().all(|item| !item.close_on_click));
         assert_eq!(items[1].check_state.toggled(), items[2].check_state);
         assert_eq!(items[2].check_state.toggled(), items[0].check_state);
+
+        let context_menu = multi_selection_context_menu(
+            TabId::Clipboard,
+            menu.clone(),
+            &i18n::Translator::builtin(Locale::zh_cn()),
+        );
+        let tag_submenu = &context_menu.items()[2];
+        assert!(tag_submenu.has_children());
+        assert!(tag_submenu.id.is_none());
+        assert_eq!(tag_submenu.children, menu.items());
     }
 }
