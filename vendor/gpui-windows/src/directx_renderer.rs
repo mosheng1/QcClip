@@ -111,6 +111,8 @@ pub(crate) struct DirectXRendererDevices {
 struct DirectXResources {
     // Direct3D rendering objects
     swap_chain: IDXGISwapChain1,
+    // 缓冲容量独立于窗口视口，尺寸动画可复用交换链。
+    buffer_size: [u32; 2],
     render_target: Option<ID3D11Texture2D>,
     render_target_view: Option<ID3D11RenderTargetView>,
 
@@ -820,8 +822,8 @@ impl DirectXRenderer {
 
         let mut source_desc = D3D11_TEXTURE2D_DESC::default();
         unsafe { render_target.GetDesc(&mut source_desc) };
-        let width = source_desc.Width;
-        let height = source_desc.Height;
+        let width = self.width;
+        let height = self.height;
         let staging_desc = D3D11_TEXTURE2D_DESC {
             Usage: D3D11_USAGE_STAGING,
             BindFlags: 0,
@@ -884,36 +886,59 @@ impl DirectXRenderer {
         self.width = width;
         self.height = height;
 
-        // Clear the render target before resizing
         let devices = self.devices.as_ref().context("devices missing")?;
-        unsafe { devices.device_context.OMSetRenderTargets(None, None) };
         let resources = self.resources.as_mut().context("resources missing")?;
-        resources.render_target.take();
-        resources.render_target_view.take();
-
-        // Resizing the swap chain requires a call to the underlying DXGI adapter, which can return the device removed error.
-        // The app might have moved to a monitor that's attached to a different graphics device.
-        // When a graphics device is removed or reset, the desktop resolution often changes, resulting in a window size change.
-        // But here we just return the error, because we are handling device lost scenarios elsewhere.
-        unsafe {
-            resources
-                .swap_chain
-                .ResizeBuffers(
-                    BUFFER_COUNT as u32,
-                    width,
-                    height,
-                    RENDER_TARGET_FORMAT,
-                    DXGI_SWAP_CHAIN_FLAG(0),
-                )
-                .context("Failed to resize swap chain")?;
+        let buffer_size = if self.direct_composition.is_some() {
+            [
+                buffer_capacity(resources.buffer_size[0], width),
+                buffer_capacity(resources.buffer_size[1], height),
+            ]
+        } else {
+            [width, height]
+        };
+        if resources.buffer_size != buffer_size {
+            // 调整交换链前释放渲染目标及其绑定，设备丢失仍交由上层恢复。
+            unsafe { devices.device_context.OMSetRenderTargets(None, None) };
+            self.active_render_target = None;
+            resources.render_target.take();
+            resources.render_target_view.take();
+            unsafe {
+                resources
+                    .swap_chain
+                    .ResizeBuffers(
+                        BUFFER_COUNT as u32,
+                        buffer_size[0],
+                        buffer_size[1],
+                        RENDER_TARGET_FORMAT,
+                        DXGI_SWAP_CHAIN_FLAG(0),
+                    )
+                    .context("Failed to resize swap chain")?;
+            }
+            resources.recreate_resources(devices, buffer_size[0], buffer_size[1])?;
         }
 
-        resources.recreate_resources(devices, width, height)?;
-
-        unsafe {
-            devices
-                .device_context
-                .OMSetRenderTargets(Some(slice::from_ref(&resources.render_target_view)), None);
+        resources.viewport.Width = width as f32;
+        resources.viewport.Height = height as f32;
+        // 路径和滤镜按精确视口采样，尺寸变化后仍按需重建中间纹理。
+        resources.path = None;
+        resources.blur = None;
+        if self.direct_composition.is_some() {
+            let swap_chain: IDXGISwapChain2 = resources.swap_chain.cast()?;
+            // STRETCH 会将源区域放大到缓冲容量，需抵消缩放以保持物理像素 1:1。
+            let transform = DXGI_MATRIX_3X2_F {
+                _11: width as f32 / buffer_size[0] as f32,
+                _22: height as f32 / buffer_size[1] as f32,
+                ..Default::default()
+            };
+            // SAFETY: 源区域不大于缓冲容量，矩阵仅包含有效的正缩放分量。
+            unsafe {
+                swap_chain
+                    .SetSourceSize(width, height)
+                    .context("设置交换链显示源区域失败")?;
+                swap_chain
+                    .SetMatrixTransform(&transform)
+                    .context("设置交换链像素比例补偿失败")?;
+            }
         }
 
         Ok(())
@@ -1672,6 +1697,7 @@ impl DirectXResources {
         set_rasterizer_state(&devices.device, &devices.device_context)?;
         Ok(Self {
             swap_chain,
+            buffer_size: [width, height],
             render_target: Some(render_target),
             render_target_view,
             path: None,
@@ -1690,6 +1716,7 @@ impl DirectXResources {
     ) -> Result<()> {
         let (render_target, render_target_view, viewport) =
             create_resources(devices, &self.swap_chain, width, height)?;
+        self.buffer_size = [width, height];
         self.render_target = Some(render_target);
         self.render_target_view = render_target_view;
         // Intermediate textures are size-dependent and recreated lazily if a later scene needs
@@ -2237,6 +2264,19 @@ impl Drop for DirectXRenderer {
 #[inline]
 fn get_comp_device(dxgi_device: &IDXGIDevice) -> Result<IDCompositionDevice> {
     Ok(unsafe { DCompositionCreateDevice(dxgi_device)? })
+}
+
+// 按 128 像素扩容，空余超过 256 像素才收缩，避免边界附近反复分配。
+fn buffer_capacity(current: u32, required: u32) -> u32 {
+    const STEP: u32 = 128;
+    if current >= required && current - required <= STEP * 2 {
+        return current;
+    }
+    required
+        .div_ceil(STEP)
+        .saturating_mul(STEP)
+        .min(D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION)
+        .max(required)
 }
 
 fn create_swap_chain_for_composition(
@@ -3181,6 +3221,120 @@ mod tests {
             })
             .expect("atlas insert must succeed")
             .expect("atlas insert must produce a tile")
+    }
+
+    #[test]
+    fn native_resize_reuses_buffers_and_preserves_pixels() -> Result<()> {
+        use gpui::{FilterBoundary, PathBuilder, point, px, size};
+        use windows::Win32::Graphics::Dxgi::IDXGISwapChain2;
+        use windows::core::Interface;
+
+        let main_window = HiddenWindow::new()?;
+        let popup_window = HiddenWindow::new()?;
+        let devices = DirectXDevices::new()?;
+        let mut main = DirectXRenderer::new(main_window.0, &devices, true)?;
+        let mut popup = DirectXRenderer::new(popup_window.0, &devices, false)?;
+        main.resize(size(DevicePixels(200), DevicePixels(100)))?;
+        let mut empty_scene = Scene::default();
+        empty_scene.finish();
+        let mut allocations = 0;
+        let mut capacity = [1, 1];
+        for width in (280..480).chain((280..480).rev()) {
+            popup.resize(size(DevicePixels(width), DevicePixels(100)))?;
+            let next = popup.resources.as_ref().unwrap().buffer_size;
+            allocations += usize::from(next != capacity);
+            capacity = next;
+            popup.draw(&empty_scene, WindowBackgroundAppearance::Transparent)?;
+            main.draw(&empty_scene, WindowBackgroundAppearance::Transparent)?;
+        }
+        assert_eq!(allocations, 2, "往返尺寸动画应复用交换链缓冲");
+
+        // 同时验证普通绘制、路径 MSAA、滤镜及缩小后的边缘像素与读回尺寸。
+        for (width, height) in [(359, 97), (405, 105), (127, 70)] {
+            popup.resize(size(DevicePixels(width), DevicePixels(height)))?;
+            main.resize(size(DevicePixels(width), DevicePixels(height)))?;
+            let resources = popup.resources.as_ref().unwrap();
+            let desc = unsafe { resources.swap_chain.GetDesc1()? };
+            assert!(desc.Width >= width as u32 && desc.Height >= height as u32);
+            let chain: IDXGISwapChain2 = resources.swap_chain.cast()?;
+            let (mut source_width, mut source_height) = (0, 0);
+            let mut transform = Default::default();
+            unsafe {
+                chain.GetSourceSize(&mut source_width, &mut source_height)?;
+                chain.GetMatrixTransform(&mut transform)?;
+            }
+            assert_eq!((source_width, source_height), (width as u32, height as u32));
+            assert!((transform._11 * desc.Width as f32 / width as f32 - 1.0).abs() < 0.000_01);
+            assert!((transform._22 * desc.Height as f32 / height as f32 - 1.0).abs() < 0.000_01);
+
+            for filtered in [false, true] {
+                let mut scene = Scene::default();
+                let bounds = scaled(0.0, 0.0, width as f32, height as f32);
+                let mask = ContentMask { bounds };
+                let boundary = FilterBoundary {
+                    order: 0,
+                    bounds,
+                    content_mask: mask,
+                    corner_radii: Default::default(),
+                    corner_smoothing: 0.0,
+                    filters: smallvec::smallvec![gpui::ScaledFilter::Blur(ScaledPixels(4.0))],
+                    opacity: 1.0,
+                    is_start: true,
+                };
+                if filtered {
+                    scene.insert_primitive(boundary.clone());
+                }
+                scene.insert_primitive(Quad {
+                    bounds,
+                    content_mask: mask,
+                    background: rgb(0x00ff00).into(),
+                    ..Default::default()
+                });
+                let mut builder = PathBuilder::fill();
+                builder.move_to(point(px(width as f32 - 1.0), px(0.0)));
+                builder.line_to(point(px(width as f32), px(0.0)));
+                builder.line_to(point(px(width as f32), px(height as f32)));
+                builder.line_to(point(px(width as f32 - 1.0), px(height as f32)));
+                builder.close();
+                let mut path = builder.build()?.scale(1.0);
+                path.content_mask = mask;
+                path.color = rgb(0xff0000).into();
+                scene.insert_primitive(path);
+                if filtered {
+                    scene.insert_primitive(FilterBoundary {
+                        is_start: false,
+                        ..boundary
+                    });
+                }
+                scene.finish();
+                let image =
+                    popup.render_to_image(&scene, WindowBackgroundAppearance::Transparent)?;
+                assert_eq!(image.dimensions(), (width as u32, height as u32));
+                let reference =
+                    main.render_to_image(&scene, WindowBackgroundAppearance::Transparent)?;
+                assert_eq!(
+                    image.as_raw(),
+                    reference.as_raw(),
+                    "容量复用后应与精确尺寸缓冲逐像素一致，尺寸 {width}×{height}，滤镜 {filtered}"
+                );
+                if !filtered {
+                    assert_eq!(
+                        image.get_pixel(width as u32 - 1, height as u32 - 1).0,
+                        [255, 0, 0, 255]
+                    );
+                    assert_eq!(
+                        image.get_pixel(width as u32 - 2, height as u32 - 1).0,
+                        [0, 255, 0, 255]
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            popup.resources.as_ref().unwrap().buffer_size[0],
+            128,
+            "大幅缩小后应回收容量"
+        );
+        Ok(())
     }
 
     #[test]
