@@ -39,6 +39,8 @@ pub struct Point {
 #[cfg_attr(feature = "serialize", derive(Serialize, Deserialize))]
 pub enum Event {
     MouseMove { delta: Point },
+    /// 鼠标绝对移动，position 为全局屏幕坐标（Windows 下为物理像素）。
+    MouseMoveAbsolute { position: Point },
     MouseWheel { delta: Point },
     MouseDown { button: MouseButton },
     MouseUp { button: MouseButton },

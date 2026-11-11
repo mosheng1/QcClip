@@ -8,6 +8,7 @@ impl SimulateImpl for PlatformSimulate {
     fn simulate(event: Event) {
         match event {
             Event::MouseMove { delta, .. } => Self::mouse_move(delta.x, delta.y),
+            Event::MouseMoveAbsolute { position } => Self::mouse_move_to(position.x, position.y),
             Event::MouseWheel { delta, .. } => Self::mouse_wheel(delta.x, delta.y),
             Event::MouseDown { button, .. } => Self::mouse_button(button, true),
             Event::MouseUp { button, .. } => Self::mouse_button(button, false),

@@ -53,6 +53,9 @@ impl InputBuilder {
     fn add_event(self, event: Event) -> Self {
         match event {
             Event::MouseMove { delta, .. } => self.add_mouse_move(delta.x, delta.y),
+            Event::MouseMoveAbsolute { position } => {
+                self.add_mouse_move_to_physical(position.x, position.y)
+            }
             Event::MouseWheel { delta, .. } => self.add_mouse_wheel(delta.x, delta.y),
             Event::MouseDown { button, .. } => self.add_mouse_button(button, true),
             Event::MouseUp { button, .. } => self.add_mouse_button(button, false),
@@ -72,7 +75,12 @@ impl InputBuilder {
     }
 
     /// Adds absolute mouse movement.
-    fn add_mouse_move_to(mut self, x: f64, y: f64) -> Self {
+    fn add_mouse_move_to(self, x: f64, y: f64) -> Self {
+        let scale_factor = PlatformDisplay::get_scale_factor();
+        self.add_mouse_move_to_physical(x * scale_factor, y * scale_factor)
+    }
+
+    fn add_mouse_move_to_physical(mut self, x: f64, y: f64) -> Self {
         // Get the boundary of the entire virtual desktop (multi-monitor support).
         let (vx, vy, vw, vh) = PlatformDisplay::get_virtual_screen_bounds();
 
@@ -80,16 +88,9 @@ impl InputBuilder {
             return self;
         }
 
-        let scale_factor = PlatformDisplay::get_scale_factor();
-
-        let phys_x = x * scale_factor;
-        let phys_y = y * scale_factor;
-
-        // Normalized mapping logic:
-        // Coordinate mapping formula for SendInput: (physical coordinates - start offset) * 65535 / (total size - 1)
-        // Use f64 calculations to prevent overflow or loss of precision in intermediate steps.
-        let dx = ((phys_x - vx) * 65535.0 / vw - 1.0) as i32;
-        let dy = ((phys_y - vy) * 65535.0 / vh - 1.0) as i32;
+        // 使用目标像素对应归一化区间的中点，保证负坐标及屏幕边缘可正确回放。
+        let dx = ((x - vx + 0.5) * 65536.0 / vw).floor().clamp(0.0, 65535.0) as i32;
+        let dy = ((y - vy + 0.5) * 65536.0 / vh).floor().clamp(0.0, 65535.0) as i32;
 
         self.push_mouse(MOUSEINPUT {
             dx,

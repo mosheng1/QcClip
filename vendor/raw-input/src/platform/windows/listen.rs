@@ -4,8 +4,8 @@ use windows::Win32::{
     Foundation::LPARAM,
     UI::{
         Input::{
-            GetRawInputData, HRAWINPUT, MOUSE_MOVE_ABSOLUTE, RAWINPUT, RAWINPUTHEADER, RID_INPUT,
-            RIM_TYPEKEYBOARD, RIM_TYPEMOUSE,
+            GetRawInputData, HRAWINPUT, MOUSE_MOVE_ABSOLUTE, MOUSE_VIRTUAL_DESKTOP, RAWINPUT,
+            RAWINPUTHEADER, RID_INPUT, RIM_TYPEKEYBOARD, RIM_TYPEMOUSE,
         },
         WindowsAndMessaging::{
             RI_MOUSE_BUTTON_1_DOWN, RI_MOUSE_BUTTON_1_UP, RI_MOUSE_BUTTON_2_DOWN,
@@ -21,7 +21,7 @@ use crate::{
     dispatcher::{CALLBACKS, NEXT_ID, Status, Subscriber, dispatch, remove_all},
     event::{Event, MouseButton, Point},
     platform::{
-        ListenImpl, PlatformListen,
+        DisplayImpl, ListenImpl, PlatformDisplay, PlatformListen,
         windows::common::{
             IS_LISTEN_RUNNING, LISTEN_FLAG, LISTEN_KEYBOARD, LISTEN_MOUSE_BUTTON,
             LISTEN_MOUSE_MOVE, LISTEN_MOUSE_WHEEL, LISTENS_ALL, update_state,
@@ -142,13 +142,26 @@ fn raw_input_from_message(lparam: LPARAM) -> Option<RAWINPUT> {
 fn handle_mouse(raw: RAWINPUT, state: u32) {
     let mouse = unsafe { raw.data.mouse };
 
-    if state & LISTEN_MOUSE_MOVE != 0 && mouse.usFlags.0 & MOUSE_MOVE_ABSOLUTE.0 == 0 {
-        let dx = mouse.lLastX as f64;
-        let dy = mouse.lLastY as f64;
-        if dx != 0.0 || dy != 0.0 {
-            dispatch(Event::MouseMove {
-                delta: Point { x: dx, y: dy },
+    if state & LISTEN_MOUSE_MOVE != 0 {
+        if mouse.usFlags.0 & MOUSE_MOVE_ABSOLUTE.0 != 0 {
+            let bounds = if mouse.usFlags.0 & MOUSE_VIRTUAL_DESKTOP.0 != 0 {
+                PlatformDisplay::get_virtual_screen_bounds()
+            } else {
+                let (width, height) = PlatformDisplay::get_primary_screen_size();
+                (0.0, 0.0, width, height)
+            };
+            // 绝对坐标的 (0, 0) 也是有效位置，首个事件同样需要分发。
+            dispatch(Event::MouseMoveAbsolute {
+                position: absolute_mouse_position(mouse.lLastX, mouse.lLastY, bounds),
             });
+        } else {
+            let dx = mouse.lLastX as f64;
+            let dy = mouse.lLastY as f64;
+            if dx != 0.0 || dy != 0.0 {
+                dispatch(Event::MouseMove {
+                    delta: Point { x: dx, y: dy },
+                });
+            }
         }
     }
 
@@ -179,6 +192,15 @@ fn handle_mouse(raw: RAWINPUT, state: u32) {
                 },
             });
         }
+    }
+}
+
+fn absolute_mouse_position(x: i32, y: i32, bounds: (f64, f64, f64, f64)) -> Point {
+    let (left, top, width, height) = bounds;
+    // Raw Input 将 [0, 65535] 映射到屏幕像素，虚拟桌面的原点可能为负数。
+    Point {
+        x: left + (f64::from(x) * width / 65536.0).floor(),
+        y: top + (f64::from(y) * height / 65536.0).floor(),
     }
 }
 
@@ -219,5 +241,65 @@ fn dispatch_button(flags: u32, down_flag: u32, up_flag: u32, button: MouseButton
     }
     if flags & up_flag != 0 {
         dispatch(Event::MouseUp { button });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use serial_test::serial;
+    use windows::Win32::UI::Input::{MOUSE_STATE, RAWMOUSE};
+
+    use super::*;
+
+    #[test]
+    #[serial]
+    fn absolute_mouse_input_dispatches_screen_positions() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let received = events.clone();
+        let handle = PlatformListen::subscribe(move |event| received.lock().unwrap().push(event));
+        let (width, height) = PlatformDisplay::get_primary_screen_size();
+        let (left, top, virtual_width, virtual_height) =
+            PlatformDisplay::get_virtual_screen_bounds();
+        for (flags, coordinate, expected) in [
+            (MOUSE_MOVE_ABSOLUTE, 0, Point { x: 0.0, y: 0.0 }),
+            (
+                MOUSE_MOVE_ABSOLUTE,
+                65535,
+                Point {
+                    x: width - 1.0,
+                    y: height - 1.0,
+                },
+            ),
+            (
+                MOUSE_STATE(MOUSE_MOVE_ABSOLUTE.0 | MOUSE_VIRTUAL_DESKTOP.0),
+                65535,
+                Point {
+                    x: left + virtual_width - 1.0,
+                    y: top + virtual_height - 1.0,
+                },
+            ),
+        ] {
+            let mut raw = RAWINPUT::default();
+            raw.data.mouse = RAWMOUSE {
+                usFlags: flags,
+                lLastX: coordinate,
+                lLastY: coordinate,
+                ..Default::default()
+            };
+            handle_mouse(raw, LISTEN_MOUSE_MOVE);
+            assert_eq!(
+                events.lock().unwrap().pop(),
+                Some(Event::MouseMoveAbsolute { position: expected })
+            );
+            handle_mouse(raw, LISTEN_MOUSE_BUTTON);
+            assert!(events.lock().unwrap().is_empty());
+        }
+        handle.unsubscribe();
+        assert_eq!(
+            absolute_mouse_position(0, 32768, (-1920.0, -1080.0, 3840.0, 2160.0)),
+            Point { x: -1920.0, y: 0.0 }
+        );
     }
 }

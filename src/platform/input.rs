@@ -436,7 +436,10 @@ mod windows_input {
         let senders;
         {
             let mut state = lock_state(state);
-            if matches!(event, Event::MouseMove { .. }) {
+            if matches!(
+                event,
+                Event::MouseMove { .. } | Event::MouseMoveAbsolute { .. }
+            ) {
                 state.mouse_move_sequence = state.mouse_move_sequence.wrapping_add(1);
                 let sequence = state.mouse_move_sequence;
                 if let Some(snapshot) = state.snapshot.as_mut() {
@@ -448,6 +451,10 @@ mod windows_input {
                 }
             }
             let position = match event {
+                Event::MouseMoveAbsolute { position } => Some(gpui::Point {
+                    x: position.x as f32,
+                    y: position.y as f32,
+                }),
                 Event::MouseMove { .. } | Event::MouseDown { .. } | Event::MouseUp { .. } => {
                     cursor_position()
                 }
@@ -466,7 +473,7 @@ mod windows_input {
             }
 
             match event {
-                Event::MouseMove { .. } => {}
+                Event::MouseMove { .. } | Event::MouseMoveAbsolute { .. } => {}
                 Event::MouseDown { button } => {
                     state.mouse_down_sequence = state.mouse_down_sequence.wrapping_add(1);
                     let sequence = state.mouse_down_sequence;
@@ -892,6 +899,37 @@ mod windows_input {
             assert_eq!(snapshot.position, position);
             assert_eq!(snapshot.mouse_move_sequence, 1000);
             assert!(receiver.try_recv().is_err());
+        }
+
+        #[test]
+        fn absolute_mouse_move_updates_snapshot_and_wakes_edge_region_check() {
+            let state = Arc::new(Mutex::new(InputState::new()));
+            let (sender, receiver) = async_channel::bounded(1);
+            let origin = gpui::Point { x: -1920.0, y: 0.0 };
+            {
+                let mut state = lock_state(&state);
+                state.pointer_change_sender = Some(sender);
+                state.pointer_region_watch = PointerRegionWatch::new(
+                    Some(gpui::Bounds {
+                        origin,
+                        size: gpui::Size {
+                            width: 2.0,
+                            height: 1080.0,
+                        },
+                    }),
+                    None,
+                );
+            }
+            handle_event(
+                &state,
+                Event::MouseMoveAbsolute {
+                    position: raw_input::Point { x: -1920.0, y: 0.0 },
+                },
+            );
+            let snapshot = lock_state(&state).snapshot.unwrap();
+            assert_eq!(snapshot.position, origin);
+            assert_eq!(snapshot.mouse_move_sequence, 1);
+            assert_eq!(receiver.try_recv(), Ok(()));
         }
 
         #[test]
