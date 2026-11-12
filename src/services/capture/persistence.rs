@@ -190,7 +190,7 @@ impl CaptureService {
                     "相同内容存在未完成的 {state} 记录，需先执行恢复"
                 )));
             }
-            let (history_id, is_new) = ingest_history(
+            let (history_id, is_new, history_reordered) = ingest_history(
                 transaction,
                 item_id,
                 captured,
@@ -202,6 +202,7 @@ impl CaptureService {
                 item_id,
                 history_id,
                 is_new,
+                history_reordered,
                 formats_changed: false,
             });
         }
@@ -383,7 +384,7 @@ impl CaptureService {
                 item_id
             ],
         )?;
-        let (history_id, is_new) = ingest_history(
+        let (history_id, is_new, history_reordered) = ingest_history(
             transaction,
             item_id,
             captured,
@@ -396,6 +397,7 @@ impl CaptureService {
             item_id,
             history_id,
             is_new,
+            history_reordered,
             formats_changed: text_merge.is_some(),
         })
     }
@@ -438,7 +440,14 @@ pub struct CaptureStoreResult {
     pub item_id: i64,
     pub history_id: HistoryItemId,
     pub is_new: bool,
+    pub history_reordered: bool,
     pub formats_changed: bool,
+}
+
+impl CaptureStoreResult {
+    pub(crate) fn should_notify(self) -> bool {
+        self.is_new || self.history_reordered || self.formats_changed
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -457,16 +466,17 @@ fn ingest_history(
     timestamp: i64,
     icon: Option<i64>,
     context: IngestContext,
-) -> Result<(HistoryItemId, bool), CaptureError> {
+) -> Result<(HistoryItemId, bool, bool), CaptureError> {
     match context {
         IngestContext::Local => {
             let result = upsert_history(transaction, item_id, captured, timestamp, icon)?;
             crate::services::sync::activity::record_local(transaction, item_id, false)?;
             Ok(result)
         }
-        IngestContext::Remote { history: false, .. } => Ok((0, false)),
+        IngestContext::Remote { history: false, .. } => Ok((0, false, false)),
         IngestContext::Remote { history: true, .. } => {
             touch_remote_history(transaction, item_id, timestamp, true)
+                .map(|(history_id, is_new)| (history_id, is_new, false))
         }
     }
 }
@@ -752,12 +762,12 @@ fn upsert_history(
     captured: &CapturedClipboard,
     timestamp: i64,
     source_app_icon_id: Option<i64>,
-) -> Result<(HistoryItemId, bool), CaptureError> {
-    let existing: Option<(i64, bool)> = transaction
+) -> Result<(HistoryItemId, bool, bool), CaptureError> {
+    let existing: Option<(i64, bool, i64)> = transaction
         .query_row(
-            "SELECT id, is_pinned FROM clipboard_history WHERE item_id = ?1",
+            "SELECT id, is_pinned, sort_order FROM clipboard_history WHERE item_id = ?1",
             [item_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?;
     let next_sort_order: i64 = transaction.query_row(
@@ -765,11 +775,11 @@ fn upsert_history(
          FROM clipboard_history WHERE is_pinned = ?2",
         rusqlite::params![
             LIST_ORDER_GAP,
-            existing.map(|(_, is_pinned)| is_pinned).unwrap_or(false)
+            existing.map(|(_, is_pinned, _)| is_pinned).unwrap_or(false)
         ],
         |row| row.get(0),
     )?;
-    if let Some((history_id, _)) = existing {
+    if let Some((history_id, _, sort_order)) = existing {
         transaction.execute(
             "UPDATE clipboard_history
              SET last_seen_at = MAX(last_seen_at, ?1),
@@ -793,7 +803,9 @@ fn upsert_history(
                 history_id,
             ],
         )?;
-        return Ok((history_id, false));
+        // 排序值每次复制都会递增，只有原先不在分组顶部才算实际重排。
+        let history_reordered = sort_order != next_sort_order - LIST_ORDER_GAP;
+        return Ok((history_id, false, history_reordered));
     }
 
     transaction.execute(
@@ -812,7 +824,7 @@ fn upsert_history(
             source_app_icon_id,
         ],
     )?;
-    Ok((transaction.last_insert_rowid(), true))
+    Ok((transaction.last_insert_rowid(), true, false))
 }
 
 fn current_timestamp_millis() -> i64 {

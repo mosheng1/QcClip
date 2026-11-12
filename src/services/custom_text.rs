@@ -690,6 +690,7 @@ impl CustomTextService {
                     item_id,
                     history_id,
                     is_new: true,
+                    history_reordered: false,
                     formats_changed: false,
                 },
             );

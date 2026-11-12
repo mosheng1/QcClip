@@ -174,6 +174,61 @@ fn same_text_supplements_formats_and_preserves_rich_text_on_plain_copy() {
 }
 
 #[test]
+fn capture_feedback_requires_new_history_reordering_or_changed_formats() {
+    let fixture = Fixture::new(65536);
+    let store = |captured: &CapturedClipboard| {
+        fixture
+            .capture
+            .store_captured_clipboard_with_status(captured)
+            .expect("无法保存剪贴板内容")
+    };
+    let first = store(&text("hello"));
+    assert!(first.should_notify());
+    let pinned = fixture.store(&text("置顶"));
+    let repository = HistoryRepository::new(fixture.database.clone(), fixture.blobs.clone());
+    repository.set_pinned(pinned, true).expect("无法置顶");
+
+    for (captured, should_notify) in [
+        (text("hello"), false),
+        (text("其他"), true),
+        (text("hello"), true),
+        (text("hello"), false),
+        (rich("hello", "<b>hello</b>"), true),
+        (rich("hello", "<b>hello</b>"), false),
+        (rich("hello", "<i>hello</i>"), true),
+        (text("hello"), false),
+    ] {
+        let result = store(&captured);
+        assert_eq!(
+            result.should_notify(),
+            should_notify,
+            "通知判断错误：{result:?}"
+        );
+    }
+    let rows = repository
+        .query(&HistoryQuery::default())
+        .expect("无法查询列表");
+    assert_eq!(
+        rows.iter()
+            .take(2)
+            .map(|row| row.history_id)
+            .collect::<Vec<_>>(),
+        [pinned, first.history_id]
+    );
+    let capture_count: i64 = fixture
+        .database
+        .connect()
+        .expect("无法连接数据库")
+        .query_row(
+            "SELECT capture_count FROM clipboard_history WHERE id = ?1",
+            [first.history_id],
+            |row| row.get(0),
+        )
+        .expect("无法查询复制次数");
+    assert_eq!(capture_count, 8);
+}
+
+#[test]
 fn latest_restorable_format_wins_and_failed_copy_does_not_remove_it() {
     let fixture = Fixture::new(4);
     let id = fixture.store(&rich("hello", "<b>hello</b>"));

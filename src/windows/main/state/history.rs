@@ -98,13 +98,15 @@ impl MainWindow {
                     Ok(store_result) => {
                         let history_id = store_result.history_id;
                         let policy = cx.update(|cx| crate::config_runtime::history_config(cx));
-                        crate::services::sound::play(crate::services::sound::SoundEvent::Copy);
-                        cx.update(|cx| {
-                            crate::windows::notification::NotificationService::show_clipboard(
-                                history_id,
-                                cx,
-                            );
-                        });
+                        if store_result.should_notify() {
+                            crate::services::sound::play(crate::services::sound::SoundEvent::Copy);
+                            cx.update(|cx| {
+                                crate::windows::notification::NotificationService::show_clipboard(
+                                    history_id,
+                                    cx,
+                                );
+                            });
+                        }
                         if let Some(this) = this.upgrade() {
                             this.update(cx, |this, cx| {
                                 if let Some(panes) = this.split_panes.clone() {
