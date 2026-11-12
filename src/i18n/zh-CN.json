@@ -967,6 +967,7 @@
   "updates.auto_download": "自动下载最新版",
   "updates.auto_download_detail": "开启后在检查到新版本时后台下载，完成后由你点击安装；关闭后仅检查更新。",
   "updates.download": "下载 / 重试下载",
+  "updates.probing": "正在测速选择下载线路（GitHub / Gitee）…",
   "updates.downloading": "正在下载更新",
   "updates.download_started": "更新包正在后台下载，可在关于页查看进度。",
   "updates.view_progress": "查看更新",

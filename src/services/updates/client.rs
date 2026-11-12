@@ -34,6 +34,22 @@ pub(super) enum ReleaseSource {
     Gitee,
 }
 
+impl ReleaseSource {
+    pub(super) fn label(&self) -> &'static str {
+        match self {
+            Self::GitHub => "GitHub",
+            Self::Gitee => "Gitee",
+        }
+    }
+
+    pub(super) fn other(&self) -> Self {
+        match self {
+            Self::GitHub => Self::Gitee,
+            Self::Gitee => Self::GitHub,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(super) struct ReleaseAsset {
     pub name: String,
@@ -244,7 +260,7 @@ fn fetch_releases(config: &UpdateConfig, api: &str) -> Result<Option<Release>, S
     for page in 1..=20 {
         let response = match agent
             .get(api)
-            .timeout(Duration::from_secs(20))
+            .timeout(Duration::from_secs(12))
             .query("per_page", "100")
             .query("page", &page.to_string())
             .set("User-Agent", concat!("QcClip/", env!("CARGO_PKG_VERSION")))
@@ -383,20 +399,29 @@ fn system_proxy() -> Option<ureq::Proxy> {
     None
 }
 
-pub(super) fn fetch_mirror(tag: &str, config: &UpdateConfig) -> Result<Release, String> {
-    let api = fallback_api_url();
+pub(super) fn fetch_mirror(
+    tag: &str,
+    config: &UpdateConfig,
+    source: ReleaseSource,
+) -> Result<Release, String> {
+    let api = match source {
+        ReleaseSource::GitHub => api_url(),
+        ReleaseSource::Gitee => fallback_api_url(),
+    };
     #[cfg(debug_assertions)]
     if api_url() != RELEASES_API && api == GITEE_RELEASES_API {
         return Err("未配置本地 Gitee 镜像测试地址".into());
     }
-    fetch_release_tag(config, &api, tag)
+    let mut release = fetch_release_tag(config, &api, tag)?;
+    release.source = source;
+    Ok(release)
 }
 
 fn fetch_release_tag(config: &UpdateConfig, api: &str, tag: &str) -> Result<Release, String> {
     let endpoint = format!("{api}/tags/{}", encode_path_segment(tag));
     let response = http_agent(config, api != GITEE_RELEASES_API && api != RELEASES_API)?
         .get(&endpoint)
-        .timeout(Duration::from_secs(20))
+        .timeout(Duration::from_secs(12))
         .set("User-Agent", concat!("QcClip/", env!("CARGO_PKG_VERSION")))
         .call()
         .map_err(|e| format!("读取同版本镜像失败，可能尚未同步：{e}"))?;
@@ -414,7 +439,7 @@ fn fetch_release_tag(config: &UpdateConfig, api: &str, tag: &str) -> Result<Rele
     if release.draft || release.tag_name != tag {
         return Err("镜像版本不一致或尚未发布".into());
     }
-    release.source = ReleaseSource::Gitee;
+    release.source = source_for_api(api);
     Ok(release)
 }
 

@@ -94,3 +94,21 @@ fn update_schedule_handles_failure_clock_rollback_and_first_check() {
         Some(Duration::from_secs(3600))
     );
 }
+
+#[test]
+fn failed_update_check_retries_before_the_regular_interval() {
+    // 即使刚成功检查过，手动检查失败后也应在一小时后重试。
+    assert_eq!(
+        next_check_delay(Some(86400), 1000, 4660, 1060),
+        Some(Duration::from_secs(3600))
+    );
+    assert_eq!(
+        next_check_delay(Some(86400), 1000, 4660, 4661),
+        Some(Duration::ZERO)
+    );
+    // 持久化的期限遇到时间回拨时，不应长时间停查。
+    assert_eq!(
+        next_check_delay(Some(86400), 9000, 12000, 1000),
+        Some(Duration::from_secs(3600))
+    );
+}

@@ -33,6 +33,7 @@ use client::{fetch_latest, newer_than_current};
 #[serde(default)]
 struct CheckRecord {
     checked_at: u64,
+    retry_after: u64,
     latest: Option<Release>,
     notified_tag: Option<String>,
 }
@@ -58,7 +59,6 @@ pub(crate) struct UpdateService {
     auto_download_enabled: bool,
     record: CheckRecord,
     path: PathBuf,
-    retry_after: u64,
     scheduled_check: Option<Task<()>>,
 }
 
@@ -89,7 +89,6 @@ impl UpdateService {
             auto_download_enabled: config_runtime::update_config(cx).auto_download,
             record,
             path,
-            retry_after: 0,
             scheduled_check: None,
         });
         cx.refresh_windows();
@@ -113,7 +112,7 @@ impl UpdateService {
             schedule::next_check_delay(
                 config_runtime::update_config(cx).frequency.seconds(),
                 service.record.checked_at,
-                service.retry_after,
+                service.record.retry_after,
                 unix_time(),
             )
         };
@@ -154,6 +153,11 @@ impl UpdateService {
             service.checking = true;
             service.error = None;
             service.status_key = "updates.status.checking";
+            // 请求前保存重试期限，避免异常退出或反复启动导致重复请求。
+            service.record.retry_after = unix_time().saturating_add(3600);
+            if let Err(error) = service.persist() {
+                tracing::warn!("保存更新检查记录失败：{error}");
+            }
         });
         cx.refresh_windows();
         let config = config_runtime::update_config(cx);
@@ -175,7 +179,7 @@ impl UpdateService {
                 Ok(latest) => {
                     service.record.checked_at = unix_time();
                     service.record.latest = latest;
-                    service.retry_after = 0;
+                    service.record.retry_after = 0;
                     service.status_key = check_status(&service.record);
                     if let Some(release) = service
                         .record
@@ -192,16 +196,16 @@ impl UpdateService {
                             service.record.notified_tag = Some(release.tag_name.clone());
                         }
                     }
-                    if let Err(error) = service.persist() {
-                        tracing::warn!("保存更新检查记录失败：{error}");
-                    }
                 }
                 Err(error) => {
                     tracing::warn!("检查版本更新失败：{error}");
                     service.error = Some(error);
                     service.status_key = "updates.status.failed";
-                    service.retry_after = unix_time().saturating_add(3600);
+                    service.record.retry_after = unix_time().saturating_add(3600);
                 }
+            }
+            if let Err(error) = service.persist() {
+                tracing::warn!("保存更新检查记录失败：{error}");
             }
         });
         Self::schedule(cx);
@@ -362,7 +366,8 @@ impl UpdateService {
             service.download_retry = None;
             service.deferred_tag = None;
             service.download = DownloadState::Downloading(download::DownloadProgress {
-                source: "GitHub",
+                source: release.source.label(),
+                probing: true,
                 downloaded: 0,
                 total: 0,
             });
@@ -586,5 +591,26 @@ fn check_status(record: &CheckRecord) -> &'static str {
         Some(_) => "updates.status.current",
         None if record.checked_at == 0 => "updates.status.idle",
         None => "updates.status.empty",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn check_record_preserves_published_records_and_retry_deadlines() {
+        let mut record: CheckRecord = serde_json::from_str(
+            r#"{"checked_at":1000,"latest":{"tag_name":"v99.0.0"},"notified_tag":"v99.0.0"}"#,
+        )
+        .unwrap();
+        assert_eq!(record.retry_after, 0);
+        record.retry_after = 4600;
+        let restored: CheckRecord =
+            serde_json::from_slice(&serde_json::to_vec(&record).unwrap()).unwrap();
+        assert_eq!(restored.checked_at, 1000);
+        assert_eq!(restored.retry_after, 4600);
+        assert_eq!(restored.latest.unwrap().tag_name, "v99.0.0");
+        assert_eq!(restored.notified_tag.as_deref(), Some("v99.0.0"));
     }
 }

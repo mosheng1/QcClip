@@ -1,3 +1,6 @@
+#[path = "download/routes.rs"]
+mod routes;
+
 use std::{
     fs::{self, File},
     io::{Read, Seek, SeekFrom, Write},
@@ -18,6 +21,7 @@ const MAX_PACKAGE_BYTES: u64 = 512 * 1024 * 1024;
 #[derive(Clone, Debug)]
 pub(crate) struct DownloadProgress {
     pub source: &'static str,
+    pub probing: bool,
     pub downloaded: u64,
     pub total: u64,
 }
@@ -88,6 +92,11 @@ pub(super) fn download(
     cancelled: &AtomicBool,
     progress: impl FnMut(DownloadProgress),
 ) -> Result<CachedUpdate, String> {
+    let mirror_source = release.source.other();
+    let local = release
+        .assets
+        .iter()
+        .any(|asset| local_test_url(&asset.browser_download_url));
     download_with_mirror(
         release,
         DownloadOptions {
@@ -97,7 +106,12 @@ pub(super) fn download(
             cancelled,
         },
         progress,
-        client::fetch_mirror,
+        move |tag, config| {
+            if (local || cfg!(test)) && client::api_url() == client::RELEASES_API {
+                return Err("未配置本地镜像测试地址".into());
+            }
+            client::fetch_mirror(tag, config, mirror_source)
+        },
     )
 }
 
@@ -105,7 +119,7 @@ fn download_with_mirror(
     release: Release,
     options: DownloadOptions<'_>,
     mut progress: impl FnMut(DownloadProgress),
-    mirror_lookup: impl FnOnce(&str, &UpdateConfig) -> Result<Release, String>,
+    mirror_lookup: impl FnOnce(&str, &UpdateConfig) -> Result<Release, String> + Send + 'static,
 ) -> Result<CachedUpdate, String> {
     let DownloadOptions {
         config,
@@ -136,40 +150,27 @@ fn download_with_mirror(
     {
         return Ok(cached);
     }
-    let primary = download_source(&release, &name, options, &mut progress);
-    let cached = match primary {
-        Ok(cached) => cached,
-        Err(error)
-            if !cancelled.load(Ordering::Relaxed) && release.source == ReleaseSource::GitHub =>
-        {
-            tracing::warn!("GitHub 更新包下载失败，切换到 Gitee：{error}");
-            progress(DownloadProgress {
-                source: "Gitee",
-                downloaded: 0,
-                total: 0,
-            });
-            let mut mirror = mirror_lookup(&release.tag_name, config)
-                .map_err(|e| format!("GitHub 下载失败：{error}；Gitee：{e}"))?;
-            if mirror.tag_name != release.tag_name {
-                return Err("Gitee 镜像版本不一致，已停止下载".into());
+    check_cancelled(cancelled)?;
+    let mut routes =
+        routes::Routes::new(release.clone(), name.clone(), config.clone(), mirror_lookup)?;
+    let cached = loop {
+        let mut source = routes.select(cancelled, &mut progress)?;
+        match download_source(
+            &release,
+            &name,
+            &mut source,
+            options,
+            &routes,
+            &mut progress,
+        ) {
+            Ok(cached) => break cached,
+            Err(error) => {
+                check_cancelled(cancelled)?;
+                routes.record_failure(source.label, error);
             }
-            mirror.source = ReleaseSource::Gitee;
-            // 镜像沿用 GitHub 的摘要和大小，禁止将不同内容的附件当作同一更新。
-            if let Some(original) = release.assets.iter().find(|a| a.name == name)
-                && let Some(asset) = mirror.assets.iter_mut().find(|a| a.name == name)
-            {
-                if original.digest.is_some() {
-                    asset.digest = original.digest.clone();
-                }
-                if original.size != 0 {
-                    asset.size = original.size;
-                }
-            }
-            download_source(&mirror, &name, options, &mut progress)
-                .map_err(|e| format!("GitHub 下载失败：{error}；Gitee 下载失败：{e}"))?
         }
-        Err(error) => return Err(error),
     };
+    drop(routes);
     check_cancelled(cancelled)?;
     let mut record = AtomicWriteFile::open(directory.join("ready.json"))
         .map_err(|e| format!("保存更新缓存失败：{e}"))?;
@@ -200,56 +201,32 @@ fn download_with_mirror(
 fn download_source(
     release: &Release,
     name: &str,
+    stream: &mut routes::Source,
     options: DownloadOptions<'_>,
+    routes: &routes::Routes,
     progress: &mut impl FnMut(DownloadProgress),
 ) -> Result<CachedUpdate, String> {
     let DownloadOptions {
-        config,
         directory,
         portable,
         cancelled,
+        ..
     } = options;
     check_cancelled(cancelled)?;
-    let asset = release
-        .assets
-        .iter()
-        .find(|asset| asset.name == name)
-        .ok_or_else(|| "此版本尚未提供匹配当前架构和安装方式的更新包".to_owned())?;
-    let source = if release.source == ReleaseSource::Gitee {
-        "Gitee"
-    } else {
-        "GitHub"
-    };
+    let asset = stream.asset.clone().ok_or("下载来源未返回更新包信息")?;
+    let source = stream.label;
+    let total = stream.total;
     progress(DownloadProgress {
         source,
+        probing: false,
         downloaded: 0,
-        total: asset.size,
+        total,
     });
-    let local_test = local_test_url(&asset.browser_download_url);
-    validate_asset_url(asset, release, local_test)?;
-    let response = client::http_agent(config, local_test)?
-        .get(&asset.browser_download_url)
-        .set("User-Agent", concat!("QcClip/", env!("CARGO_PKG_VERSION")))
-        .call()
-        .map_err(|e| format!("连接下载地址失败：{e}"))?;
-    let length = response
-        .header("Content-Length")
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(0);
-    if length > MAX_PACKAGE_BYTES || asset.size > MAX_PACKAGE_BYTES {
-        return Err("更新包超过大小限制".into());
-    }
-    if length != 0 && asset.size != 0 && length != asset.size {
-        return Err("更新包大小与发布信息不一致".into());
-    }
-    let total = if length != 0 { length } else { asset.size };
-    let mut reader = response.into_reader();
     let mut file = atomic_write_file::OpenOptions::new()
         .read(true)
         .open(directory.join(name))
         .map_err(|e| format!("创建下载文件失败：{e}"))?;
     let mut hasher = Sha256::new();
-    let mut buffer = [0; 64 * 1024];
     let mut downloaded = 0;
     let mut last_progress = Instant::now();
     let started = Instant::now();
@@ -258,22 +235,20 @@ fn download_source(
         if started.elapsed() > Duration::from_secs(3600) {
             return Err("下载超过一小时，请重试".into());
         }
-        let count = reader
-            .read(&mut buffer)
-            .map_err(|e| format!("读取更新包失败：{e}"))?;
-        if count == 0 {
+        let Some(buffer) = stream.next_chunk(cancelled, || routes.has_alternative())? else {
             break;
-        }
-        downloaded += count as u64;
+        };
+        downloaded += buffer.len() as u64;
         if downloaded > MAX_PACKAGE_BYTES || (total != 0 && downloaded > total) {
             return Err("更新包大小异常".into());
         }
-        file.write_all(&buffer[..count])
+        file.write_all(&buffer)
             .map_err(|e| format!("写入更新包失败：{e}"))?;
-        hasher.update(&buffer[..count]);
+        hasher.update(&buffer);
         if last_progress.elapsed() >= Duration::from_millis(200) {
             progress(DownloadProgress {
                 source,
+                probing: false,
                 downloaded,
                 total,
             });
@@ -300,6 +275,7 @@ fn download_source(
     file.commit().map_err(|e| format!("提交更新包失败：{e}"))?;
     progress(DownloadProgress {
         source,
+        probing: false,
         downloaded,
         total: downloaded,
     });
@@ -434,6 +410,20 @@ mod tests {
     use std::net::TcpListener;
 
     fn server(body: Vec<u8>, declared_size: usize) -> (String, std::thread::JoinHandle<()>) {
+        let (url, task, _) = server_with_delay(body, declared_size, Duration::ZERO);
+        (url, task)
+    }
+
+    fn server_with_delay(
+        body: Vec<u8>,
+        declared_size: usize,
+        delay: Duration,
+    ) -> (
+        String,
+        std::thread::JoinHandle<()>,
+        std::sync::mpsc::Receiver<()>,
+    ) {
+        let (connected, connection) = std::sync::mpsc::sync_channel(1);
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}/package", listener.local_addr().unwrap());
         let task = std::thread::spawn(move || {
@@ -443,13 +433,15 @@ mod tests {
                 .unwrap();
             let mut request = [0; 2048];
             assert!(stream.read(&mut request).unwrap() > 0);
+            let _ = connected.send(());
+            std::thread::sleep(delay);
             let _ = write!(
                 stream,
                 "HTTP/1.1 200 OK\r\nContent-Length: {declared_size}\r\nConnection: close\r\n\r\n"
             );
             let _ = stream.write_all(&body);
         });
-        (url, task)
+        (url, task, connection)
     }
 
     fn release(url: &str, size: u64, digest: Option<String>) -> Release {
@@ -541,14 +533,15 @@ mod tests {
     }
 
     #[test]
-    fn failed_github_transfer_restarts_from_gitee_and_keeps_the_original_digest() {
+    fn failed_selected_transfer_restarts_from_gitee_and_keeps_the_original_digest() {
         let directory = tempfile::tempdir().unwrap();
-        let body = b"MZ-mirrored-installer".to_vec();
+        let mut body = vec![1; 512 * 1024];
+        body[..2].copy_from_slice(b"MZ");
         let digest = Sha256::digest(&body)
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
-        let (primary_url, primary_server) = server(b"MZ-cut".to_vec(), body.len());
+        let (primary_url, primary_server) = server(body[..384 * 1024].to_vec(), body.len());
         let (mirror_url, mirror_server) = server(body.clone(), body.len());
         let mut primary = release(
             &primary_url,
@@ -560,6 +553,7 @@ mod tests {
         let config = UpdateConfig::default();
         let cancelled = AtomicBool::new(false);
         let mut sources = Vec::new();
+        let (selected, ready) = std::sync::mpsc::sync_channel(1);
         let cached = download_with_mirror(
             primary,
             DownloadOptions {
@@ -568,8 +562,14 @@ mod tests {
                 portable: false,
                 cancelled: &cancelled,
             },
-            |p| sources.push(p.source),
-            |tag, _| {
+            |p| {
+                if !p.probing && p.source == "GitHub" {
+                    let _ = selected.try_send(());
+                }
+                sources.push(p.source);
+            },
+            move |tag, _| {
+                ready.recv_timeout(Duration::from_secs(5)).unwrap();
                 assert_eq!(tag, mirror.tag_name);
                 Ok(mirror)
             },
@@ -581,6 +581,55 @@ mod tests {
         assert_eq!(fs::read(cached.path(directory.path())).unwrap(), body);
         assert_eq!(sources.first(), Some(&"GitHub"));
         assert_eq!(sources.last(), Some(&"Gitee"));
+    }
+
+    #[test]
+    fn selects_the_faster_mirror_without_waiting_for_the_primary_to_fail() {
+        for source in [ReleaseSource::GitHub, ReleaseSource::Gitee] {
+            let directory = tempfile::tempdir().unwrap();
+            let body = b"MZ-fast-mirror".to_vec();
+            let digest = format!(
+                "sha256:{}",
+                Sha256::digest(&body)
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+            );
+            let (primary_url, primary_server, connected) = server_with_delay(
+                b"MZ-wrong-content".to_vec(),
+                body.len(),
+                Duration::from_secs(2),
+            );
+            let (mirror_url, mirror_server) = server(body.clone(), body.len());
+            let primary = Release {
+                source,
+                ..release(&primary_url, body.len() as u64, Some(digest))
+            };
+            let mirror = release(&mirror_url, 0, None);
+            let config = UpdateConfig::default();
+            let cancelled = AtomicBool::new(false);
+            let started = Instant::now();
+            let cached = download_with_mirror(
+                primary,
+                DownloadOptions {
+                    config: &config,
+                    directory: directory.path(),
+                    portable: false,
+                    cancelled: &cancelled,
+                },
+                |_| {},
+                move |_, _| {
+                    connected.recv_timeout(Duration::from_secs(5)).unwrap();
+                    Ok(mirror)
+                },
+            )
+            .unwrap();
+            let elapsed = started.elapsed();
+            primary_server.join().unwrap();
+            mirror_server.join().unwrap();
+            assert!(elapsed < Duration::from_secs(1), "下载耗时：{elapsed:?}");
+            assert_eq!(fs::read(cached.path(directory.path())).unwrap(), body);
+        }
     }
 
     #[test]
@@ -615,7 +664,7 @@ mod tests {
                     cancelled: &cancelled,
                 },
                 |_| {},
-                |_, _| Ok(mirror),
+                move |_, _| Ok(mirror),
             )
             .unwrap_err();
             if let Some(server) = server_task {
@@ -648,10 +697,56 @@ mod tests {
             directory.path(),
             false,
             &flag,
-            |_| flag.store(true, Ordering::Relaxed),
+            |progress| {
+                if !progress.probing {
+                    flag.store(true, Ordering::Relaxed);
+                }
+            },
         );
         server.join().unwrap();
         assert!(result.unwrap_err().contains("取消"));
+        assert!(!directory.path().join("ready.json").exists());
+    }
+
+    #[test]
+    fn cancellation_during_probe_does_not_wait_for_a_blocked_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/package", listener.local_addr().unwrap());
+        let (connected, connection) = std::sync::mpsc::sync_channel(1);
+        let (release_server, wait) = std::sync::mpsc::sync_channel(1);
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = [0; 2048];
+            assert!(stream.read(&mut request).unwrap() > 0);
+            connected.send(()).unwrap();
+            let _ = wait.recv_timeout(Duration::from_secs(5));
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let config = UpdateConfig::default();
+        let cancelled = AtomicBool::new(false);
+        let started = Instant::now();
+        let result = download_with_mirror(
+            release(&url, 0, None),
+            DownloadOptions {
+                config: &config,
+                directory: directory.path(),
+                portable: false,
+                cancelled: &cancelled,
+            },
+            |_| {
+                connection.recv_timeout(Duration::from_secs(5)).unwrap();
+                cancelled.store(true, Ordering::Relaxed);
+            },
+            |_, _| Err("镜像未同步".into()),
+        );
+        let elapsed = started.elapsed();
+        release_server.send(()).unwrap();
+        server.join().unwrap();
+        assert!(result.unwrap_err().contains("取消"));
+        assert!(elapsed < Duration::from_secs(1), "取消耗时：{elapsed:?}");
         assert!(!directory.path().join("ready.json").exists());
     }
 

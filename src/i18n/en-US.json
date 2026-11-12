@@ -967,6 +967,7 @@
   "updates.auto_download": "Automatically download updates",
   "updates.auto_download_detail": "Download new versions in the background, then click to install. When off, only check for updates.",
   "updates.download": "Download / retry",
+  "updates.probing": "Selecting the fastest download route (GitHub / Gitee)…",
   "updates.downloading": "Downloading update",
   "updates.download_started": "Downloading in the background. View progress on the About page.",
   "updates.view_progress": "View update",

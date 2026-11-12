@@ -420,9 +420,11 @@ impl SettingsWindowView {
                     .child(status),
             )
             .when_some(progress, |view, progress| {
-                let fraction = (progress.total != 0)
+                let fraction = (!progress.probing && progress.total != 0)
                     .then(|| (progress.downloaded as f32 / progress.total as f32).clamp(0.0, 1.0));
-                let text = if let Some(fraction) = fraction {
+                let text = if progress.probing {
+                    translator.translate("updates.probing")
+                } else if let Some(fraction) = fraction {
                     format!(
                         "{} · {:.0}% · {:.1} / {:.1} MB",
                         progress.source,
