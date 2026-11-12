@@ -44,6 +44,11 @@ pub fn render(
         .window_position
         .is_screen_edge();
     let is_vertical = position.is_vertical() && !combined_horizontal;
+    let titlebar_size = ui_rem(if is_vertical {
+        TITLEBAR_SIDE_WIDTH
+    } else {
+        TITLEBAR_HEIGHT
+    });
     let mut actions = div()
         .flex()
         .flex_1()
@@ -230,7 +235,7 @@ pub fn render(
         );
     }
 
-    if let Some(buttons) = super::sync_buttons::render(main, cx) {
+    if let Some(buttons) = super::sync_buttons::render(main, cx, is_vertical, titlebar_size) {
         actions = actions.child(buttons);
     }
 
@@ -346,16 +351,12 @@ pub fn render(
         )
         .child(actions);
     if is_vertical {
-        titlebar = titlebar
-            .w(ui_rem(TITLEBAR_SIDE_WIDTH))
-            .h_full()
-            .p_1()
-            .flex_col();
+        titlebar = titlebar.w(titlebar_size).h_full().p_1().flex_col();
     } else {
         titlebar = titlebar
             .when(combined_horizontal, |this| this.flex_1().min_w_0())
             .when(!combined_horizontal, |this| this.w_full())
-            .h(ui_rem(TITLEBAR_HEIGHT))
+            .h(titlebar_size)
             .px_2();
     }
 

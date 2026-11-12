@@ -1,4 +1,4 @@
-use gpui::{App, Context, Div, MouseButton, div, prelude::*, px};
+use gpui::{App, Context, Div, MouseButton, Rems, div, prelude::*, px};
 use gpui_component::{ActiveTheme as _, tooltip::Tooltip};
 
 use crate::{
@@ -33,7 +33,12 @@ impl Action {
     }
 }
 
-pub(super) fn render(main: &MainWindow, cx: &mut Context<MainWindow>) -> Option<Div> {
+pub(super) fn render(
+    main: &MainWindow,
+    cx: &mut Context<MainWindow>,
+    is_vertical: bool,
+    titlebar_size: Rems,
+) -> Option<Div> {
     let config = SyncService::get(cx).ok()?.config();
     if !config.dav.enabled {
         return None;
@@ -43,10 +48,13 @@ pub(super) fn render(main: &MainWindow, cx: &mut Context<MainWindow>) -> Option<
     let mut buttons = div()
         .flex_none()
         .w(ui_rem(56.0))
-        .max_w_full()
-        .h(ui_rem(28.0))
+        .when(!is_vertical, |buttons| buttons.max_w_full())
+        .h(titlebar_size)
         .flex()
         .flex_row()
+        .when(is_vertical, |buttons| {
+            buttons.w(titlebar_size).h(ui_rem(56.0)).flex_col()
+        })
         .rounded_lg()
         .overflow_hidden();
     for (action, name, busy) in [
@@ -68,7 +76,9 @@ pub(super) fn render(main: &MainWindow, cx: &mut Context<MainWindow>) -> Option<
             .group(group.clone())
             .flex_1()
             .min_w_0()
-            .h_full()
+            .min_h_0()
+            .when(is_vertical, |button| button.w_full())
+            .when(!is_vertical, |button| button.h_full())
             .flex()
             .items_center()
             .justify_center()
@@ -106,7 +116,8 @@ pub(super) fn render(main: &MainWindow, cx: &mut Context<MainWindow>) -> Option<
             .when(!enabled, |button| button.opacity(0.4).cursor_default())
             .when(matches!(action, Action::Pull), |button| {
                 button
-                    .border_l(px(0.5))
+                    .when(is_vertical, |button| button.border_t(px(0.5)))
+                    .when(!is_vertical, |button| button.border_l(px(0.5)))
                     .border_color(theme.title_bar_border)
             })
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
