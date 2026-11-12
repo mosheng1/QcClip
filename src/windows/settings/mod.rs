@@ -2,6 +2,8 @@ mod components;
 mod layout;
 mod pages;
 
+pub(crate) use pages::{appearance_mode_label_key, selected_theme_preview, theme_thumbnail};
+
 use std::time::Duration;
 
 use gpui::prelude::*;
