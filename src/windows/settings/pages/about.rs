@@ -206,6 +206,13 @@ impl SettingsWindowView {
                     .label(translator.translate("settings.about.copy_log"))
                     .on_click(|_, _, cx| copy_latest_log(cx)),
             )
+            .child(
+                Button::new("about-open-onboarding")
+                    .small()
+                    .icon(icon("sparkles", 16.0, theme.foreground))
+                    .label(translator.translate("settings.about.onboarding"))
+                    .on_click(|_, _, cx| crate::windows::onboarding::open_onboarding_window(cx)),
+            )
             .into_any_element()
     }
 

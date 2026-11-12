@@ -213,6 +213,7 @@ pub fn run() {
                 cx,
             );
             crate::windows::settings::SettingsWindowService::install(cx);
+            crate::windows::onboarding::OnboardingWindowService::install(cx);
             crate::services::sync::SyncService::install(
                 _database.clone(),
                 _raw_blob_store.clone(),
@@ -418,7 +419,10 @@ pub fn run() {
                     cx,
                 );
             }
-            crate::windows::settings::offer_legacy_migration(cx);
+            // 首次安装时先显示引导页，旧版迁移提示推迟到引导页关闭后再弹出。
+            if !crate::windows::onboarding::open_if_pending(cx) {
+                crate::windows::settings::offer_legacy_migration(cx);
+            }
             crate::services::updates::UpdateService::install(
                 config_path.with_extension("updates.json"),
                 cx,

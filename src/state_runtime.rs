@@ -171,6 +171,8 @@ pub(crate) struct PersistedState {
     pub(crate) preview_window: PersistedPreviewWindowState,
     pub(crate) legacy_migration_prompt_dismissed: bool,
     pub(crate) software_rendering_warning_dismissed: bool,
+    /// 首次安装时置为 true，引导页完成或关闭后清除；已有状态文件的升级用户默认不显示引导页。
+    pub(crate) onboarding_pending: bool,
     /// 贴在屏幕上的便签，启动时按顺序恢复。
     pub(crate) sticky_notes: Vec<PersistedStickyNote>,
     /// 新便签继承最近一次调整的偏好，关闭所有便签后仍保留。
@@ -382,6 +384,7 @@ impl Default for PersistedState {
             preview_window: PersistedPreviewWindowState::default(),
             legacy_migration_prompt_dismissed: false,
             software_rendering_warning_dismissed: false,
+            onboarding_pending: false,
             sticky_notes: Vec::new(),
             sticky_preferences: PersistedStickyPreferences::default(),
         }
@@ -416,8 +419,9 @@ impl Global for StateRuntime {}
 impl StateRuntime {
     pub(crate) fn install(path: impl Into<PathBuf>, cx: &mut App) {
         let path = path.into();
-        let state = load_state(&path);
+        let mut state = load_state(&path);
         if !path.exists() {
+            state.onboarding_pending = true;
             if let Err(error) = persist_state(&path, &state) {
                 warn!("创建状态文件失败：{error}");
             }

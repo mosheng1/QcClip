@@ -822,7 +822,7 @@ fn settings_block(
 }
 
 /// 当前配置对应主题的预览色；配置的主题不存在时与运行时一样回退到默认主题。
-fn selected_theme_preview(
+pub(crate) fn selected_theme_preview(
     themes: &[ThemeOption],
     mode: ThemeMode,
     current: &str,
@@ -841,7 +841,7 @@ fn selected_theme_preview(
 }
 
 /// 用主题颜色拼出的剪贴板窗口缩略图：标题栏加三行列表，第一行为选中态。
-fn theme_thumbnail(colors: ThemePreviewColors) -> gpui::Div {
+pub(crate) fn theme_thumbnail(colors: ThemePreviewColors) -> gpui::Div {
     let line = |width: f32, color: Hsla| {
         div()
             .h(ui_rem(3.0))
@@ -1095,7 +1095,7 @@ fn theme_swatches(
         .into_any_element()
 }
 
-const fn appearance_mode_label_key(mode: AppearanceMode) -> &'static str {
+pub(crate) const fn appearance_mode_label_key(mode: AppearanceMode) -> &'static str {
     match mode {
         AppearanceMode::System => "settings.personalization.mode.system",
         AppearanceMode::Light => "settings.personalization.mode.light",

@@ -2706,7 +2706,7 @@ fn global_key_token(key: &str) -> String {
     }
 }
 
-fn is_modifier_key(key: &str) -> bool {
+pub(crate) fn is_modifier_key(key: &str) -> bool {
     matches!(
         key.to_ascii_lowercase().as_str(),
         "control" | "ctrl" | "alt" | "shift" | "super" | "cmd" | "command" | "win" | "meta" | "fn"
