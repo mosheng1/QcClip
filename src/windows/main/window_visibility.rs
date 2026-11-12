@@ -15,6 +15,7 @@ const EDGE_TRIGGER_SIZE_LOGICAL: f32 = 2.0;
 const EDGE_ANIMATION_DURATION: Duration = Duration::from_millis(200);
 const NORMAL_SHOW_ANIMATION_DURATION: Duration = Duration::from_millis(400);
 const NORMAL_HIDE_ANIMATION_DURATION: Duration = Duration::from_millis(140);
+const MAX_ANIMATION_FRAME_DURATION: Duration = Duration::from_millis(50);
 const COLLAPSED_WINDOW_HEIGHT_LOGICAL: f32 = 1.0;
 /// 普通显示动画的弹簧阻尼比：过冲约为行程的 6.8%。显示从 75% 高度开始，
 /// 折合约 1.7% 的窗口高度（500px 窗口约 8px），回弹可感知但不夸张。
@@ -397,6 +398,24 @@ enum VisibilityAnimation {
         to_height: i32,
         show: bool,
     },
+}
+
+#[derive(Default)]
+struct VisibilityAnimationClock {
+    last_frame_at: Option<Instant>,
+    elapsed: Duration,
+}
+
+impl VisibilityAnimationClock {
+    fn advance(&mut self, now: Instant) -> Duration {
+        // 首帧前的唤醒等待不计时，长帧也只推进有限进度，避免首次绘制变慢时跳过动画。
+        if let Some(last_frame_at) = self.last_frame_at.replace(now) {
+            self.elapsed += now
+                .saturating_duration_since(last_frame_at)
+                .min(MAX_ANIMATION_FRAME_DURATION);
+        }
+        self.elapsed
+    }
 }
 
 /// “窗口显示位置”设置变化：按新的定位规则重新放置窗口。
@@ -1073,14 +1092,13 @@ pub(crate) fn set_visibility(
             return Err(error);
         }
     };
-    let started_at = Instant::now();
     let result = window.update(cx, |_, window, _| {
         schedule_visibility_animation_frame(
             window,
             animation,
             animation_target,
             generation,
-            started_at,
+            VisibilityAnimationClock::default(),
         );
     });
     result.map_err(|error| error.to_string())?;
@@ -1157,10 +1175,11 @@ fn schedule_visibility_animation_frame(
     animation: VisibilityAnimation,
     animation_target: platform_window::WindowAnimationTarget,
     generation: u64,
-    started_at: Instant,
+    mut clock: VisibilityAnimationClock,
 ) {
     window.on_next_frame(move |window, cx| {
-        let (raw_progress, progress) = visibility_animation_progress(animation, started_at);
+        let elapsed = clock.advance(Instant::now());
+        let (raw_progress, progress) = visibility_animation_progress(animation, elapsed);
         let completed = raw_progress >= 1.0;
         match apply_visibility_animation_frame(
             animation,
@@ -1177,7 +1196,7 @@ fn schedule_visibility_animation_frame(
                 animation,
                 animation_target,
                 generation,
-                started_at,
+                clock,
             ),
             Ok(_) => {}
             Err(error) => {
@@ -1375,13 +1394,9 @@ fn restore_visibility_after_animation_failure(
     platform_window::set_window_rendering_enabled(window, visible)
 }
 
-fn visibility_animation_progress(
-    animation: VisibilityAnimation,
-    started_at: Instant,
-) -> (f32, f32) {
-    let raw_progress = (started_at.elapsed().as_secs_f32()
-        / animation_duration(animation).as_secs_f32())
-    .clamp(0.0, 1.0);
+fn visibility_animation_progress(animation: VisibilityAnimation, elapsed: Duration) -> (f32, f32) {
+    let raw_progress =
+        (elapsed.as_secs_f32() / animation_duration(animation).as_secs_f32()).clamp(0.0, 1.0);
     let eased_progress = match animation {
         VisibilityAnimation::Edge { .. } => ease_out_quad(raw_progress),
         VisibilityAnimation::Normal { show: true, .. } => spring_ease(raw_progress),
@@ -2394,6 +2409,41 @@ mod tests {
         assert_eq!(interpolate_bounds(from, to, 0.5).right, 182);
         assert_eq!(interpolate_bounds(from, to, 0.0), from);
         assert_eq!(interpolate_bounds(from, to, 1.0), to);
+    }
+
+    #[test]
+    fn visibility_animation_survives_delayed_wakeup_and_first_draw() {
+        let animation = VisibilityAnimation::Normal {
+            bounds: attachment().client_bounds,
+            anchor: window_state::NormalAnchor::Top,
+            from_height: 390,
+            to_height: 520,
+            show: true,
+        };
+        let mut clock = VisibilityAnimationClock::default();
+        let scheduled_at = Instant::now();
+        let first_frame_at = scheduled_at + Duration::from_secs(30);
+
+        // 隐藏很久后首帧才到达，仍应从起点开始。
+        assert_eq!(
+            visibility_animation_progress(animation, clock.advance(first_frame_at)),
+            (0.0, 0.0)
+        );
+        // 首帧绘制再停顿一秒，也不能让下一帧直接跳到终点。
+        let second_frame_at = first_frame_at + Duration::from_secs(1);
+        let elapsed = clock.advance(second_frame_at);
+        assert_eq!(elapsed, Duration::from_millis(50));
+        assert_eq!(visibility_animation_progress(animation, elapsed).0, 0.125);
+
+        // 恢复正常帧间隔后按实际时间推进，并正常完成。
+        for frame in 1..=14 {
+            let elapsed = clock.advance(second_frame_at + Duration::from_millis(frame * 25));
+            assert_eq!(elapsed, Duration::from_millis(50 + frame * 25));
+        }
+        assert_eq!(
+            visibility_animation_progress(animation, clock.elapsed),
+            (1.0, 1.0)
+        );
     }
 
     #[test]
