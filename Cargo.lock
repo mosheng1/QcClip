@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "QcClip"
-version = "1.0.0-beta.7"
+version = "1.0.0-beta.8"
 dependencies = [
  "argon2",
  "async-channel",
