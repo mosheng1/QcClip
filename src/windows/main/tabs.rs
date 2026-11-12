@@ -1,9 +1,6 @@
 use crate::config::{TabBarButton, TabBarButtonGroup, TabBarLayout};
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::HashSet,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 #[derive(Default)]
 pub struct TabBarHover {
@@ -175,9 +172,10 @@ impl FilterId {
 
 #[derive(Clone, Default)]
 pub struct FilterSelection {
-    selected: HashSet<FilterId>,
+    selected: Vec<FilterId>,
     hovered: Option<FilterId>,
     pointer_filter: Option<FilterId>,
+    single_select: bool,
 }
 
 impl FilterSelection {
@@ -190,12 +188,33 @@ impl FilterSelection {
     }
 
     pub fn toggle(&mut self, filter: FilterId) {
-        if !self.selected.insert(filter) {
-            self.selected.remove(&filter);
+        if let Some(index) = self
+            .selected
+            .iter()
+            .position(|selected| *selected == filter)
+        {
+            self.selected.remove(index);
+        } else {
+            if self.single_select {
+                self.selected.clear();
+            }
+            self.selected.push(filter);
         }
-        if self.hovered == Some(filter) {
+        if self.single_select || self.hovered == Some(filter) {
             self.hovered = None;
         }
+    }
+
+    pub fn set_multi_select(&mut self, multi_select: bool) -> bool {
+        self.single_select = !multi_select;
+        if multi_select {
+            return false;
+        }
+        // 切到单选时保留悬停项，否则保留最后点击选中的项。
+        let retained = self.hovered.or_else(|| self.selected.last().copied());
+        let count = self.selected.len();
+        self.selected.retain(|filter| Some(*filter) == retained);
+        self.selected.len() != count
     }
 
     pub fn set_hovered(&mut self, filter: FilterId, hovered: bool) -> bool {
@@ -210,6 +229,9 @@ impl FilterSelection {
             return false;
         }
         self.pointer_filter = Some(filter);
+        if self.single_select {
+            self.selected.retain(|selected| *selected == filter);
+        }
         self.hovered.replace(filter) != Some(filter)
     }
 

@@ -10,7 +10,7 @@ use super::super::{
         settings_dropdown, settings_error_row, settings_page_header, settings_section_title,
     },
 };
-use crate::ui::{hover_icon, icon};
+use crate::ui::{SingleSelectOption, hover_icon, icon, single_select};
 use crate::{
     config::{
         ClipboardConfig, ClipboardListLayout, ClipboardMouseBehavior, ClipboardWindowPosition,
@@ -260,6 +260,37 @@ impl SettingsWindowView {
                     );
                 }
             });
+        let filter_mode_selector = single_select(
+            "settings-clipboard-filter-mode-select",
+            [
+                SingleSelectOption::new(
+                    false,
+                    translator.translate("settings.clipboard.filter_mode.single"),
+                ),
+                SingleSelectOption::new(
+                    true,
+                    translator.translate("settings.clipboard.filter_mode.multi"),
+                ),
+            ],
+            clipboard.filter_multi_select,
+            {
+                let view = view.clone();
+                let save_error = save_error.clone();
+                move |multi_select, cx| {
+                    persist_clipboard_change(
+                        view.clone(),
+                        move |clipboard| clipboard.filter_multi_select = multi_select,
+                        save_error.clone(),
+                        cx,
+                    );
+                }
+            },
+            theme,
+            config_runtime::animation_enabled(
+                cx,
+                crate::config::AnimationKind::SingleSelectIndicator,
+            ),
+        );
         let filter_hover_switch = Switch::new("settings-clipboard-filter-hover-switch")
             .large()
             .checked(clipboard.filter_hover_switch)
@@ -526,6 +557,18 @@ impl SettingsWindowView {
                 ),
             )
             .child(self.hover_delay_row(theme, HoverBar::Page, &clipboard, &translator))
+            .child(
+                self.setting_row(
+                    theme,
+                    translator.translate("settings.clipboard.filter_mode"),
+                    Some(
+                        translator
+                            .translate("settings.clipboard.filter_mode_description")
+                            .into(),
+                    ),
+                    filter_mode_selector,
+                ),
+            )
             .child(
                 self.setting_row(
                     theme,
@@ -972,6 +1015,7 @@ fn reset_main_window_fields(clipboard: &mut ClipboardConfig) {
     clipboard.mouse_middle_behavior = default.mouse_middle_behavior;
     clipboard.page_hover_switch = default.page_hover_switch;
     clipboard.filter_hover_switch = default.filter_hover_switch;
+    clipboard.filter_multi_select = default.filter_multi_select;
     clipboard.page_hover_delay_ms = default.page_hover_delay_ms;
     clipboard.filter_hover_delay_ms = default.filter_hover_delay_ms;
     clipboard.move_pasted_to_first_in_clipboard = default.move_pasted_to_first_in_clipboard;

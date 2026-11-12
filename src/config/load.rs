@@ -639,6 +639,13 @@ fn read_clipboard(object: &Map<String, Value>, warnings: &mut Vec<String>) -> Cl
             legacy_hover_switch,
             warnings,
         ),
+        filter_multi_select: read_field(
+            object,
+            "filterMultiSelect",
+            "clipboard.filterMultiSelect",
+            default.filter_multi_select,
+            warnings,
+        ),
         page_hover_delay_ms: read_field(
             object,
             "pageHoverDelayMs",

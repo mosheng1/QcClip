@@ -551,6 +551,12 @@ fn search_target_specs() -> &'static [SearchTargetSpec] {
         },
         SearchTargetSpec {
             page: MainWindow,
+            title_key: "settings.clipboard.filter_mode",
+            description_key: Some("settings.clipboard.filter_mode_description"),
+            ratio: 0.65,
+        },
+        SearchTargetSpec {
+            page: MainWindow,
             title_key: "settings.clipboard.filter_hover_switch",
             description_key: Some("settings.clipboard.filter_hover_switch_description"),
             ratio: 0.68,

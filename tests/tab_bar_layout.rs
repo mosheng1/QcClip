@@ -249,6 +249,77 @@ fn hover_switches_control_their_own_button_groups() {
 }
 
 #[test]
+fn filter_selection_mode_defaults_to_multi_select_and_round_trips() {
+    let loaded = config::load::from_str(r#"{"schemaVersion":1,"clipboard":{}}"#).unwrap();
+    assert!(loaded.config.clipboard.filter_multi_select);
+    assert!(loaded.warnings.is_empty());
+
+    for multi_select in [false, true] {
+        let mut config = config::AppConfig::default();
+        config.clipboard.filter_multi_select = multi_select;
+        let encoded = serde_json::to_string(&config).unwrap();
+        let reloaded = config::load::from_str(&encoded).unwrap();
+        assert_eq!(reloaded.config.clipboard.filter_multi_select, multi_select);
+        assert!(reloaded.warnings.is_empty());
+    }
+}
+
+#[test]
+fn single_select_filters_replace_clicked_and_hovered_selections() {
+    let mut filters = FilterSelection::default();
+    filters.set_multi_select(false);
+    filters.toggle(FilterId::Text);
+    filters.toggle(FilterId::Image);
+    assert_eq!(
+        filters.active_filters().collect::<Vec<_>>(),
+        [FilterId::Image]
+    );
+    filters.toggle(FilterId::Image);
+    assert_eq!(filters.active_filters().count(), 0);
+
+    filters.toggle(FilterId::Text);
+    assert!(filters.set_hovered(FilterId::Image, true));
+    assert!(!filters.is_selected(FilterId::Text));
+    assert_eq!(
+        filters.active_filters().collect::<Vec<_>>(),
+        [FilterId::Image]
+    );
+    assert!(!filters.set_hovered(FilterId::Image, false));
+    filters.toggle(FilterId::File);
+    assert_eq!(
+        filters.active_filters().collect::<Vec<_>>(),
+        [FilterId::File]
+    );
+    filters.set_hovered(FilterId::File, true);
+    filters.toggle(FilterId::File);
+    assert!(!filters.set_hovered(FilterId::File, true));
+    assert_eq!(filters.active_filters().count(), 0);
+}
+
+#[test]
+fn changing_filter_mode_keeps_the_latest_active_selection() {
+    let mut filters = FilterSelection::default();
+    filters.toggle(FilterId::Text);
+    filters.toggle(FilterId::Image);
+    assert!(filters.set_multi_select(false));
+    assert_eq!(
+        filters.active_filters().collect::<Vec<_>>(),
+        [FilterId::Image]
+    );
+    assert!(!filters.set_multi_select(false));
+
+    assert!(!filters.set_multi_select(true));
+    filters.toggle(FilterId::Text);
+    filters.set_hovered(FilterId::File, true);
+    assert_eq!(filters.active_filters().count(), 3);
+    assert!(filters.set_multi_select(false));
+    assert_eq!(
+        filters.active_filters().collect::<Vec<_>>(),
+        [FilterId::File]
+    );
+}
+
+#[test]
 fn hovered_filter_combines_with_clicked_filters_and_stays_active_on_leave() {
     let mut filters = FilterSelection::default();
     filters.toggle(FilterId::Text);

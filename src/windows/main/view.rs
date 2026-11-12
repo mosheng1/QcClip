@@ -79,6 +79,7 @@ impl Render for MainWindow {
         if is_blocked || !clipboard.filter_hover_switch {
             filters_changed |= self.filters.clear_hovered();
         }
+        filters_changed |= self.filters.set_multi_select(clipboard.filter_multi_select);
         if is_blocked
             || !window.is_window_hovered()
             || self
