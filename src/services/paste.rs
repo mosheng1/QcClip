@@ -86,7 +86,7 @@ pub(crate) struct PastedItem {
     pub(crate) moved_to_first: Option<PasteOrderTarget>,
 }
 
-/// 全局格式粘贴开关，由配置运行时同步；关闭后默认粘贴和合并粘贴优先只写入纯文本，指定格式粘贴不受影响。
+/// 全局格式粘贴开关，由配置运行时同步；关闭后优先使用纯文本，文件仍保留文件列表，指定格式粘贴不受影响。
 static FORMATTED_PASTE_ENABLED: AtomicBool = AtomicBool::new(true);
 
 pub(crate) fn set_formatted_paste_enabled(enabled: bool) {
@@ -294,7 +294,7 @@ impl PasteService {
         let payloads = if formatted_paste_enabled() {
             payloads
         } else {
-            plain_text_merged_payloads(payloads)
+            plain_text_merged_payloads(payloads, !image_files.is_empty())
         };
         let result = paste_into_active_window(&payloads, &self.clipboard_write_suppressor);
         for image_file in image_files {
@@ -321,7 +321,7 @@ impl PasteService {
         Ok(())
     }
 
-    /// 将条目中优先级最高的可恢复纯文本格式粘贴到当前活动窗口；文件条目优先粘贴文件路径。
+    /// 将条目中优先级最高的可恢复纯文本格式粘贴到当前活动窗口；文件条目优先提供路径文本，并保留文件列表。
     pub(crate) fn paste_item_plain_text(
         &self,
         item_id: i64,
@@ -329,15 +329,14 @@ impl PasteService {
     ) -> Result<(), PasteError> {
         let connection = self.database.connect()?;
         let payloads = self.load_payloads(&connection, item_id)?;
-        let Some(payload) = file_list_text(&payloads, false)
-            .map(|text| text_payload(&text))
-            .or_else(|| preferred_plain_text_payload(&payloads))
+        let Some(payloads) = file_list_paste_payloads(&payloads, true)
+            .or_else(|| preferred_plain_text_payload(&payloads).map(|payload| vec![payload]))
         else {
             drop(connection);
             return self.paste_item_with_default_formats(item_id, move_to_first);
         };
 
-        paste_into_active_window(&[payload], &self.clipboard_write_suppressor)
+        paste_into_active_window(&payloads, &self.clipboard_write_suppressor)
             .map_err(PasteError::Clipboard)?;
         self.record_paste(&connection, item_id, move_to_first)
     }
@@ -641,7 +640,7 @@ impl PasteService {
         }) {
             return Ok(vec![custom_text.clone()]);
         }
-        Ok(payloads)
+        Ok(file_list_paste_payloads(&payloads, false).unwrap_or(payloads))
     }
 
     fn load_merged_payloads(&self, item_ids: &[i64]) -> Result<MergedPayload, PasteError> {
@@ -892,7 +891,9 @@ fn determine_merge_payload(sources: Vec<MergeSource>) -> Result<MergedPayload, P
         }
 
         let mut payloads = vec![file_list_payload(&paths)?];
-        if !has_files && !image_html.is_empty() {
+        if has_files {
+            payloads = file_list_paste_payloads(&payloads, false).unwrap_or(payloads);
+        } else if !image_html.is_empty() {
             let text = vec!["[图片]"; image_html.len()].join("\n\n");
             payloads.push(text_payload(&text));
             payloads.push(html_payload(&image_html.join("")));
@@ -1215,20 +1216,54 @@ fn file_list_text(payloads: &[ClipboardPayload], names_only: bool) -> Option<Str
     Some(lines.join("\r\n"))
 }
 
-/// 关闭格式粘贴时的合并载荷：纯文件合并粘贴为路径文本；图片合并保持原样，避免只粘贴“[图片]”占位文本。
-fn plain_text_merged_payloads(payloads: Vec<ClipboardPayload>) -> Vec<ClipboardPayload> {
+/// 文件同时提供路径文本和文件列表；正常模式保留其余非文本格式，纯文本模式让路径文本优先。
+fn file_list_paste_payloads(
+    payloads: &[ClipboardPayload],
+    text_first: bool,
+) -> Option<Vec<ClipboardPayload>> {
+    let text = text_payload(&file_list_text(payloads, false)?);
+    let mut files = payloads
+        .iter()
+        .filter(|payload| payload_role(payload) == FormatRole::FileList)
+        .cloned()
+        .collect::<Vec<_>>();
+    if text_first {
+        files.insert(0, text);
+    } else {
+        files.push(text);
+        files.extend(
+            payloads
+                .iter()
+                .filter(|payload| {
+                    !matches!(
+                        payload_role(payload),
+                        FormatRole::FileList | FormatRole::PlainText
+                    )
+                })
+                .cloned(),
+        );
+    }
+    Some(files)
+}
+
+/// 关闭格式粘贴时的合并载荷：文件优先提供路径文本并保留文件列表；图片合并保持原样，避免只粘贴“[图片]”。
+fn plain_text_merged_payloads(
+    payloads: Vec<ClipboardPayload>,
+    has_image_files: bool,
+) -> Vec<ClipboardPayload> {
     if payloads
         .iter()
         .any(|payload| payload_role(payload) == FormatRole::FileList)
     {
-        // 图片合并会同时携带“[图片]”文本载荷，只有纯文件合并才转换为路径。
-        let has_text = payloads
-            .iter()
-            .any(|payload| payload_role(payload) == FormatRole::PlainText);
-        if !has_text && let Some(text) = file_list_text(&payloads, false) {
-            return vec![text_payload(&text)];
+        // 纯图片合并生成临时文件并携带 HTML；真实文件条目的文本载荷也可能是路径，不能据此区分。
+        if has_image_files
+            && payloads
+                .iter()
+                .any(|payload| payload_role(payload) == FormatRole::Html)
+        {
+            return payloads;
         }
-        return payloads;
+        return file_list_paste_payloads(&payloads, true).unwrap_or(payloads);
     }
     match preferred_plain_text_payload(&payloads) {
         Some(payload) => vec![payload],
@@ -1297,42 +1332,78 @@ fn current_timestamp_millis() -> i64 {
 mod tests {
     #[test]
     fn plain_text_merged_payloads_keeps_only_text_for_rich_merge() {
-        let payloads = super::plain_text_merged_payloads(vec![
-            super::text_payload(
-                "a
+        let payloads = super::plain_text_merged_payloads(
+            vec![
+                super::text_payload(
+                    "a
 
 b",
-            ),
-            super::html_payload("<b>a</b><i>b</i>"),
-        ]);
+                ),
+                super::html_payload("<b>a</b><i>b</i>"),
+            ],
+            false,
+        );
         assert_eq!(payloads.len(), 1);
         assert_eq!(payloads[0].format_key, "CF_UNICODETEXT");
     }
 
     #[test]
     fn plain_text_merged_payloads_keeps_file_merge_unchanged() {
-        let payloads = super::plain_text_merged_payloads(vec![
-            super::file_list_payload(&[std::path::PathBuf::from(r"C:\a.png")]).unwrap(),
-            super::text_payload("[图片]"),
-            super::html_payload("<img>"),
-        ]);
+        let payloads = super::plain_text_merged_payloads(
+            vec![
+                super::file_list_payload(&[std::path::PathBuf::from(r"C:\a.png")]).unwrap(),
+                super::text_payload("[图片]"),
+                super::html_payload("<img>"),
+            ],
+            true,
+        );
         assert_eq!(payloads.len(), 3);
     }
 
     #[cfg(target_os = "windows")]
     #[test]
     fn plain_text_merged_payloads_pastes_paths_for_pure_file_merge() {
-        let payloads = super::plain_text_merged_payloads(vec![
-            super::file_list_payload(&[
-                std::path::PathBuf::from(r"C:\docs\a.txt"),
-                std::path::PathBuf::from(r"D:\b.png"),
-            ])
-            .unwrap(),
-        ]);
-        assert_eq!(payloads.len(), 1);
+        let files = super::file_list_payload(&[
+            std::path::PathBuf::from(r"C:\docs\a.txt"),
+            std::path::PathBuf::from(r"D:\b.png"),
+        ])
+        .unwrap();
+        let payloads = super::plain_text_merged_payloads(vec![files.clone()], false);
+        assert_eq!(payloads.len(), 2);
+        assert_eq!(payloads[0].format_key, "CF_UNICODETEXT");
+        assert_eq!(payloads[1], files);
         assert_eq!(
             super::decode_text_payload(&payloads[0]),
             "C:\\docs\\a.txt\r\nD:\\b.png"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn file_paste_payloads_keep_files_and_paths_in_mode_order() {
+        let paths = vec![
+            PathBuf::from(r"C:\docs\中文.txt"),
+            PathBuf::from(r"D:\b.png"),
+        ];
+        let files = file_list_payload(&paths).unwrap();
+        let text = text_payload("C:\\docs\\中文.txt\r\nD:\\b.png");
+        let html = html_payload("<b>文件</b>");
+        let original = vec![text_payload("旧路径"), html.clone(), files.clone()];
+        assert_eq!(
+            file_list_paste_payloads(&original, false).unwrap(),
+            vec![files.clone(), text.clone(), html]
+        );
+        assert_eq!(
+            file_list_paste_payloads(&original, true).unwrap(),
+            vec![text.clone(), files.clone()]
+        );
+
+        let merged =
+            determine_merge_payload(vec![MergeSource::Files(paths)]).expect("无法生成文件合并载荷");
+        assert_eq!(merged.payloads, vec![files.clone(), text.clone()]);
+        assert_eq!(
+            plain_text_merged_payloads(merged.payloads, false),
+            vec![text, files]
         );
     }
 
