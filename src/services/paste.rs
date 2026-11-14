@@ -258,7 +258,7 @@ impl PasteService {
         let MergedPayload {
             payloads,
             image_files,
-        } = self.load_merged_payloads(item_ids)?;
+        } = self.load_merged_payloads(item_ids, true)?;
         let result = copy_to_clipboard(&payloads, &self.clipboard_write_suppressor);
         for image_file in image_files {
             retain_image_temp_file(image_file);
@@ -273,7 +273,7 @@ impl PasteService {
         let MergedPayload {
             payloads,
             image_files,
-        } = self.load_merged_payloads(item_ids)?;
+        } = self.load_merged_payloads(item_ids, true)?;
         Ok(PreparedMergedPaste {
             item_ids: item_ids.to_vec(),
             payloads,
@@ -375,7 +375,7 @@ impl PasteService {
         let MergedPayload {
             payloads,
             image_files,
-        } = self.load_merged_payloads(item_ids)?;
+        } = self.load_merged_payloads(item_ids, false)?;
         Ok((payloads, image_files))
     }
 
@@ -643,7 +643,11 @@ impl PasteService {
         Ok(file_list_paste_payloads(&payloads, false).unwrap_or(payloads))
     }
 
-    fn load_merged_payloads(&self, item_ids: &[i64]) -> Result<MergedPayload, PasteError> {
+    fn load_merged_payloads(
+        &self,
+        item_ids: &[i64],
+        file_paths_as_text: bool,
+    ) -> Result<MergedPayload, PasteError> {
         if item_ids.is_empty() {
             return Err(PasteError::Merge("至少需要选择一项内容".to_owned()));
         }
@@ -656,11 +660,36 @@ impl PasteService {
             });
         }
 
+        let payloads = item_ids
+            .iter()
+            .map(|item_id| self.load_default_payloads(&connection, *item_id))
+            .collect::<Result<Vec<_>, _>>()?;
+        // 文件和纯图片可组成文件列表；含有实际文本时才将文件转为可内嵌内容。
+        let file_paths_as_text = file_paths_as_text
+            && !payloads.iter().all(|payloads| {
+                payloads
+                    .iter()
+                    .any(|payload| payload_role(payload) == FormatRole::FileList)
+                    || payloads
+                        .iter()
+                        .any(|payload| payload_role(payload) == FormatRole::Image)
+                        && !payloads.iter().any(|payload| match payload_role(payload) {
+                            FormatRole::PlainText => {
+                                !decode_text_payload(payload).trim().is_empty()
+                            }
+                            FormatRole::Html => {
+                                !normalize_html_fragment(&String::from_utf8_lossy(&payload.bytes))
+                                    .trim()
+                                    .is_empty()
+                            }
+                            _ => false,
+                        })
+            });
         let sources = item_ids
             .iter()
-            .map(|item_id| {
-                let payloads = self.load_default_payloads(&connection, *item_id)?;
-                normalize_merge_source(*item_id, payloads)
+            .zip(payloads)
+            .map(|(item_id, payloads)| {
+                normalize_merge_source(*item_id, payloads, file_paths_as_text)
             })
             .collect::<Result<Vec<_>, _>>()?;
         determine_merge_payload(sources)
@@ -778,6 +807,7 @@ impl PasteService {
 fn normalize_merge_source(
     item_id: i64,
     payloads: Vec<ClipboardPayload>,
+    file_paths_as_text: bool,
 ) -> Result<MergeSource, PasteError> {
     if payloads
         .iter()
@@ -795,6 +825,26 @@ fn normalize_merge_source(
         let paths = parse_file_list(&file_payload.bytes);
         if paths.is_empty() {
             return Err(PasteError::Merge(format!("第 {item_id} 项没有可用的文件")));
+        }
+        // 混合复制、粘贴使用可内嵌内容；纯文件合并和拖拽继续传输真实文件。
+        if file_paths_as_text {
+            let text = paths
+                .iter()
+                .map(|path| path.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("\r\n");
+            let html = paths
+                .iter()
+                .map(|path| {
+                    file_image_to_html(path)
+                        .unwrap_or_else(|| plain_text_to_html(&path.to_string_lossy()))
+                })
+                .collect::<Vec<_>>()
+                .join("<br />");
+            return Ok(MergeSource::Text {
+                text,
+                html: Some(html),
+            });
         }
         if paths.iter().any(|path| !path.exists()) {
             return Err(PasteError::Merge(format!(
@@ -976,10 +1026,27 @@ fn image_to_html(payload: &ClipboardPayload) -> Result<String, PasteError> {
 fn image_file_to_html(image_file: &ImageTempFile) -> Result<String, PasteError> {
     let png = std::fs::read(image_file.path())
         .map_err(|error| PasteError::Merge(format!("读取图片失败：{error}")))?;
-    Ok(format!(
+    Ok(png_to_html(&png))
+}
+
+/// 可解码的本地图片直接嵌入合并内容，其余文件和失效路径由调用方回退为路径文本。
+fn file_image_to_html(path: &Path) -> Option<String> {
+    let image = image::ImageReader::open(path)
+        .ok()?
+        .with_guessed_format()
+        .ok()?
+        .decode()
+        .ok()?;
+    let mut png = Cursor::new(Vec::new());
+    image.write_to(&mut png, image::ImageFormat::Png).ok()?;
+    Some(png_to_html(png.get_ref()))
+}
+
+fn png_to_html(png: &[u8]) -> String {
+    format!(
         "<img src=\"data:image/png;base64,{}\" alt=\"图片\" style=\"max-width:100%;height:auto;display:block;\" />",
         BASE64.encode(png)
-    ))
+    )
 }
 
 fn html_payload(html: &str) -> ClipboardPayload {
@@ -1439,6 +1506,224 @@ b",
     };
 
     use super::*;
+
+    #[test]
+    fn merged_files_mix_paths_with_text_html_and_images() {
+        let paths = vec![PathBuf::from(r"C:\资料\a&b.txt")];
+        let files = file_list_payload(&paths).expect("无法生成文件载荷");
+        let text = text_payload("说明");
+        let rich = html_payload("<b>富文本</b>");
+        let mut png = Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(1, 1)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .expect("无法生成测试图片");
+        let image = ClipboardPayload {
+            format_kind: FormatKind::Image.as_str().to_owned(),
+            format_namespace: "windows".to_owned(),
+            format_key: "registered:PNG".to_owned(),
+            format_name: "PNG".to_owned(),
+            native_format_id: None,
+            bytes: png.into_inner(),
+        };
+        let sources = [vec![files], vec![text], vec![rich], vec![image]]
+            .into_iter()
+            .map(|payloads| normalize_merge_source(1, payloads, true))
+            .collect::<Result<Vec<_>, _>>()
+            .expect("无法归一化合并内容");
+        let merged = determine_merge_payload(sources).expect("文件应支持与其他类型混合合并");
+        assert_eq!(merged.payloads.len(), 2);
+        assert_eq!(
+            decode_text_payload(&merged.payloads[0]),
+            "C:\\资料\\a&b.txt\n\n说明\n\n富文本\n\n[图片]"
+        );
+        let html = normalize_html_fragment(&String::from_utf8_lossy(&merged.payloads[1].bytes));
+        let positions = [
+            "C:\\资料\\a&amp;b.txt",
+            "说明",
+            "<b>富文本</b>",
+            "data:image/png;base64,",
+        ]
+        .map(|fragment| html.find(fragment).expect("合并内容缺失"));
+        assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_eq!(
+            plain_text_merged_payloads(merged.payloads.clone(), false),
+            vec![merged.payloads[0].clone()]
+        );
+    }
+
+    #[test]
+    fn image_files_in_mixed_merge_embed_pixels_and_keep_file_drag_payloads() {
+        let directory = tempfile::tempdir().expect("无法创建图片目录");
+        let paths = vec![
+            directory.path().join("图片.png"),
+            directory.path().join("图片.jpg"),
+        ];
+        for path in &paths {
+            image::DynamicImage::new_rgb8(2, 1)
+                .save(path)
+                .expect("无法保存测试图片");
+        }
+        let files = file_list_payload(&paths).expect("无法生成文件载荷");
+        let source =
+            normalize_merge_source(1, vec![files.clone()], true).expect("无法归一化图片文件");
+        let text =
+            normalize_merge_source(2, vec![text_payload("说明")], true).expect("无法归一化文本");
+        let merged = determine_merge_payload(vec![source, text]).expect("无法合并图片文件");
+        assert_eq!(merged.payloads.len(), 2);
+        let html = normalize_html_fragment(&String::from_utf8_lossy(&merged.payloads[1].bytes));
+        assert_eq!(html.matches("data:image/png;base64,").count(), 2);
+        assert!(!html.contains("图片.png") && !html.contains("图片.jpg"));
+        for encoded in html.split("data:image/png;base64,").skip(1) {
+            let png = BASE64
+                .decode(encoded.split('"').next().unwrap())
+                .expect("图片编码无效");
+            let image = image::load_from_memory(&png).expect("内嵌图片无法解码");
+            assert_eq!((image.width(), image.height()), (2, 1));
+        }
+
+        let source = normalize_merge_source(1, vec![files], false).expect("无法生成文件拖拽内容");
+        assert!(matches!(source, MergeSource::Files(actual) if actual == paths));
+    }
+
+    #[test]
+    fn pure_file_merge_preparation_preserves_files_and_paths() {
+        let directory = tempfile::tempdir().expect("无法创建测试目录");
+        let paths = vec![
+            directory.path().join("文件.txt"),
+            directory.path().join("图片.png"),
+        ];
+        std::fs::write(&paths[0], "文件内容").expect("无法创建测试文件");
+        image::DynamicImage::new_rgb8(1, 1)
+            .save(&paths[1])
+            .expect("无法创建测试图片");
+        let database =
+            Database::open(directory.path().join("test.sqlite3")).expect("无法创建数据库");
+        let store = RawBlobStore::new(directory.path()).expect("无法创建文件存储");
+        let capture = CaptureService::new(database.clone(), store.clone());
+        let connection = database.connect().expect("无法连接数据库");
+        let mut item_ids = Vec::new();
+        for path in &paths {
+            let history_id = capture
+                .store_captured_clipboard(&CapturedClipboard {
+                    formats: vec![RawFormat::captured(
+                        "windows",
+                        "CF_HDROP",
+                        "CF_HDROP",
+                        FormatKind::FileList,
+                        hdrop_bytes_for_paths(std::slice::from_ref(path)),
+                        0,
+                        true,
+                    )],
+                    primary_format_identity: Some(("windows".to_owned(), "CF_HDROP".to_owned())),
+                    preview_candidate: None,
+                    source_application: SourceApplication::default(),
+                })
+                .expect("无法保存文件条目");
+            item_ids.push(
+                connection
+                    .query_row(
+                        "SELECT item_id FROM clipboard_history WHERE id = ?1",
+                        [history_id],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .expect("无法读取文件条目 ID"),
+            );
+        }
+        let service = PasteService::new(database, store);
+        let prepared = service
+            .prepare_merged_paste(&item_ids)
+            .expect("无法准备纯文件合并粘贴");
+        let files = file_list_payload(&paths).expect("无法生成预期文件列表");
+        let text = text_payload(
+            &paths
+                .iter()
+                .map(|path| path.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("\r\n"),
+        );
+        assert_eq!(prepared.payloads, vec![files.clone(), text.clone()]);
+        assert_eq!(
+            plain_text_merged_payloads(prepared.payloads, false),
+            vec![text, files]
+        );
+
+        let mut captured = MockClipboardSource::text("").capture();
+        captured.formats = vec![RawFormat::captured(
+            "windows",
+            "registered:PNG",
+            "PNG",
+            FormatKind::Image,
+            std::fs::read(&paths[1]).expect("无法读取测试图片"),
+            0,
+            true,
+        )];
+        captured.primary_format_identity =
+            Some(("windows".to_owned(), "registered:PNG".to_owned()));
+        let history_id = capture
+            .store_captured_clipboard(&captured)
+            .expect("无法保存原生图片条目");
+        let image_id = connection
+            .query_row(
+                "SELECT item_id FROM clipboard_history WHERE id = ?1",
+                [history_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("无法读取原生图片条目 ID");
+        item_ids.insert(0, image_id);
+        let prepared = service
+            .prepare_merged_paste(&item_ids)
+            .expect("无法准备原生图片与文件合并粘贴");
+        assert_eq!(prepared.image_files.len(), 1);
+        let image_path = prepared.image_files[0].path().to_path_buf();
+        assert!(image_path.is_file());
+        let mut expected_paths = vec![image_path];
+        expected_paths.extend(paths);
+        let files = file_list_payload(&expected_paths).expect("无法生成预期文件列表");
+        let text = text_payload(
+            &expected_paths
+                .iter()
+                .map(|path| path.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("\r\n"),
+        );
+        assert_eq!(prepared.payloads, vec![files.clone(), text.clone()]);
+        assert_eq!(
+            plain_text_merged_payloads(prepared.payloads, true),
+            vec![text, files]
+        );
+
+        captured.formats.push(RawFormat::captured(
+            "mime",
+            "text/plain",
+            "纯文本",
+            FormatKind::Text,
+            "图文说明".as_bytes().to_vec(),
+            1,
+            true,
+        ));
+        let history_id = capture
+            .store_captured_clipboard(&captured)
+            .expect("无法保存图文条目");
+        item_ids[0] = connection
+            .query_row(
+                "SELECT item_id FROM clipboard_history WHERE id = ?1",
+                [history_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("无法读取图文条目 ID");
+        let prepared = service
+            .prepare_merged_paste(&item_ids)
+            .expect("图文条目应继续支持混合合并");
+        assert_eq!(
+            prepared
+                .payloads
+                .iter()
+                .map(payload_role)
+                .collect::<Vec<_>>(),
+            [FormatRole::PlainText, FormatRole::Html]
+        );
+        assert!(decode_text_payload(&prepared.payloads[0]).contains("图文说明"));
+    }
 
     #[test]
     fn read_only_database_loads_payloads_without_updating_paste_counts() {
