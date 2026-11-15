@@ -55,6 +55,9 @@ pub enum DatabaseError {
 #[derive(Clone, Debug)]
 pub struct Database {
     path: PathBuf,
+    /// `hidden_missing_items` is created on writable opens. A database opened
+    /// read-only without the auxiliary table keeps missing-item filtering off.
+    has_hidden_items_table: bool,
 }
 
 pub(crate) struct DatabaseConnection {
@@ -85,7 +88,10 @@ impl Database {
                 source,
             })?;
         }
-        let database = Self { path };
+        let mut database = Self {
+            path,
+            has_hidden_items_table: false,
+        };
         let initialize = if database.path.exists() {
             let connection = database.open_connection(true, false)?;
             let version: i32 = connection
@@ -127,12 +133,31 @@ impl Database {
                         writable
                             .execute_batch(include_str!("sync.sql"))
                             .map_err(|source| DatabaseError::Configure { source })?;
+                        migrations::ensure_missing_files_table(&writable)?;
                     }
                 }
                 Err(error) => tracing::warn!("数据库已按只读兼容模式打开：{error}"),
             }
         }
+        database.has_hidden_items_table = database.detect_hidden_items_table()?;
         Ok(database)
+    }
+
+    pub(crate) fn has_hidden_items_table(&self) -> bool {
+        self.has_hidden_items_table
+    }
+
+    fn detect_hidden_items_table(&self) -> Result<bool, DatabaseError> {
+        self.open_connection(true, false)?
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM sqlite_master
+                    WHERE type = 'table' AND name = 'hidden_missing_items'
+                )",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|source| DatabaseError::Inspect { source })
     }
 
     pub(crate) fn connect_read(&self) -> Result<DatabaseConnection, DatabaseError> {

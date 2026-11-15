@@ -4,6 +4,18 @@ use super::*;
 #[path = "list_tests.rs"]
 mod tests;
 
+fn finish_image_load(
+    loading: &mut HashMap<ImagePreviewKey, u64>,
+    key: &ImagePreviewKey,
+    token: u64,
+) -> bool {
+    if loading.get(key) != Some(&token) {
+        return false;
+    }
+    loading.remove(key);
+    true
+}
+
 fn saved_item_row_id(
     item_id: ClipboardItemId,
     tab: TabId,
@@ -27,6 +39,20 @@ impl MainWindow {
                 .enumerate()
                 .map(|(index, history_id)| (*history_id, index)),
         );
+    }
+
+    /// Sort loaded rows with the same comparator as the main branch.
+    fn sorted_items_by_list_order(
+        &self,
+        mut items: Vec<ClipboardListItem>,
+    ) -> Vec<ClipboardListItem> {
+        items.sort_by(compare_list_items);
+        items
+    }
+
+    fn sort_items_by_list_order(&mut self) {
+        let items = std::mem::take(&mut self.items);
+        self.items = self.sorted_items_by_list_order(items);
     }
 
     pub(super) fn reindex_list_order_positions(&mut self, range: Range<usize>) {
@@ -77,11 +103,11 @@ impl MainWindow {
         self.list_layout_cache = None;
     }
 
-    pub fn replace_items(&mut self, mut items: Vec<ClipboardListItem>) {
+    pub fn replace_items(&mut self, items: Vec<ClipboardListItem>) {
         self.adaptive_item_heights.clear();
         self.adaptive_height_cache_key = None;
         self.invalidate_list_layout_cache();
-        items.sort_by(compare_list_items);
+        let mut items = self.sorted_items_by_list_order(items);
         if self.total_item_count == 0 {
             self.total_item_count = items.len();
         }
@@ -170,6 +196,7 @@ impl MainWindow {
             .to_vec();
         self.loading_page_range = Some(offset..page_end);
         let generation = self.query_generation;
+        let visibility_generation = self.missing_visibility_generation;
         let policy = crate::config_runtime::history_config(cx);
         let query = self.page_query(offset, page_size);
         let active_tab = self.active_tab;
@@ -178,7 +205,7 @@ impl MainWindow {
         self.is_loading_more = true;
         let query_task = cx.background_spawn(async move {
             if active_tab == TabId::Favorites {
-                favorite_repository.query_by_ids(&query, &requested_ids)
+                favorite_repository.query_by_ids_scoped(&query, &requested_ids, &policy)
             } else {
                 history_repository.query_by_ids_scoped(&query, &requested_ids, &policy)
             }
@@ -187,16 +214,27 @@ impl MainWindow {
             let result = query_task.await;
             if let Some(this) = this.upgrade() {
                 this.update(cx, |this, cx| {
-                    if let Some((page_loaded, page_range)) =
-                        this.accept_page_result(generation, page_size, animate_loaded, result)
-                    {
-                        if page_loaded {
-                            this.load_pending_selection(page_range, cx);
-                        } else {
-                            this.pending_selection_index = None;
+                    let accepted = this.accept_page_result(
+                        generation,
+                        visibility_generation,
+                        page_size,
+                        animate_loaded,
+                        result,
+                    );
+                    let Some((page_loaded, page_range)) = accepted else {
+                        // 可见性代次变化时这一页会作废，而刷新任务在顺序未变时不会重排列表，
+                        // 因此这里补发一次请求，避免该区间一直空着；查询代次变化已由刷新重新加载。
+                        if this.missing_visibility_generation != visibility_generation {
+                            this.load_page(cx, offset, page_size);
                         }
-                        cx.notify();
+                        return;
+                    };
+                    if page_loaded {
+                        this.load_pending_selection(page_range, cx);
+                    } else {
+                        this.pending_selection_index = None;
                     }
+                    cx.notify();
                 });
             }
         }));
@@ -423,10 +461,13 @@ impl MainWindow {
         for (key, source, format_kind, format_key, dimensions_hint) in requests {
             if self.loaded_images.contains_key(&key)
                 || self.image_load_failures.contains(&key)
-                || !self.image_loading.insert(key.clone())
+                || self.image_loading.contains_key(&key)
             {
                 continue;
             }
+            self.next_image_load_token = self.next_image_load_token.wrapping_add(1);
+            let load_token = self.next_image_load_token;
+            self.image_loading.insert(key.clone(), load_token);
             let service = self.image_preview_service.clone();
             let task = cx.background_spawn(async move {
                 service.load_with_dimensions_hint(
@@ -441,7 +482,9 @@ impl MainWindow {
                 let result = task.await;
                 if let Some(this) = this.upgrade() {
                     this.update(cx, |this, cx| {
-                        this.image_loading.remove(&key);
+                        if !finish_image_load(&mut this.image_loading, &key, load_token) {
+                            return;
+                        }
                         match result {
                             Ok(loaded) if this.image_cache_item_ids.contains(&key.item_id) => {
                                 if let Some(dimensions) = loaded.dimensions {
@@ -779,6 +822,9 @@ impl MainWindow {
     }
 
     pub(super) fn invalidate_image_cache_item(&mut self, item_id: ClipboardItemId) {
+        self.image_loading.retain(|key, _| key.item_id != item_id);
+        self.image_load_failures
+            .retain(|key| key.item_id != item_id);
         self.image_cache_invalidated_item_ids.insert(item_id);
         self.image_cache_needs_cleanup = true;
     }
@@ -837,6 +883,7 @@ impl MainWindow {
             return;
         }
         let generation = self.query_generation;
+        let visibility_generation = self.missing_visibility_generation;
         let policy = crate::config_runtime::history_config(cx);
         let query = self.page_query(0, 1);
         let active_tab = self.active_tab;
@@ -844,7 +891,7 @@ impl MainWindow {
         let favorite_repository = self.favorite_repository.clone();
         let query_task = cx.background_spawn(async move {
             if active_tab == TabId::Favorites {
-                favorite_repository.find_by_id(list_item_id, &query)
+                favorite_repository.find_by_id_scoped(list_item_id, &query, &policy)
             } else {
                 history_repository.find_by_id_scoped(list_item_id, &query, &policy)
             }
@@ -854,6 +901,10 @@ impl MainWindow {
             if let Some(this) = this.upgrade() {
                 this.update(cx, |this, cx| {
                     if generation != this.query_generation || this.active_tab != active_tab {
+                        return;
+                    }
+                    if visibility_generation != this.missing_visibility_generation {
+                        this.refresh_loaded_list_item(source_tab, list_item_id, cx);
                         return;
                     }
                     match result {
@@ -951,13 +1002,14 @@ impl MainWindow {
             return;
         }
         let generation = self.query_generation;
+        let visibility_generation = self.missing_visibility_generation;
         let policy = crate::config_runtime::history_config(cx);
         let query = self.page_query(0, 1);
         let repository = self.history_repository.clone();
         let query_task = cx.background_spawn(async move {
             let record = repository.find_by_id_scoped(history_id, &query, &policy)?;
             let pinned_count = if record.is_some() {
-                repository.pinned_count(&query)?
+                repository.pinned_count_scoped(&query, &policy)?
             } else {
                 0
             };
@@ -968,6 +1020,10 @@ impl MainWindow {
             if let Some(this) = this.upgrade() {
                 this.update(cx, |this, cx| {
                     if generation != this.query_generation || this.active_tab != TabId::Clipboard {
+                        return;
+                    }
+                    if visibility_generation != this.missing_visibility_generation {
+                        this.refresh_new_list_item(history_id, cx);
                         return;
                     }
                     match result {
@@ -1008,20 +1064,22 @@ impl MainWindow {
             self.refresh_history(cx);
             return;
         }
-        let generation = self.query_generation;
         let policy = crate::config_runtime::history_config(cx);
+        let generation = self.query_generation;
+        let visibility_generation = self.missing_visibility_generation;
         let query = self.page_query(0, 1);
         let active_tab = self.active_tab;
         let history_repository = self.history_repository.clone();
         let favorite_repository = self.favorite_repository.clone();
         let query_task = cx.background_spawn(async move {
             if active_tab == TabId::Favorites {
-                let record = favorite_repository.find_by_id(list_item_id, &query)?;
-                let pinned_count = favorite_repository.pinned_count(&query)?;
+                let record =
+                    favorite_repository.find_by_id_scoped(list_item_id, &query, &policy)?;
+                let pinned_count = favorite_repository.pinned_count_scoped(&query, &policy)?;
                 Ok::<_, HistoryQueryError>((record, pinned_count))
             } else {
                 let record = history_repository.find_by_id_scoped(list_item_id, &query, &policy)?;
-                let pinned_count = history_repository.pinned_count(&query)?;
+                let pinned_count = history_repository.pinned_count_scoped(&query, &policy)?;
                 Ok::<_, HistoryQueryError>((record, pinned_count))
             }
         });
@@ -1030,6 +1088,10 @@ impl MainWindow {
             if let Some(this) = this.upgrade() {
                 this.update(cx, |this, cx| {
                     if generation != this.query_generation || this.active_tab != active_tab {
+                        return;
+                    }
+                    if visibility_generation != this.missing_visibility_generation {
+                        this.refresh_pinned_list_item(source_tab, list_item_id, cx);
                         return;
                     }
                     match result {
@@ -1077,7 +1139,7 @@ impl MainWindow {
             self.invalidate_list_layout_cache();
         }
         self.apply_loaded_list_record(record);
-        self.items.sort_by(compare_list_items);
+        self.sort_items_by_list_order();
         refresh_shortcuts_after_move_to(
             &mut self.items,
             list_item_id,
@@ -1318,6 +1380,7 @@ impl MainWindow {
             return;
         }
         let generation = self.query_generation;
+        let visibility_generation = self.missing_visibility_generation;
         let policy = crate::config_runtime::history_config(cx);
         let query = self.page_query(0, 1);
         let active_tab = self.active_tab;
@@ -1326,8 +1389,8 @@ impl MainWindow {
         let query_task = cx.background_spawn(async move {
             let (record, total) = if active_tab == TabId::Favorites {
                 (
-                    favorite_repository.find_by_id(list_item_id, &query)?,
-                    favorite_repository.count(&query)?,
+                    favorite_repository.find_by_id_scoped(list_item_id, &query, &policy)?,
+                    favorite_repository.count_scoped(&query, &policy)?,
                 )
             } else {
                 (
@@ -1336,7 +1399,7 @@ impl MainWindow {
                 )
             };
             let snapshot = if active_tab == TabId::Favorites {
-                favorite_repository.ordered_snapshot(&query)?
+                favorite_repository.ordered_snapshot_scoped(&query, &policy)?
             } else {
                 repository.ordered_snapshot_scoped(&query, &policy)?
             };
@@ -1349,6 +1412,10 @@ impl MainWindow {
             if let Some(this) = this.upgrade() {
                 this.update(cx, |this, cx| {
                     if generation != this.query_generation || this.active_tab != active_tab {
+                        return;
+                    }
+                    if visibility_generation != this.missing_visibility_generation {
+                        this.refresh_list_item(list_item_id, cx);
                         return;
                     }
                     match result {
@@ -1365,17 +1432,22 @@ impl MainWindow {
     }
 
     pub(super) fn reconcile_selection(&mut self) {
+        self.selected_item_id = self
+            .selected_item_id
+            .filter(|history_id| self.list_order_positions.contains_key(history_id));
         self.multi_selected_item_ids
             .retain(|history_id| self.list_order_positions.contains_key(history_id));
         if self.multi_selected_item_ids.is_empty() {
             self.multi_selection_anchor = None;
+        } else if self
+            .multi_selection_anchor
+            .is_none_or(|anchor| !self.multi_selected_item_ids.contains(&anchor))
+        {
+            self.multi_selection_anchor = self.multi_selected_item_ids.first().copied();
         }
         for item in &mut self.items {
             item.is_selected = Some(item.history_id) == self.selected_item_id;
         }
-        self.selected_item_id = self
-            .selected_item_id
-            .filter(|history_id| self.list_order_positions.contains_key(history_id));
     }
 
     pub(super) fn sync_loaded_shortcuts(&mut self) {
@@ -1458,6 +1530,7 @@ impl MainWindow {
     pub(super) fn accept_page_result(
         &mut self,
         generation: u64,
+        visibility_generation: u64,
         page_size: usize,
         animate_loaded: bool,
         result: Result<Vec<HistoryListRecord>, HistoryQueryError>,
@@ -1466,6 +1539,11 @@ impl MainWindow {
             return None;
         }
         self.is_loading_more = false;
+        // 失效隐藏状态在查询期间变化时，这一页可能带着过期的可见性，丢弃后重新加载。
+        if visibility_generation != self.missing_visibility_generation {
+            self.loading_page_range = None;
+            return None;
+        }
         let page_range = self.loading_page_range.take().unwrap_or_default();
         let page_loaded = match result {
             Ok(records) => {
@@ -1541,7 +1619,7 @@ impl MainWindow {
                 .items
                 .iter()
                 .find(|item| item.history_id == list_item_id)
-            && compare_list_items(existing, updated_item) == Ordering::Equal
+            && compare_list_items(existing, updated_item) == std::cmp::Ordering::Equal
         {
             let mut updated_item = updated_item.clone();
             updated_item.shortcut = existing.shortcut.clone();
@@ -1588,9 +1666,9 @@ impl MainWindow {
         self.items.retain(|item| item.history_id != list_item_id);
         if let Some(record) = record {
             insert_sorted_item(&mut self.items, record_to_list_item(record));
-            if self.has_more_items && self.items.len() > previous_len {
-                self.items.pop();
-            }
+        }
+        if self.has_more_items && self.items.len() > previous_len {
+            self.items.pop();
         }
         let current_item_ids: HashSet<_> = self.items.iter().map(|item| item.item_id).collect();
         for item_id in previous_item_ids.difference(&current_item_ids) {

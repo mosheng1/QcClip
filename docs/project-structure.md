@@ -23,7 +23,8 @@ src/
 ├── domain/                         # 捕获、剪贴板和 HTML 数据模型
 ├── platform/                       # 剪贴板、窗口、输入和系统能力
 ├── services/
-│   ├── database/                   # SQLite 连接、结构、兼容校验和仓储
+│   ├── database/                   # SQLite 连接、结构、兼容校验、仓储与失效条目隐藏
+│   ├── missing_scan.rs             # 在数据库快照上探测失效图片和文件
 │   ├── storage/                    # 原始字节文件写入、读取和校验
 │   ├── capture/                    # 捕获哈希、预览和持久化编排
 │   ├── sync/                       # 设备身份、配对、LAN 与 WebDAV 事件同步
@@ -49,6 +50,7 @@ src/
     │   └── view.rs                 # 主窗口布局
     ├── settings/                   # 设置窗口和页面
     ├── menu/                       # 下拉菜单与命令面板
+    ├── list_order.rs               # 列表删除后选择最近仍存在行的辅助逻辑
     ├── quick_paste.rs              # 便捷粘贴窗口
     ├── preview.rs                  # 内容预览窗口
     ├── notification.rs             # 通知窗口
@@ -78,7 +80,7 @@ src/
 
 `domain` 保存不依赖 GPUI、SQLite 和具体操作系统的模型及规则。领域模型不需要与数据库表一一对应，SQL 行与领域数据的映射由数据库服务负责。
 
-`services/database` 统一管理 SQLite 连接、外键、WAL、忙等待、结构版本和读写兼容校验。历史、收藏、标签和备注通过仓储公开接口操作；排序、搜索及筛选在查询层完成。初始化结构见 [schema.sql](../src/services/database/schema.sql)，业务关系见 [数据库设计](database-design.md)。
+`services/database` 统一管理 SQLite 连接、外键、WAL、忙等待、结构版本和读写兼容校验。历史、收藏、标签和备注通过仓储公开接口操作；排序、搜索及筛选在查询层完成。`database/missing_files.rs` 持有失效图片/文件隐藏关系、隐藏过滤 SQL 和扫描所需的数据库快照查询；`services/missing_scan.rs` 只负责在快照上探测文件系统。初始化结构见 [schema.sql](../src/services/database/schema.sql)，辅助隐藏表见 [missing_files.sql](../src/services/database/missing_files.sql)，业务关系见 [数据库设计](database-design.md)。
 
 `services/storage` 管理 `data/*.bin` 和 `data/*.bin.zst`，负责临时写入、原子提交、长度与 SHA-256 校验及路径边界检查。数据库中的 `binary_blobs` 保存文件索引和校验信息。
 

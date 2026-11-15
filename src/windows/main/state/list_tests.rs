@@ -36,6 +36,19 @@ impl TestList {
 }
 
 #[test]
+fn stale_image_failure_cannot_finish_a_restarted_load() {
+    let key = ImagePreviewKey::new(42, "windows", "CF_HDROP");
+    let mut loading = HashMap::from([(key.clone(), 1)]);
+    loading.remove(&key); // 文件状态变化取消旧任务
+    loading.insert(key.clone(), 2); // 恢复后重试同一格式
+
+    assert!(!finish_image_load(&mut loading, &key, 1));
+    assert_eq!(loading.get(&key), Some(&2));
+    assert!(finish_image_load(&mut loading, &key, 2));
+    assert!(!loading.contains_key(&key));
+}
+
+#[test]
 fn saved_capture_resolves_the_row_for_the_active_tab() {
     let list = TestList::new();
     list.capture("unfavorited history");

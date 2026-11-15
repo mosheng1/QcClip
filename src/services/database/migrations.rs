@@ -16,6 +16,12 @@ pub(super) fn ensure_capture_indexes(connection: &Connection) -> Result<(), Data
         .map_err(|source| DatabaseError::Configure { source })
 }
 
+pub(super) fn ensure_missing_files_table(connection: &Connection) -> Result<(), DatabaseError> {
+    connection
+        .execute_batch(include_str!("missing_files.sql"))
+        .map_err(|source| DatabaseError::Configure { source })
+}
+
 const REQUIRED_TABLES: &[&str] = &[
     "database_compatibility",
     "binary_blobs",
@@ -80,6 +86,7 @@ pub(super) fn migrate(connection: &mut Connection) -> Result<(), DatabaseError> 
         transaction
             .execute_batch(include_str!("sync.sql"))
             .map_err(|source| DatabaseError::Migration { version: 2, source })?;
+        ensure_missing_files_table(&transaction)?;
         transaction
             .pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)
             .map_err(|source| DatabaseError::Migration { version: 1, source })?;
@@ -112,6 +119,7 @@ pub(super) fn migrate(connection: &mut Connection) -> Result<(), DatabaseError> 
         transaction
             .execute_batch(&sql)
             .map_err(|source| DatabaseError::Migration { version: 2, source })?;
+        ensure_missing_files_table(&transaction)?;
         validate_write_schema(&transaction)?;
         transaction
             .commit()

@@ -75,6 +75,26 @@ fn new_database_uses_current_schema_version() {
 }
 
 #[test]
+fn opening_existing_database_adds_hidden_missing_items_table() {
+    let directory = tempfile::tempdir().expect("无法创建临时目录");
+    let path = directory.path().join("test.sqlite3");
+    let database = Database::open(&path).expect("无法创建数据库");
+    assert!(database.has_hidden_items_table());
+    database
+        .connect_write()
+        .expect("无法连接数据库")
+        .execute_batch("DROP TABLE hidden_missing_items;")
+        .expect("无法移除隐藏表");
+    drop(database);
+
+    let reopened = Database::open(&path).expect("无法重新打开数据库");
+    assert!(
+        reopened.has_hidden_items_table(),
+        "opening an existing schema must restore the additive hidden table"
+    );
+}
+
+#[test]
 fn compatible_future_schema_keeps_revision_and_unknown_columns() {
     let directory = tempfile::tempdir().expect("无法创建临时目录");
     let path = directory.path().join("test.sqlite3");

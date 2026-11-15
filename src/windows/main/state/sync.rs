@@ -1,5 +1,9 @@
 use super::*;
 use crate::services::sync::ReceivedChange;
+use crate::windows::list_order::nearest_survivor;
+
+/// 拖拽/加载阻塞时的轮询间隔。50ms 级唤醒会持续抢拖拽动画帧。
+const BLOCKED_REFRESH_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 
 #[cfg(test)]
 mod tests;
@@ -8,6 +12,7 @@ struct UpdateBatch {
     changes: Vec<ReceivedChange>,
     tab: TabId,
     generation: u64,
+    visibility_generation: u64,
     tag_generation: u64,
     previous_order: Vec<HistoryItemId>,
     ids: Vec<HistoryItemId>,
@@ -25,7 +30,73 @@ enum NextUpdate {
     Load(UpdateBatch, Task<Result<UpdateData, String>>),
 }
 
+fn select_cached_missing_changes(
+    changes: Vec<ReceivedChange>,
+    file_list_changes: Vec<ReceivedChange>,
+    cached_item_ids: &HashSet<ClipboardItemId>,
+) -> Vec<ReceivedChange> {
+    let mut notified: HashSet<_> = changes.iter().map(|change| change.item_id).collect();
+    let mut selected = changes;
+    selected.extend(
+        file_list_changes
+            .into_iter()
+            .filter(|change| cached_item_ids.contains(&change.item_id))
+            .filter(|change| notified.insert(change.item_id)),
+    );
+    selected
+}
+
 impl MainWindow {
+    pub(crate) fn receive_missing_changes(
+        &mut self,
+        changes: Vec<ReceivedChange>,
+        file_list_changes: Vec<ReceivedChange>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(panes) = self.split_panes.clone() {
+            for pane in panes {
+                pane.update(cx, |pane, cx| {
+                    pane.receive_missing_changes(changes.clone(), file_list_changes.clone(), cx)
+                });
+            }
+            return;
+        }
+        let cached_item_ids: HashSet<_> = self
+            .loaded_items
+            .values()
+            .map(|item| item.item_id)
+            .chain(self.file_list_views.keys().map(|key| key.item_id))
+            .chain(self.loaded_images.keys().map(|key| key.item_id))
+            .chain(self.image_loading.keys().map(|key| key.item_id))
+            .chain(self.image_load_failures.iter().map(|key| key.item_id))
+            .collect();
+        let changes = select_cached_missing_changes(changes, file_list_changes, &cached_item_ids);
+        // A page query may have started before the scan and is not in loaded_items yet.
+        // Discard its stale result even when no current card needs a metadata refresh.
+        self.missing_visibility_generation = self.missing_visibility_generation.wrapping_add(1);
+        if changes.is_empty() {
+            return;
+        }
+        let changed_items: HashSet<_> = changes.iter().map(|change| change.item_id).collect();
+        for (key, view) in &self.file_list_views {
+            if changed_items.contains(&key.item_id) {
+                view.update(cx, |view, cx| view.refresh_metadata(cx));
+            }
+        }
+        for item_id in changed_items {
+            self.invalidate_image_cache_item(item_id);
+        }
+        if self.preview_hover_source.is_some_and(|source| {
+            changes.iter().any(|change| match source {
+                PreviewSource::History(id) => change.history_id == Some(id),
+                PreviewSource::Favorite(id) => change.favorite_id == Some(id),
+            })
+        }) {
+            self.cancel_hover_preview(cx);
+        }
+        self.receive_sync_changes(changes, cx);
+    }
+
     pub(crate) fn receive_sync_changes(
         &mut self,
         changes: Vec<ReceivedChange>,
@@ -58,13 +129,14 @@ impl MainWindow {
                     NextUpdate::Stop => break,
                     NextUpdate::Wait => {
                         cx.background_executor()
-                            .timer(Duration::from_millis(50))
+                            .timer(BLOCKED_REFRESH_POLL_INTERVAL)
                             .await;
                     }
                     NextUpdate::Load(batch, task) => {
                         let result = task.await;
-                        let _ = this.update(cx, |this, cx| {
+                        let retry = this.update(cx, |this, cx| {
                             if batch.generation != this.query_generation
+                                || batch.visibility_generation != this.missing_visibility_generation
                                 || batch.tab != this.active_tab
                                 || batch.previous_order != this.list_order_ids
                                 || batch.tag_generation != this.tags_query_generation
@@ -79,7 +151,7 @@ impl MainWindow {
                                         })
                                         .or_insert(change);
                                 }
-                                return;
+                                return false;
                             }
                             match result {
                                 Ok(data) => {
@@ -93,13 +165,35 @@ impl MainWindow {
                                         sort_tags(&mut this.tags);
                                     }
                                     if let Some(snapshot) = data.snapshot {
-                                        this.apply_sync_records(&batch.ids, data.records, snapshot);
+                                        this.apply_sync_records(
+                                            &batch.ids,
+                                            data.records,
+                                            snapshot,
+                                            cx,
+                                        );
                                     }
                                     cx.notify();
+                                    false
                                 }
-                                Err(error) => tracing::error!("同步内容局部更新失败：{error}"),
+                                Err(error) => {
+                                    tracing::error!("同步内容局部更新失败：{error}");
+                                    for change in batch.changes {
+                                        this.sync_changes
+                                            .entry(change.item_id)
+                                            .and_modify(|pending| {
+                                                pending.tags_changed |= change.tags_changed
+                                            })
+                                            .or_insert(change);
+                                    }
+                                    true
+                                }
                             }
                         });
+                        if matches!(retry, Ok(true)) {
+                            cx.background_executor()
+                                .timer(BLOCKED_REFRESH_POLL_INTERVAL)
+                                .await;
+                        }
                     }
                 }
             }
@@ -141,6 +235,7 @@ impl MainWindow {
             changes,
             tab: self.active_tab,
             generation: self.query_generation,
+            visibility_generation: self.missing_visibility_generation,
             tag_generation: self.tags_query_generation,
             previous_order: self.list_order_ids.clone(),
             ids: ids.clone(),
@@ -158,7 +253,7 @@ impl MainWindow {
             } else if tab == TabId::Favorites {
                 Some(
                     favorites
-                        .ordered_snapshot(&query)
+                        .ordered_snapshot_scoped(&query, &policy)
                         .map_err(|e| e.to_string())?,
                 )
             } else {
@@ -172,7 +267,7 @@ impl MainWindow {
             for chunk in ids.chunks(MAX_QUERY_PAGE_SIZE) {
                 records.extend(if tab == TabId::Favorites {
                     favorites
-                        .query_by_ids(&query, chunk)
+                        .query_by_ids_scoped(&query, chunk, &policy)
                         .map_err(|e| e.to_string())?
                 } else {
                     history
@@ -199,9 +294,24 @@ impl MainWindow {
         changed_ids: &[HistoryItemId],
         records: Vec<HistoryListRecord>,
         snapshot: ListOrderSnapshot,
+        cx: &mut Context<Self>,
     ) {
         let changed_ids: HashSet<_> = changed_ids.iter().copied().collect();
         let visible_ids: HashSet<_> = snapshot.ids.iter().copied().collect();
+        if self.preview_hover_source.is_some_and(|source| {
+            let id = match source {
+                PreviewSource::History(id) | PreviewSource::Favorite(id) => id,
+            };
+            !visible_ids.contains(&id) || changed_ids.contains(&id)
+        }) {
+            self.cancel_hover_preview(cx);
+        }
+        let order_changed = self.list_order_ids != snapshot.ids;
+        let selected_position = self
+            .selected_item_id
+            .and_then(|id| self.list_order_positions.get(&id).copied());
+        let selected_fallback = selected_position
+            .and_then(|index| nearest_survivor(&self.list_order_ids, index, &visible_ids));
         let removed_items: Vec<_> = self
             .loaded_items
             .values()
@@ -243,12 +353,25 @@ impl MainWindow {
         self.has_more_items = self.loaded_items.len() < self.total_item_count;
         refresh_shortcuts_for_order(&mut self.items, &self.list_order_ids);
         self.sync_loaded_shortcuts();
+        if self
+            .selected_item_id
+            .is_some_and(|id| !visible_ids.contains(&id))
+        {
+            self.selected_item_id =
+                selected_fallback.or_else(|| self.list_order_ids.first().copied());
+        }
         self.reconcile_selection();
         self.list_status = if self.total_item_count == 0 {
             ListStatus::Empty
         } else {
             ListStatus::Ready
         };
-        self.invalidate_list_layout_cache();
+        if order_changed {
+            self.list_layout_generation = self.list_layout_generation.wrapping_add(1);
+            self.list_layout_cache = None;
+            self.list_smooth_scroll.reset();
+        } else {
+            self.invalidate_list_layout_cache();
+        }
     }
 }

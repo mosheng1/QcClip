@@ -10,6 +10,7 @@ pub(crate) mod image_library;
 pub mod image_preview;
 pub(crate) mod legacy_migration;
 pub(crate) mod memory_trim;
+pub(crate) mod missing_scan;
 pub mod paste;
 pub(crate) mod paste_key;
 pub(crate) mod quick_favorite;

@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 
+use super::path::{path_is_certainly_missing, path_is_certainly_present};
 use crate::services::data_runtime;
 
 const DATA_DIRECTORY: &str = "data";
@@ -174,6 +175,19 @@ pub struct RawBlobStore {
 }
 
 impl RawBlobStore {
+    /// 仅探测原始文件；无法确认路径边界或所在卷不可用时不能断定文件已丢失。
+    pub(crate) fn original_file_is_missing(&self, relative_path: &Path) -> bool {
+        self.resolve_relative_path(relative_path)
+            .ok()
+            .is_some_and(|path| path_is_certainly_missing(&path))
+    }
+
+    pub(crate) fn original_file_is_present(&self, relative_path: &Path) -> bool {
+        self.resolve_relative_path(relative_path)
+            .ok()
+            .is_some_and(|path| path_is_certainly_present(&path))
+    }
+
     pub fn new(root: impl AsRef<Path>) -> Result<Self, RawBlobError> {
         let requested_root = root.as_ref().to_path_buf();
         let requested_data = requested_root.join(DATA_DIRECTORY);
@@ -792,6 +806,19 @@ mod tests {
             store.verify(&blob),
             Err(RawBlobError::Missing { .. })
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_probe_rejects_symlinked_parent_outside_data_directory() {
+        use std::os::unix::fs::symlink;
+
+        let (directory, store) = store();
+        let outside = tempfile::tempdir().unwrap();
+        symlink(outside.path(), store.data_directory.join("escape")).unwrap();
+        assert!(!store.original_file_is_missing(Path::new("data/escape/missing.bin")));
+        assert!(store.original_file_is_missing(Path::new("data/missing.bin")));
+        assert!(directory.path().join("data").exists());
     }
 
     #[test]

@@ -576,11 +576,12 @@ impl MainWindow {
             },
         );
         let activation_subscription = cx.observe_window_activation(window, |_, window, cx| {
-            if !window.is_window_active() {
-                window.blur(cx);
-                if let Err(error) = crate::services::focus::clear_previous_focus_for(window) {
-                    tracing::error!("窗口失焦时清理窗口焦点失败：{error}");
-                }
+            if window.is_window_active() {
+                return;
+            }
+            window.blur(cx);
+            if let Err(error) = crate::services::focus::clear_previous_focus_for(window) {
+                tracing::error!("窗口失焦时清理窗口焦点失败：{error}");
             }
         });
         self.search_input = Some(input);

@@ -139,6 +139,7 @@ application_icon_cache       应用路径与图标资源缓存映射
 | `tags` | 标签定义 |
 | `clipboard_item_tags` | 内容与标签的多对多关系 |
 | `clipboard_item_notes` | 历史与收藏共享的内容备注 |
+| `hidden_missing_items` | 已确认失效的图片/文件内容；可重建缓存，随内容删除级联清理 |
 | `database_compatibility` | 最低读取和写入协议版本声明 |
 | `legacy_import_records` | 旧版迁移的源记录指纹、内容关联与导入时间 |
 | `sync_items` | 来源设备与内容 UUID 到本机内容的映射，以及来源和本地哈希 |
@@ -499,6 +500,7 @@ PRAGMA foreign_keys = ON;
 | `binary_blobs` | `clipboard_formats` | `RESTRICT` | 防止删除仍被引用的原始数据文件索引 |
 | `clipboard_items` | `clipboard_item_tags` | `CASCADE` | 删除内容时删除标签关系 |
 | `clipboard_items` | `clipboard_item_notes` | `CASCADE` | 内容被最终删除时删除备注 |
+| `clipboard_items` | `hidden_missing_items` | `CASCADE` | 删除内容时删除隐藏关系 |
 | `tags` | `clipboard_item_tags` | `CASCADE` | 删除标签时删除关联关系 |
 | `clipboard_items` | `legacy_import_records` | `SET NULL` | 删除内容后保留迁移指纹，重复迁移不恢复已删除记录 |
 
@@ -640,9 +642,9 @@ ORDER BY f.is_pinned DESC, f.sort_order DESC, f.added_at DESC, f.id DESC;
 
 ## 17. 初始化结构
 
-业务建表 SQL、索引和触发器维护在 [schema.sql](../src/services/database/schema.sql)，同步辅助表维护在 [sync.sql](../src/services/database/sync.sql)，文档不另行维护初始化脚本。数据库服务通过 [migrations.rs](../src/services/database/migrations.rs) 在事务中执行初始化或升级，并核验结构与写入约束。
+业务建表 SQL、索引和触发器维护在 [schema.sql](../src/services/database/schema.sql)，同步辅助表维护在 [sync.sql](../src/services/database/sync.sql)，失效条目隐藏表维护在 [missing_files.sql](../src/services/database/missing_files.sql)，文档不另行维护初始化脚本。数据库服务通过 [migrations.rs](../src/services/database/migrations.rs) 在事务中执行初始化或升级，并核验结构与写入约束。
 
-当前结构版本为 **2**，空库初始化时创建业务表、应用图标缓存、兼容声明、旧版迁移记录及同步辅助表。已发布 schema 1 在事务中升级到 schema 2，放宽历史捕获次数约束以允许远程接收为 0，并补充同步表。`PRAGMA user_version` 记录结构版本，当前最低读取协议和最低写入协议均为 1。
+当前结构版本为 **2**，空库初始化时创建业务表、应用图标缓存、兼容声明、旧版迁移记录、同步辅助表及失效条目隐藏表。已发布 schema 1 在事务中升级到 schema 2，放宽历史捕获次数约束以允许远程接收为 0，并补充同步表。`PRAGMA user_version` 记录结构版本，当前最低读取协议和最低写入协议均为 1。
 
 连接级 PRAGMA 由数据库连接模块设置；不要只执行建表 SQL 来替代应用的连接初始化和结构核验。
 
@@ -820,7 +822,7 @@ PRAGMA busy_timeout = 5000;
 
 导出使用统一独占操作建立 SQLite 快照并复制所选资源，再释放操作锁进行压缩、加密或上传。导入先在临时目录校验、备份并合并，成功后交给可回滚的暂存替换流程；暂停受管理操作和监听，保持切换锁直到配置热加载完成，再刷新窗口与缓存，无需重启。暂存完成后若程序退出，下次启动继续应用。快照、备份和归档会额外占用磁盘空间。
 
-数据位置迁移使用固定宿主目录的 `location.json` 定位实际数据根目录，拒绝覆盖未受管理的顶层内容，迁移数据库、资源、图库、音效、配置、状态、日志和导入前备份；成功后清理旧位置的应用管理内容，保留用户文件。没有按磁盘容量自动淘汰原始数据的配置。
+数据位置迁移使用固定宿主目录的 `location.json` 定位实际数据根目录，拒绝覆盖未受管理的顶层内容，迁移数据库、资源、图库、音效、配置、状态、日志和导入前备份；成功后清理旧位置的应用管理内容，保留用户文件。`hidden_missing_items` 是可重建的派生缓存：随数据库一起迁移；导入数据后清空，由下一次扫描按本机文件系统重新建立。没有按磁盘容量自动淘汰原始数据的配置。
 
 历史保留范围只控制历史列表中的可见条目，不是磁盘容量硬上限。超出时间或条数范围的条目会进入待清理状态，用户可扩大范围恢复；只有主动清理才永久删除历史关系。置顶历史豁免范围限制，收藏列表按独立收藏关系查询。
 

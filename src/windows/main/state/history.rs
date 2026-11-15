@@ -222,6 +222,9 @@ impl MainWindow {
     }
 
     pub fn refresh_history(&mut self, cx: &mut Context<Self>) {
+        if self.preview_hover_source.is_some() {
+            self.cancel_hover_preview(cx);
+        }
         if self.split_panes.is_some() {
             self.refresh_split_panes(cx);
             if self.active_tab != TabId::Emoji {
@@ -247,6 +250,7 @@ impl MainWindow {
         self.emoji_smooth_scroll.reset();
         self.symbol_smooth_scroll.reset();
         let generation = self.query_generation;
+        let visibility_generation = self.missing_visibility_generation;
         if self.active_tab == TabId::Emoji {
             self.items.clear();
             self.loaded_items.clear();
@@ -291,7 +295,7 @@ impl MainWindow {
         let favorite_repository = self.favorite_repository.clone();
         let query_task = cx.background_spawn(async move {
             let snapshot = if active_tab == TabId::Favorites {
-                favorite_repository.ordered_snapshot(&query)?
+                favorite_repository.ordered_snapshot_scoped(&query, &policy)?
             } else {
                 history_repository.ordered_snapshot_scoped(&query, &policy)?
             };
@@ -302,7 +306,7 @@ impl MainWindow {
                 .copied()
                 .collect::<Vec<_>>();
             let records = if active_tab == TabId::Favorites {
-                favorite_repository.query_by_ids(&query, &initial_ids)?
+                favorite_repository.query_by_ids_scoped(&query, &initial_ids, &policy)?
             } else {
                 history_repository.query_by_ids_scoped(&query, &initial_ids, &policy)?
             };
@@ -312,6 +316,12 @@ impl MainWindow {
             let result = query_task.await;
             if let Some(this) = this.upgrade() {
                 this.update(cx, |this, cx| {
+                    if this.missing_visibility_generation != visibility_generation {
+                        // The visibility filter changed while the full query ran.
+                        this.refresh_history(cx);
+                        cx.notify();
+                        return;
+                    }
                     if this.accept_query_result(generation, result) {
                         cx.notify();
                     }

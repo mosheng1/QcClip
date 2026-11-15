@@ -186,9 +186,11 @@ pub struct FileListView {
     paths: Arc<Vec<PathBuf>>,
     loaded_entries: HashMap<usize, FileListEntry>,
     loaded_icons: HashMap<usize, Arc<RenderImage>>,
+    pending_icon_drops: Vec<Arc<RenderImage>>,
     loading: HashSet<usize>,
     failures: HashSet<usize>,
     cache_range: Range<usize>,
+    generation: u64,
 }
 
 impl FileListView {
@@ -197,9 +199,11 @@ impl FileListView {
             paths,
             loaded_entries: HashMap::new(),
             loaded_icons: HashMap::new(),
+            pending_icon_drops: Vec::new(),
             loading: HashSet::new(),
             failures: HashSet::new(),
             cache_range: 0..0,
+            generation: 0,
         }
     }
 
@@ -221,7 +225,19 @@ impl FileListView {
 
     /// 在窗口销毁或外层列表淘汰该实体前取出图像，以便由窗口释放 GPU 资源。
     pub fn take_images(&mut self) -> Vec<Arc<RenderImage>> {
-        self.loaded_icons.drain().map(|(_, image)| image).collect()
+        let mut images = std::mem::take(&mut self.pending_icon_drops);
+        images.extend(self.loaded_icons.drain().map(|(_, image)| image));
+        images
+    }
+
+    pub(crate) fn refresh_metadata(&mut self, cx: &mut Context<Self>) {
+        self.generation = self.generation.wrapping_add(1);
+        self.loaded_entries.clear();
+        self.loading.clear();
+        self.failures.clear();
+        self.pending_icon_drops
+            .extend(self.loaded_icons.drain().map(|(_, image)| image));
+        cx.notify();
     }
 
     fn trim_cache(&mut self, range: Range<usize>, window: &mut Window) {
@@ -252,6 +268,7 @@ impl FileListView {
             {
                 continue;
             }
+            let generation = self.generation;
             let task = cx.background_spawn(async move {
                 let metadata = fs::metadata(&path).ok();
                 let exists = metadata.is_some();
@@ -287,6 +304,9 @@ impl FileListView {
                 let (entry, icon) = task.await;
                 if let Some(this) = this.upgrade() {
                     this.update(cx, |this, cx| {
+                        if this.generation != generation {
+                            return;
+                        }
                         this.loading.remove(&index);
                         if !this.cache_range.contains(&index) {
                             return;
@@ -491,6 +511,9 @@ impl FileListView {
 
 impl Render for FileListView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        for image in self.pending_icon_drops.drain(..) {
+            let _ = window.drop_image(image);
+        }
         let translator = i18n::translator(cx);
         let appearance = crate::config_runtime::appearance_config(cx);
         let item_height = if crate::config_runtime::clipboard_config(cx)

@@ -2,8 +2,15 @@ pub const CUSTOM_TEXT_FORMAT_NAMESPACE: &str = "qcclip";
 pub const CUSTOM_TEXT_FORMAT_KEY: &str = "custom-text";
 pub const CUSTOM_TEXT_FORMAT_NAME: &str = "自定义文本";
 
+/// App-owned metadata listing the files managed for a synced file entry.
+pub const SYNC_MANAGED_FILES_FORMAT_KEY: &str = "sync-managed-files";
+
 pub fn is_custom_text_format(namespace: &str, key: &str) -> bool {
     namespace == CUSTOM_TEXT_FORMAT_NAMESPACE && key == CUSTOM_TEXT_FORMAT_KEY
+}
+
+pub fn is_sync_managed_files_format(namespace: &str, key: &str) -> bool {
+    namespace == CUSTOM_TEXT_FORMAT_NAMESPACE && key == SYNC_MANAGED_FILES_FORMAT_KEY
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
