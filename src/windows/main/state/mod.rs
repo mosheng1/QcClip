@@ -65,7 +65,7 @@ use crate::{
 const INITIAL_PAGE_SIZE: usize = 1;
 const MAX_QUERY_PAGE_SIZE: usize = 499;
 const MAX_GALLERY_IMAGE_LOADS: usize = 2;
-const LIST_PREVIEW_CHAR_LIMIT: usize = 300;
+pub(super) const LIST_PREVIEW_CHAR_LIMIT: usize = 300;
 const MAX_HTML_IMAGE_PATHS_PER_RANGE: usize = 64;
 const SEARCH_DEBOUNCE_DELAY: Duration = Duration::from_millis(200);
 const TAGS_PANEL_CLOSE_DELAY: Duration = Duration::from_millis(150);

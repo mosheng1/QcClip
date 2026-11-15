@@ -78,8 +78,9 @@ mod metrics;
 pub(crate) use context_menu::confirm_remove_from_favorites;
 use context_menu::{
     OPEN_ALL_LINKS_ACTION, OPEN_CONTAINING_FOLDER_ACTION, OPEN_LINK_ACTION_PREFIX,
-    OPEN_WITH_DEFAULT_ACTION, PIN_TO_SCREEN_ACTION, SPLIT_WORDS_ACTION, favorite_item_context_menu,
-    history_item_context_menu, parse_toggle_tag_action, tag_color_value, truncate_link_label,
+    OPEN_TEXT_PATH_ACTION_PREFIX, OPEN_WITH_DEFAULT_ACTION, PIN_TO_SCREEN_ACTION,
+    SPLIT_WORDS_ACTION, favorite_item_context_menu, history_item_context_menu,
+    parse_toggle_tag_action, plain_text_file_paths, tag_color_value, truncate_link_label,
 };
 use info_row::InfoRowState;
 use metrics::*;
@@ -3443,6 +3444,7 @@ fn render_row(
                 items.push(crate::services::sync::ui::menu(cx));
                 context_menu = MenuModel::new(items);
             }
+            let text_file_paths = plain_text_file_paths(&menu_item);
             let browser_links = Rc::new(links);
             if active_tab == TabId::Favorites {
                 let format_actions = format_actions.clone();
@@ -3505,6 +3507,14 @@ fn render_row(
                                 this.copy_item(item_id, cx);
                             } else if action.as_str() == OPEN_WITH_DEFAULT_ACTION {
                                 this.open_item_with_default(item_id, cx);
+                            } else if let Some(index) = action
+                                .as_str()
+                                .strip_prefix(OPEN_TEXT_PATH_ACTION_PREFIX)
+                                .and_then(|value| value.parse::<usize>().ok())
+                            {
+                                if let Some(path) = text_file_paths.get(index) {
+                                    this.open_file_path(path.clone(), cx);
+                                }
                             } else if action.as_str() == OPEN_CONTAINING_FOLDER_ACTION {
                                 this.open_item_containing_folder(item_id, cx);
                             } else if let Some(index) = action
@@ -3611,6 +3621,14 @@ fn render_row(
                                 this.copy_item(item_id, cx);
                             } else if action.as_str() == OPEN_WITH_DEFAULT_ACTION {
                                 this.open_item_with_default(item_id, cx);
+                            } else if let Some(index) = action
+                                .as_str()
+                                .strip_prefix(OPEN_TEXT_PATH_ACTION_PREFIX)
+                                .and_then(|value| value.parse::<usize>().ok())
+                            {
+                                if let Some(path) = text_file_paths.get(index) {
+                                    this.open_file_path(path.clone(), cx);
+                                }
                             } else if action.as_str() == OPEN_CONTAINING_FOLDER_ACTION {
                                 this.open_item_containing_folder(item_id, cx);
                             } else if let Some(index) = action

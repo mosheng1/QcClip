@@ -975,6 +975,34 @@ impl MainWindow {
         cx.notify();
     }
 
+    /// 用户选择文本中的路径后，才在后台检查目标并使用默认程序打开。
+    pub fn open_file_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let missing_message = i18n::translator(cx).translate("main.file.missing");
+        let open_task = cx.background_spawn(async move {
+            if !path
+                .try_exists()
+                .map_err(|error| format!("检查文件路径失败：{error}"))?
+            {
+                return Err(format!("{missing_message}：{}", path.display()));
+            }
+            crate::platform::shell_open::open_with_default_program(&path)
+        });
+        cx.spawn(async move |_this, cx| {
+            if let Err(error) = open_task.await {
+                tracing::error!("使用默认程序打开路径失败：{error}");
+                cx.update(|cx| {
+                    crate::windows::notification::NotificationService::show_message(
+                        i18n::translator(cx).translate("main.menu.open_with_default"),
+                        error,
+                        crate::windows::notification::NotificationLevel::Error,
+                        cx,
+                    );
+                });
+            }
+        })
+        .detach();
+    }
+
     /// 在系统文件管理器中定位条目文件列表中的原始文件。
     pub fn open_item_containing_folder(
         &mut self,

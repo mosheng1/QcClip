@@ -59,6 +59,8 @@ pub(super) fn has_file_list(item: &ClipboardListItem) -> bool {
 /// 右键菜单"使用默认程序打开"的动作标识。
 pub(super) const OPEN_WITH_DEFAULT_ACTION: &str = "open-with-default";
 
+pub(super) const OPEN_TEXT_PATH_ACTION_PREFIX: &str = "open-text-path-";
+
 /// 右键菜单“打开所在目录”的动作标识。
 pub(super) const OPEN_CONTAINING_FOLDER_ACTION: &str = "open-containing-folder";
 
@@ -499,18 +501,87 @@ pub(super) fn search_menu_item(
         .with_icon(parent_icon),
     )
 }
-/// 有可打开内容（文件或图片）时返回“使用默认程序打开”菜单项。
+/// 只解析完整的短文本，每个非空行都必须是本机盘符绝对路径。
+fn parse_plain_text_paths(text: &str) -> Vec<PathBuf> {
+    let limit = crate::windows::main::state::LIST_PREVIEW_CHAR_LIMIT;
+    // 达到预览上限时无法确定后面是否还有内容，整个条目不提供路径操作。
+    if text.chars().take(limit).count() >= limit {
+        return Vec::new();
+    }
+    let mut paths = Vec::new();
+    for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        let path = line
+            .strip_prefix('"')
+            .and_then(|value| value.strip_suffix('"'))
+            .or_else(|| {
+                line.strip_prefix('\'')
+                    .and_then(|value| value.strip_suffix('\''))
+            })
+            .unwrap_or(line);
+        let bytes = path.as_bytes();
+        if bytes.len() < 3
+            || !bytes[0].is_ascii_alphabetic()
+            || bytes[1] != b':'
+            || !matches!(bytes[2], b'\\' | b'/')
+            || path[2..].chars().any(|character| {
+                character.is_control()
+                    || matches!(character, '<' | '>' | '"' | '|' | '?' | '*' | ':')
+            })
+        {
+            return Vec::new();
+        }
+        let path = PathBuf::from(path.replace('/', "\\"));
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+    paths
+}
+
+pub(super) fn plain_text_file_paths(item: &ClipboardListItem) -> Vec<PathBuf> {
+    let previews = select_user_visible_previews_with_priority(
+        &item.all_format_options,
+        &[FormatRole::PlainText],
+    );
+    previews
+        .iter()
+        .find(|preview| preview.is_restorable && preview.role() == FormatRole::PlainText)
+        .map(|preview| parse_plain_text_paths(&preview.text))
+        .unwrap_or_default()
+}
+
+/// 为文件、图片或纯路径文本构建“使用默认程序打开”菜单。
 pub(super) fn open_with_default_menu_item(
     item: &ClipboardListItem,
     translator: &Translator,
 ) -> Option<MenuItem> {
-    can_open_with_default(item).then(|| {
-        MenuItem::action(
-            MenuActionId::new(OPEN_WITH_DEFAULT_ACTION),
-            translator.translate("main.menu.open_with_default"),
-        )
-        .with_icon(MenuIcon::svg("external-link.svg"))
-    })
+    let label = translator.translate("main.menu.open_with_default");
+    let menu = if can_open_with_default(item) {
+        MenuItem::action(MenuActionId::new(OPEN_WITH_DEFAULT_ACTION), label)
+    } else {
+        let paths = plain_text_file_paths(item);
+        match paths.len() {
+            0 => return None,
+            1 => MenuItem::action(
+                MenuActionId::new(format!("{OPEN_TEXT_PATH_ACTION_PREFIX}0")),
+                label,
+            ),
+            _ => MenuItem::submenu(
+                label,
+                paths
+                    .iter()
+                    .enumerate()
+                    .map(|(index, path)| {
+                        MenuItem::action(
+                            MenuActionId::new(format!("{OPEN_TEXT_PATH_ACTION_PREFIX}{index}")),
+                            path.to_string_lossy().into_owned(),
+                        )
+                    })
+                    .collect(),
+            ),
+        }
+    };
+    Some(menu.with_icon(MenuIcon::svg("external-link.svg")))
 }
 
 fn open_containing_folder_menu_item(
@@ -646,6 +717,42 @@ mod item_display_tests {
     use crate::i18n::Locale;
 
     #[test]
+    fn plain_text_paths_require_complete_short_path_only_content() {
+        let paths = parse_plain_text_paths(
+            " \"C:\\资料\\年度 报告.pdf\"\r\n\r\nD:/图片.png\nC:\\资料\\年度 报告.pdf ",
+        );
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from(r"C:\资料\年度 报告.pdf"),
+                PathBuf::from(r"D:\图片.png")
+            ]
+        );
+        for text in [
+            "",
+            "普通文本",
+            "请打开 C:\\资料\\报告.pdf",
+            "C:\\资料\\报告.pdf\n这是一段说明",
+            r".\报告.pdf",
+            r"C:报告.pdf",
+            r"\\server\share\报告.pdf",
+            r"%USERPROFILE%\Desktop",
+            "\"C:\\应用.exe\" --help",
+            "C:\\文件\0.txt",
+        ] {
+            assert!(
+                parse_plain_text_paths(text).is_empty(),
+                "不应识别：{text:?}"
+            );
+        }
+        let limit = crate::windows::main::state::LIST_PREVIEW_CHAR_LIMIT;
+        let mut text = format!("C:\\{}", "文".repeat(limit - 4));
+        assert_eq!(parse_plain_text_paths(&text).len(), 1);
+        text.push('文');
+        assert!(parse_plain_text_paths(&text).is_empty());
+    }
+
+    #[test]
     fn both_context_menus_offer_pin_and_open_containing_folder_actions() {
         let translator = Translator::builtin(Locale::zh_cn());
         let mut item = ClipboardListItem {
@@ -739,6 +846,48 @@ mod item_display_tests {
                     assert_eq!(action.label.as_ref(), "打开所在目录");
                     assert!(action.enabled);
                 }
+            }
+        }
+
+        let preview = &mut item.all_format_options[0];
+        preview.format_kind = FormatKind::Text;
+        preview.format_key = "CF_UNICODETEXT".to_owned();
+        preview.format_name = "CF_UNICODETEXT".to_owned();
+        preview.content_kind = ContentKind::Text;
+        for (text, count) in [(r"C:\文件.txt", 1), ("C:\\文件.txt\nD:\\目录", 2)] {
+            item.all_format_options[0].text = text.to_owned();
+            for build_menu in [history_item_context_menu, favorite_item_context_menu] {
+                let (menu, _) = build_menu(
+                    &item,
+                    &[],
+                    &translator,
+                    ClipboardDisplayPriority::default(),
+                    &[],
+                    None,
+                    &[],
+                );
+                let action = menu
+                    .items()
+                    .iter()
+                    .find(|entry| entry.label.as_ref() == "使用默认程序打开")
+                    .expect("纯路径文本缺少打开操作");
+                if count == 1 {
+                    assert_eq!(action.id.as_ref().unwrap().as_str(), "open-text-path-0");
+                    assert!(action.children.is_empty());
+                } else {
+                    assert_eq!(action.children.len(), count);
+                    assert_eq!(
+                        action.children[1].id.as_ref().unwrap().as_str(),
+                        "open-text-path-1"
+                    );
+                    assert_eq!(action.children[1].label.as_ref(), r"D:\目录");
+                }
+                assert!(!menu.items().iter().any(|entry| {
+                    entry
+                        .id
+                        .as_ref()
+                        .is_some_and(|id| id.as_str() == OPEN_CONTAINING_FOLDER_ACTION)
+                }));
             }
         }
     }
