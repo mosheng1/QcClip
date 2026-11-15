@@ -975,6 +975,21 @@ impl MainWindow {
         cx.notify();
     }
 
+    /// 在系统文件管理器中定位条目文件列表中的原始文件。
+    pub fn open_item_containing_folder(
+        &mut self,
+        item_id: ClipboardItemId,
+        cx: &mut Context<Self>,
+    ) {
+        let paste_service = self.paste_service.clone();
+        let path_task = cx.background_spawn(async move { paste_service.item_file_path(item_id) });
+        cx.spawn(async move |_this, cx| match path_task.await {
+            Ok(path) => cx.update(|cx| cx.reveal_path(&path)),
+            Err(error) => tracing::error!("打开所在目录失败：{error}"),
+        })
+        .detach();
+    }
+
     /// 在指定搜索引擎中搜索条目的纯文本内容。
     pub fn search_item(
         &mut self,

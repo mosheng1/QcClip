@@ -240,6 +240,7 @@
   "main.menu.unpin": "取消置顶",
   "main.menu.delete": "删除",
   "main.menu.open_with_default": "使用默认程序打开",
+  "main.menu.open_containing_folder": "打开所在目录",
   "main.menu.open_in_browser": "在浏览器中打开",
   "main.menu.open_all_links": "全部打开",
   "main.menu.search_with": "在 … 中搜索",

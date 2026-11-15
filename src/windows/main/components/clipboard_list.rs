@@ -77,9 +77,9 @@ mod metrics;
 
 pub(crate) use context_menu::confirm_remove_from_favorites;
 use context_menu::{
-    OPEN_ALL_LINKS_ACTION, OPEN_LINK_ACTION_PREFIX, OPEN_WITH_DEFAULT_ACTION, PIN_TO_SCREEN_ACTION,
-    SPLIT_WORDS_ACTION, favorite_item_context_menu, history_item_context_menu,
-    parse_toggle_tag_action, tag_color_value, truncate_link_label,
+    OPEN_ALL_LINKS_ACTION, OPEN_CONTAINING_FOLDER_ACTION, OPEN_LINK_ACTION_PREFIX,
+    OPEN_WITH_DEFAULT_ACTION, PIN_TO_SCREEN_ACTION, SPLIT_WORDS_ACTION, favorite_item_context_menu,
+    history_item_context_menu, parse_toggle_tag_action, tag_color_value, truncate_link_label,
 };
 use info_row::InfoRowState;
 use metrics::*;
@@ -3505,6 +3505,8 @@ fn render_row(
                                 this.copy_item(item_id, cx);
                             } else if action.as_str() == OPEN_WITH_DEFAULT_ACTION {
                                 this.open_item_with_default(item_id, cx);
+                            } else if action.as_str() == OPEN_CONTAINING_FOLDER_ACTION {
+                                this.open_item_containing_folder(item_id, cx);
                             } else if let Some(index) = action
                                 .as_str()
                                 .strip_prefix("search-engine-")
@@ -3609,6 +3611,8 @@ fn render_row(
                                 this.copy_item(item_id, cx);
                             } else if action.as_str() == OPEN_WITH_DEFAULT_ACTION {
                                 this.open_item_with_default(item_id, cx);
+                            } else if action.as_str() == OPEN_CONTAINING_FOLDER_ACTION {
+                                this.open_item_containing_folder(item_id, cx);
                             } else if let Some(index) = action
                                 .as_str()
                                 .strip_prefix("search-engine-")

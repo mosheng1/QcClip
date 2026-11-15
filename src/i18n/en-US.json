@@ -240,6 +240,7 @@
   "main.menu.unpin": "Unpin",
   "main.menu.delete": "Delete",
   "main.menu.open_with_default": "Open with default program",
+  "main.menu.open_containing_folder": "Open containing folder",
   "main.menu.open_in_browser": "Open in browser",
   "main.menu.open_all_links": "Open all",
   "main.menu.search_with": "Search with",

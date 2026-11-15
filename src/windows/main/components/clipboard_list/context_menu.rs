@@ -59,6 +59,9 @@ pub(super) fn has_file_list(item: &ClipboardListItem) -> bool {
 /// 右键菜单"使用默认程序打开"的动作标识。
 pub(super) const OPEN_WITH_DEFAULT_ACTION: &str = "open-with-default";
 
+/// 右键菜单“打开所在目录”的动作标识。
+pub(super) const OPEN_CONTAINING_FOLDER_ACTION: &str = "open-containing-folder";
+
 /// 右键菜单"在浏览器中打开"单条链接的动作标识前缀，后缀为链接下标。
 pub(super) const OPEN_LINK_ACTION_PREFIX: &str = "open-link-";
 
@@ -173,6 +176,9 @@ pub(super) fn history_item_context_menu(
     if let Some(open_item) = open_with_default_menu_item(item, translator) {
         items.push(open_item);
     }
+    if let Some(open_folder_item) = open_containing_folder_menu_item(item, translator) {
+        items.push(open_folder_item);
+    }
     if let Some(browser_item) = open_in_browser_menu_item(translator, links) {
         items.push(browser_item);
     }
@@ -252,6 +258,10 @@ pub(super) fn favorite_item_context_menu(
     if let Some(open_item) = open_with_default_menu_item(item, translator) {
         // 插入到 copy 之后、remove-from-favorites 之前。
         items.insert(insert_index, open_item);
+        insert_index += 1;
+    }
+    if let Some(open_folder_item) = open_containing_folder_menu_item(item, translator) {
+        items.insert(insert_index, open_folder_item);
         insert_index += 1;
     }
     if let Some(browser_item) = open_in_browser_menu_item(translator, links) {
@@ -503,6 +513,19 @@ pub(super) fn open_with_default_menu_item(
     })
 }
 
+fn open_containing_folder_menu_item(
+    item: &ClipboardListItem,
+    translator: &Translator,
+) -> Option<MenuItem> {
+    has_file_list(item).then(|| {
+        MenuItem::action(
+            MenuActionId::new(OPEN_CONTAINING_FOLDER_ACTION),
+            translator.translate("main.menu.open_containing_folder"),
+        )
+        .with_icon(MenuIcon::svg("folder-open.svg"))
+    })
+}
+
 /// 由调用方解析好的链接构建“在浏览器中打开”菜单项，使用系统默认浏览器。
 /// 单个链接直接作为可点击项，多个链接展开为子菜单并附“全部打开”。
 pub(super) fn open_in_browser_menu_item(
@@ -623,7 +646,7 @@ mod item_display_tests {
     use crate::i18n::Locale;
 
     #[test]
-    fn both_context_menus_offer_pin_and_unpin_without_toolbar_controls() {
+    fn both_context_menus_offer_pin_and_open_containing_folder_actions() {
         let translator = Translator::builtin(Locale::zh_cn());
         let mut item = ClipboardListItem {
             history_id: 1,
@@ -673,6 +696,49 @@ mod item_display_tests {
                     if pinned { "取消置顶" } else { "置顶" }
                 );
                 assert!(action.enabled);
+            }
+        }
+
+        for (kind, key, can_open) in [
+            (FormatKind::Text, "CF_UNICODETEXT", false),
+            (FormatKind::Image, "registered:PNG", false),
+            (FormatKind::FileList, "CF_HDROP", true),
+        ] {
+            item.all_format_options = vec![FormatPreview {
+                format_namespace: "windows".to_owned(),
+                format_key: key.to_owned(),
+                format_name: key.to_owned(),
+                format_order: 0,
+                format_kind: kind,
+                text: String::new(),
+                char_count: 0,
+                content_kind: ContentKind::Unknown,
+                html_content: None,
+                image_source: None,
+                image_dimensions: None,
+                is_restorable: true,
+            }];
+            for build_menu in [history_item_context_menu, favorite_item_context_menu] {
+                let (menu, _) = build_menu(
+                    &item,
+                    &[],
+                    &translator,
+                    ClipboardDisplayPriority::default(),
+                    &[],
+                    None,
+                    &[],
+                );
+                let action = menu.items().iter().find(|entry| {
+                    entry
+                        .id
+                        .as_ref()
+                        .is_some_and(|id| id.as_str() == OPEN_CONTAINING_FOLDER_ACTION)
+                });
+                assert_eq!(action.is_some(), can_open);
+                if let Some(action) = action {
+                    assert_eq!(action.label.as_ref(), "打开所在目录");
+                    assert!(action.enabled);
+                }
             }
         }
     }

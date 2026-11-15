@@ -491,6 +491,15 @@ impl PasteService {
         Err(PasteError::NoRestorableFormat)
     }
 
+    /// 只读取文件列表中的原始路径，不为原生图片生成临时文件。
+    pub(crate) fn item_file_path(&self, item_id: i64) -> Result<PathBuf, PasteError> {
+        self.load_payloads_for_item(item_id)?
+            .iter()
+            .find(|payload| payload_role(payload) == FormatRole::FileList)
+            .and_then(|payload| parse_file_list(&payload.bytes).into_iter().next())
+            .ok_or(PasteError::NoRestorableFormat)
+    }
+
     fn load_payloads(
         &self,
         connection: &Connection,
@@ -1630,6 +1639,9 @@ b",
             );
         }
         let service = PasteService::new(database, store);
+        for (item_id, path) in item_ids.iter().zip(&paths) {
+            assert_eq!(service.item_file_path(*item_id).unwrap(), *path);
+        }
         let prepared = service
             .prepare_merged_paste(&item_ids)
             .expect("无法准备纯文件合并粘贴");
@@ -1669,6 +1681,10 @@ b",
                 |row| row.get::<_, i64>(0),
             )
             .expect("无法读取原生图片条目 ID");
+        assert!(matches!(
+            service.item_file_path(image_id),
+            Err(PasteError::NoRestorableFormat)
+        ));
         item_ids.insert(0, image_id);
         let prepared = service
             .prepare_merged_paste(&item_ids)
