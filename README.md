@@ -15,8 +15,8 @@ Forked from [QcClip](https://github.com/mosheng1/QcClip) by [@mosheng1.](https:/
 | CapsLock 槽 1 | CapsLock+C / CapsLock+X | CapsLock+V | 只有最近一次 |
 | CapsLock 槽 2 | CapsLock+Alt+C / CapsLock+Alt+X | CapsLock+Alt+V | 只有最近一次 |
 
-<img width="1282" height="911" alt="image" src="https://github.com/user-attachments/assets/6ea511cd-83a9-4c39-b101-43072faa288a" />
-<img width="1282" height="911" alt="image" src="https://github.com/mosheng1/QcClip/blob/main/readme-assets/display/%E5%89%AA%E8%B4%B4%E6%9D%BF.png" />
+<img src="https://github.com/user-attachments/assets/6ea511cd-83a9-4c39-b101-43072faa288a" />
+<img src="https://github.com/mosheng1/QcClip/blob/main/readme-assets/display/%E5%89%AA%E8%B4%B4%E6%9D%BF.png" />
 
 
 ### 目的：
