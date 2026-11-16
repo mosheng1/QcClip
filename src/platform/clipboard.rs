@@ -421,7 +421,7 @@ mod windows_clipboard {
     use super::{ClipboardPayload, ClipboardWriteSuppressor};
     use crate::domain::capture::{
         CapturedClipboard, FormatKind, FormatRole, RawFormat, SourceApplication,
-        classify_format_role, normalize_text_bytes,
+        classify_format_role, image_format, image_format_priority, normalize_text_bytes,
     };
 
     use crate::platform::image_temp_file::{
@@ -828,6 +828,7 @@ mod windows_clipboard {
     pub(super) fn clipboard_format_id(payload: &ClipboardPayload) -> Result<u32, String> {
         match payload.format_key.as_str() {
             "CF_TEXT" => Ok(1),
+            "CF_TIFF" => Ok(6),
             "CF_OEMTEXT" => Ok(7),
             "CF_DIB" => Ok(8),
             "CF_UNICODETEXT" => Ok(13),
@@ -1211,13 +1212,11 @@ mod windows_clipboard {
         let lower_name = name.to_ascii_lowercase();
         match format_id {
             1 | 7 | 13 => FormatKind::Text,
-            2 | 8 | 17 => FormatKind::Image,
+            2 | 6 | 8 | 17 => FormatKind::Image,
             15 => FormatKind::FileList,
             _ if lower_name.contains("html") => FormatKind::Html,
             _ if lower_name.contains("rich text") || lower_name.contains("rtf") => FormatKind::Rtf,
-            _ if matches!(lower_name.as_str(), "png" | "jfif") || lower_name.contains("image/") => {
-                FormatKind::Image
-            }
+            _ if image_format(name).is_some() || lower_name.contains("image/") => FormatKind::Image,
             _ if format_id >= 0xc000 => FormatKind::Custom,
             _ => FormatKind::Unknown,
         }
@@ -1243,15 +1242,7 @@ mod windows_clipboard {
     }
 
     fn select_primary_identity(formats: &[RawFormat]) -> Option<(String, String)> {
-        const KEY_PRIORITY: &[&str] = &[
-            "CF_UNICODETEXT",
-            "registered:HTML Format",
-            "CF_HDROP",
-            "registered:PNG",
-            "CF_DIBV5",
-            "CF_DIB",
-            "CF_TEXT",
-        ];
+        const KEY_PRIORITY: &[&str] = &["CF_UNICODETEXT", "registered:HTML Format", "CF_HDROP"];
         let is_restorable = |format: &&RawFormat| {
             format.capture_state.has_data()
                 && format.restore_state == crate::domain::capture::RestoreState::Restorable
@@ -1262,6 +1253,14 @@ mod windows_clipboard {
                 .filter(is_restorable)
                 .find(|format| format.format_key == *key)
         }) {
+            return Some((format.format_namespace.clone(), format.format_key.clone()));
+        }
+        if let Some(format) = formats
+            .iter()
+            .filter(is_restorable)
+            .filter(|format| format.format_kind == FormatKind::Image)
+            .min_by_key(|format| image_format_priority(&format.format_key))
+        {
             return Some((format.format_namespace.clone(), format.format_key.clone()));
         }
         const PRIORITY: &[FormatKind] = &[
@@ -1812,6 +1811,98 @@ mod windows_clipboard {
                 stable_format_key(49_152, "HTML Format"),
                 "registered:HTML Format"
             );
+        }
+
+        #[test]
+        fn common_image_formats_are_captured_and_preferred_over_bitmaps() {
+            use crate::{
+                domain::clipboard::{ContentKind, ImageDimensions, select_user_visible_previews},
+                services::{capture::generate_preview, image_preview::validate_remote_image},
+            };
+            use std::io::Cursor;
+
+            let image = image::DynamicImage::new_rgba8(2, 1);
+            let mut bmp = Cursor::new(Vec::new());
+            image
+                .write_to(&mut bmp, image::ImageFormat::Bmp)
+                .expect("无法生成测试位图");
+            let dib = &bmp.get_ref()[14..];
+            for name in [
+                "PNG",
+                "WEBP",
+                "JPEG",
+                "JPG",
+                "JFIF",
+                "GIF",
+                "BMP",
+                "TIFF",
+                "TIF",
+                "ICO",
+                "image/webp",
+                "CF_TIFF",
+            ] {
+                let native_id = if name == "CF_TIFF" { 6 } else { 49_152 };
+                let image_format =
+                    image::ImageFormat::from_extension(name.strip_prefix("CF_").unwrap_or(name))
+                        .or_else(|| image::ImageFormat::from_mime_type(name))
+                        .expect("无法识别测试图片格式");
+                let mut bytes = Cursor::new(Vec::new());
+                image
+                    .write_to(&mut bytes, image_format)
+                    .expect("无法生成测试图片");
+                let formats = capture_native_formats(
+                    vec![
+                        format_with_id(17, "CF_DIBV5"),
+                        format_with_id(8, "CF_DIB"),
+                        format_with_id(native_id, name),
+                    ],
+                    &crate::config::ClipboardFormatConfig::default(),
+                    |id| {
+                        Ok(if id == native_id {
+                            bytes.get_ref().clone()
+                        } else {
+                            dib.to_vec()
+                        })
+                    },
+                );
+                assert_eq!(formats.len(), 3, "默认采集名单缺少图片格式：{name}");
+                assert_eq!(
+                    formats[2].format_kind,
+                    FormatKind::Image,
+                    "图片格式分类错误：{name}"
+                );
+                let expected_key = stable_format_key(native_id, name);
+                let primary_format_identity = select_primary_identity(&formats);
+                assert_eq!(
+                    primary_format_identity
+                        .as_ref()
+                        .map(|(_, key)| key.as_str()),
+                    Some(expected_key.as_str()),
+                    "主格式应优先使用编码图片：{name}"
+                );
+                let captured = CapturedClipboard {
+                    formats,
+                    primary_format_identity,
+                    preview_candidate: None,
+                    source_application: SourceApplication::default(),
+                };
+                let generated = generate_preview(&captured).expect("无法生成图片预览");
+                assert_eq!(generated.content_kind, ContentKind::Image);
+                let visible = select_user_visible_previews(&generated.formats);
+                assert_eq!(visible.len(), 1);
+                assert_eq!(
+                    visible[0].format_key, expected_key,
+                    "列表预览应优先使用编码图片：{name}"
+                );
+                assert_eq!(
+                    visible[0].image_dimensions,
+                    Some(ImageDimensions {
+                        width: 2,
+                        height: 1
+                    })
+                );
+                validate_remote_image(bytes.get_ref(), &expected_key).expect("无法解码图片格式");
+            }
         }
 
         #[test]

@@ -241,9 +241,7 @@ fn is_image_file_path(path: &str) -> bool {
     let Some(extension) = file_name.rsplit_once('.').map(|(_, extension)| extension) else {
         return false;
     };
-    ["jpg", "jpeg", "png", "gif", "bmp", "webp"]
-        .iter()
-        .any(|value| extension.eq_ignore_ascii_case(value))
+    crate::domain::capture::image_format(extension).is_some()
 }
 
 pub fn select_default_preview<'a>(
@@ -485,11 +483,17 @@ mod tests {
 
     #[test]
     fn single_image_file_is_classified_as_image_with_file_list_format() {
-        let preview = generate_preview(&captured(file_format(&["C:\\图片\\壁纸.PNG"])))
-            .expect("无法生成图片文件预览");
-        assert_eq!(preview.content_kind, ContentKind::Image);
-        assert_eq!(preview.formats[0].format_kind, FormatKind::FileList);
-        assert_eq!(preview.formats[0].content_kind, ContentKind::Image);
+        for path in [
+            "C:\\图片\\壁纸.PNG",
+            "C:\\图片\\壁纸.TIFF",
+            "C:\\图片\\图标.ICO",
+        ] {
+            let preview =
+                generate_preview(&captured(file_format(&[path]))).expect("无法生成图片文件预览");
+            assert_eq!(preview.content_kind, ContentKind::Image);
+            assert_eq!(preview.formats[0].format_kind, FormatKind::FileList);
+            assert_eq!(preview.formats[0].content_kind, ContentKind::Image);
+        }
     }
 
     #[test]

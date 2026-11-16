@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use crate::domain::capture::{FormatKind, FormatRole, classify_format_role};
+use crate::domain::capture::{FormatKind, FormatRole, classify_format_role, image_format_priority};
 
 pub type ClipboardItemId = i64;
 pub type HistoryItemId = i64;
@@ -261,17 +261,7 @@ fn preview_priority(preview: &FormatPreview) -> u8 {
                 1
             }
         }
-        FormatRole::Image => {
-            if key.contains("png") {
-                0
-            } else if key == "cf_dib" {
-                1
-            } else if key == "cf_dibv5" {
-                2
-            } else {
-                3
-            }
-        }
+        FormatRole::Image => image_format_priority(&preview.format_key),
         FormatRole::VirtualFile => {
             if key.contains("filegroupdescriptor") {
                 0
