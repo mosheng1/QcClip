@@ -11,7 +11,7 @@ use std::{cell::Cell, rc::Rc};
 
 use super::super::{SETTINGS_DROPDOWN_HEIGHT, SETTINGS_DROPDOWN_WIDTH};
 use crate::{
-    config::{InterfaceLanguage, PasteKeyMode, TrayClickAction},
+    config::{CapslockClipboardConfig, InterfaceLanguage, PasteKeyMode, TrayClickAction},
     config_runtime, i18n,
     platform::elevation,
     platform::window as platform_window,
@@ -132,6 +132,35 @@ impl SettingsWindowView {
                     administrator_view.clone(),
                     administrator_save_error.clone(),
                     window,
+                    cx,
+                );
+            });
+        let capslock = config_runtime::capslock_clipboard_config(cx);
+        let capslock_save_error = translator.translate("settings.general.capslock_save_error");
+        let capslock_primary_view = view.clone();
+        let capslock_primary_save_error = capslock_save_error.clone();
+        let capslock_primary_switch = Switch::new("settings-general-capslock-primary")
+            .large()
+            .checked(capslock.primary_enabled)
+            .accessibility_label(translator.translate("settings.general.capslock_primary"))
+            .on_click(move |checked, _, cx| {
+                persist_capslock_switch(
+                    capslock_primary_view.clone(),
+                    move |capslock| capslock.primary_enabled = *checked,
+                    capslock_primary_save_error.clone(),
+                    cx,
+                );
+            });
+        let capslock_alt_view = view.clone();
+        let capslock_alt_switch = Switch::new("settings-general-capslock-alt")
+            .large()
+            .checked(capslock.alt_enabled)
+            .accessibility_label(translator.translate("settings.general.capslock_alt"))
+            .on_click(move |checked, _, cx| {
+                persist_capslock_switch(
+                    capslock_alt_view.clone(),
+                    move |capslock| capslock.alt_enabled = *checked,
+                    capslock_save_error.clone(),
                     cx,
                 );
             });
@@ -313,6 +342,30 @@ impl SettingsWindowView {
             .child(
                 self.setting_row(
                     theme,
+                    translator.translate("settings.general.capslock_primary"),
+                    Some(
+                        translator
+                            .translate("settings.general.capslock_primary_description")
+                            .into(),
+                    ),
+                    capslock_primary_switch,
+                ),
+            )
+            .child(
+                self.setting_row(
+                    theme,
+                    translator.translate("settings.general.capslock_alt"),
+                    Some(
+                        translator
+                            .translate("settings.general.capslock_alt_description")
+                            .into(),
+                    ),
+                    capslock_alt_switch,
+                ),
+            )
+            .child(
+                self.setting_row(
+                    theme,
                     translator.translate("settings.general.paste_key_mode"),
                     Some(
                         translator
@@ -377,6 +430,29 @@ impl SettingsWindowView {
         }
         section.into_any_element()
     }
+}
+
+fn persist_capslock_switch<F>(
+    view: Entity<SettingsWindowView>,
+    update: F,
+    save_error: String,
+    cx: &mut App,
+) where
+    F: FnOnce(&mut CapslockClipboardConfig),
+{
+    let mut capslock = config_runtime::capslock_clipboard_config(cx);
+    update(&mut capslock);
+    let error_message = match config_runtime::set_capslock_clipboard_config(capslock, cx) {
+        Ok(_) => None,
+        Err(error) => {
+            tracing::error!("保存 CapsLock 剪贴板设置失败：{error}");
+            Some(save_error)
+        }
+    };
+    view.update(cx, |view, cx| {
+        view.language_error = notify_settings_error(SettingsPage::General, error_message, cx);
+        cx.notify();
+    });
 }
 
 fn handle_run_as_administrator_switch(

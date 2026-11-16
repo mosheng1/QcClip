@@ -8,7 +8,7 @@ use std::{
 };
 
 use crate::config::ClipboardFormatConfig;
-use crate::domain::capture::{CapturedClipboard, FormatKind};
+use crate::domain::capture::{CapturedClipboard, FormatKind, RestoreState, classify_format_role};
 
 static CAPTURE_FORMAT_CONFIG: OnceLock<RwLock<ClipboardFormatConfig>> = OnceLock::new();
 
@@ -33,6 +33,13 @@ fn capture_format_config() -> ClipboardFormatConfig {
 mod transient;
 
 pub type ClipboardEventReceiver = Receiver<Result<CapturedClipboard, String>>;
+
+/// 模拟捕获选区时使用的原生组合键。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SelectionShortcut {
+    Copy,
+    Cut,
+}
 
 pub(crate) fn assess_remote_format(format: &mut crate::domain::capture::RawFormat) {
     use crate::domain::capture::{FormatKind, RestoreState};
@@ -148,16 +155,39 @@ impl ClipboardWriteSuppressor {
         let mut pending = self.lock_pending();
         pending.retain(|write| write.expires_at > now);
         let mut suppressed = false;
-        pending.retain(|write| match write.end_sequence {
-            Some(end_sequence) if sequence > end_sequence => false,
-            Some(_) | None => {
-                if sequence > write.start_sequence {
-                    suppressed = true;
-                }
-                true
+        for write in pending.iter() {
+            match write.end_sequence {
+                // 已完成的自身写入只抑制它产生的确切序列号；恢复等待窗口内
+                // 用户的原生复制会得到更大的序列号，必须正常进入历史。
+                Some(end_sequence) if sequence == end_sequence => suppressed = true,
+                // 正在进行中的写入（例如模拟复制后的轮询窗口）仍按区间抑制，
+                // 避免多格式写入的中间序列号被漏掉。
+                None if sequence > write.start_sequence => suppressed = true,
+                _ => {}
             }
-        });
+        }
         suppressed
+    }
+
+    /// 在抑制作用域内执行一次自身写入。
+    ///
+    /// 写入期间按序列号区间抑制事件，写入完成后只抑制实际产生的序列号，
+    /// 因此等待恢复系统剪贴板的窗口内不会吞掉用户的外部复制。
+    pub(crate) fn write_with_suppression(
+        &self,
+        write: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
+        let ticket = self.begin_write(clipboard_sequence_number());
+        match write() {
+            Ok(()) => {
+                self.complete_write(ticket, clipboard_sequence_number());
+                Ok(())
+            }
+            Err(error) => {
+                self.cancel_write(ticket);
+                Err(error)
+            }
+        }
     }
 
     fn lock_pending(&self) -> MutexGuard<'_, Vec<PendingClipboardWrite>> {
@@ -166,6 +196,51 @@ impl ClipboardWriteSuppressor {
             Err(poisoned) => poisoned.into_inner(),
         }
     }
+}
+
+fn clipboard_sequence_number() -> u32 {
+    #[cfg(target_os = "windows")]
+    {
+        windows_clipboard::clipboard_sequence_number()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        0
+    }
+}
+
+/// 把捕获结果转换成可写回系统剪贴板的格式列表。
+///
+/// 只保留有数据、可还原且非内部格式的内容；应用私有格式若无法还原会在捕获时
+/// 被标记为 `NotRestorable`，自然不会进入结果。
+pub fn captured_to_payloads(captured: &CapturedClipboard) -> Vec<ClipboardPayload> {
+    let mut formats = captured
+        .formats
+        .iter()
+        .filter(|format| {
+            format.capture_state.has_data()
+                && format.bytes.is_some()
+                && format.restore_state == RestoreState::Restorable
+                && !classify_format_role(
+                    format.format_kind,
+                    &format.format_key,
+                    &format.format_name,
+                )
+                .is_internal()
+        })
+        .collect::<Vec<_>>();
+    formats.sort_by_key(|format| format.format_order);
+    formats
+        .into_iter()
+        .map(|format| ClipboardPayload {
+            format_kind: format.format_kind.as_str().to_owned(),
+            format_namespace: format.format_namespace.clone(),
+            format_key: format.format_key.clone(),
+            format_name: format.format_name.clone(),
+            native_format_id: format.native_format_id,
+            bytes: format.bytes.clone().unwrap_or_default(),
+        })
+        .collect()
 }
 
 pub fn captured_plain_text(captured: &CapturedClipboard) -> Option<String> {
@@ -210,6 +285,17 @@ mod tests {
         suppressor.cancel_write(ticket);
 
         assert!(!suppressor.suppress_event(11));
+    }
+
+    #[test]
+    fn completed_self_write_does_not_suppress_later_external_copy() {
+        let suppressor = ClipboardWriteSuppressor::default();
+        let ticket = suppressor.begin_write(10);
+        suppressor.complete_write(ticket, 11);
+
+        assert!(suppressor.suppress_event(11));
+        // 恢复等待窗口内的原生复制得到更大的序列号，必须进入历史。
+        assert!(!suppressor.suppress_event(12));
     }
 
     fn captured_with(formats: Vec<crate::domain::capture::RawFormat>) -> CapturedClipboard {
@@ -348,7 +434,7 @@ mod windows_clipboard {
     // 10ms × 50 = 500ms；无选区时尽快回退到编辑器。
     const SELECTION_CAPTURE_ATTEMPTS: usize = 50;
 
-    fn clipboard_sequence_number() -> u32 {
+    pub(super) fn clipboard_sequence_number() -> u32 {
         // SAFETY: GetClipboardSequenceNumber 不需要指针或外部内存，仅读取系统剪贴板序列号。
         unsafe { GetClipboardSequenceNumber() }
     }
@@ -424,13 +510,37 @@ mod windows_clipboard {
     pub fn capture_selection(
         suppressor: &ClipboardWriteSuppressor,
     ) -> Result<Option<CapturedClipboard>, SystemClipboardError> {
+        capture_selection_with_shortcut(suppressor, super::SelectionShortcut::Copy, true)
+    }
+
+    /// 模拟复制/剪切并捕获选区内容。
+    ///
+    /// `restore_alt = false` 用于 CapsLock+Alt 流程：物理 Alt 已被钩子吞掉，
+    /// 模拟按键结束后不再重新按下 Alt，避免前台程序弹出菜单。
+    pub fn capture_selection_with_shortcut(
+        suppressor: &ClipboardWriteSuppressor,
+        shortcut: super::SelectionShortcut,
+        restore_alt: bool,
+    ) -> Result<Option<CapturedClipboard>, SystemClipboardError> {
+        use super::SelectionShortcut;
+
         let before = clipboard_sequence_number();
         let source = source_application();
+        let simulate_shortcut = move || match (shortcut, restore_alt) {
+            (SelectionShortcut::Copy, true) => crate::platform::input::simulate_ctrl_insert(),
+            (SelectionShortcut::Cut, true) => crate::platform::input::simulate_ctrl_x(),
+            (SelectionShortcut::Copy, false) => {
+                crate::platform::input::simulate_ctrl_insert_without_alt()
+            }
+            (SelectionShortcut::Cut, false) => {
+                crate::platform::input::simulate_ctrl_x_without_alt()
+            }
+        };
         capture_selection_with(
             suppressor,
             before,
             source,
-            crate::platform::input::simulate_ctrl_insert,
+            simulate_shortcut,
             || {
                 thread::sleep(Duration::from_millis(10));
                 clipboard_sequence_number()
@@ -439,16 +549,63 @@ mod windows_clipboard {
         )
     }
 
+    /// 读取当前系统剪贴板并转换为可写回的格式列表；空剪贴板返回 `None`。
+    pub fn snapshot_current_payloads() -> Result<Option<Vec<ClipboardPayload>>, SystemClipboardError>
+    {
+        let captured = WindowsClipboardSource::new().capture_current()?;
+        Ok(captured
+            .as_ref()
+            .map(super::captured_to_payloads)
+            .filter(|payloads| !payloads.is_empty()))
+    }
+
+    /// 不建立抑制票据地写入系统剪贴板，调用方需自行持有抑制作用域。
+    pub fn write_payloads(payloads: &[ClipboardPayload]) -> Result<(), String> {
+        set_native_payloads(payloads)
+    }
+
+    /// 清空系统剪贴板；用于“操作前剪贴板为空”时的恢复。
+    pub fn clear_clipboard() -> Result<(), String> {
+        let _guard = ClipboardGuard::open()?;
+        // SAFETY: 剪贴板已由 ClipboardGuard 打开，EmptyClipboard 只清空当前内容。
+        unsafe { EmptyClipboard() }.map_err(|error| format!("无法清空系统剪贴板：{error}"))
+    }
+
+    /// 系统剪贴板是否真的为空。
+    ///
+    /// 与 `snapshot_current_payloads` 不同，这里不做忽略标记和格式过滤判断，
+    /// 用于区分“空剪贴板”和“存在但不可还原/被忽略的内容”。
+    pub fn clipboard_is_empty() -> Result<bool, SystemClipboardError> {
+        let clipboard = ClipboardGuard::open_for_capture().map_err(SystemClipboardError::Open)?;
+        Ok(clipboard.formats().is_empty())
+    }
+
+    /// 等待目标应用可读取剪贴板后发送粘贴键，调用方需自行持有抑制作用域。
+    pub fn simulate_paste(restore_alt: bool) -> Result<(), String> {
+        thread::sleep(PASTE_DELAY);
+        send_paste_keys(restore_alt)
+    }
+
+    /// 不等待直接补发粘贴键；用于连发快路径（剪贴板内容已就位）。
+    pub fn resend_paste(restore_alt: bool) -> Result<(), String> {
+        send_paste_keys(restore_alt)
+    }
+
+    /// 当前系统剪贴板序列号；无需打开剪贴板，开销极小。
+    pub fn current_sequence_number() -> u32 {
+        clipboard_sequence_number()
+    }
+
     fn capture_selection_with(
         suppressor: &ClipboardWriteSuppressor,
         before: u32,
         source: SourceApplication,
-        simulate_copy: impl FnOnce(),
+        simulate_shortcut: impl FnOnce(),
         mut poll_sequence: impl FnMut() -> u32,
         read_clipboard: impl FnOnce() -> Result<Option<CapturedClipboard>, SystemClipboardError>,
     ) -> Result<Option<CapturedClipboard>, SystemClipboardError> {
         let ticket = suppressor.begin_write(before);
-        simulate_copy();
+        simulate_shortcut();
         for _ in 0..SELECTION_CAPTURE_ATTEMPTS {
             let after = poll_sequence();
             if after != before {
@@ -599,7 +756,7 @@ mod windows_clipboard {
         }
         suppressor.complete_write(ticket, clipboard_sequence_number());
         thread::sleep(PASTE_DELAY);
-        let result = send_paste_keys();
+        let result = send_paste_keys(true);
         if result.is_ok() {
             crate::services::sound::play(crate::services::sound::SoundEvent::Paste);
         }
@@ -745,14 +902,22 @@ mod windows_clipboard {
         }
     }
 
-    fn send_paste_keys() -> Result<(), String> {
+    fn send_paste_keys(restore_alt: bool) -> Result<(), String> {
         let foreground = source_application_from_path(foreground_process_path());
         match crate::services::paste_key::current(foreground.name.as_deref()) {
             crate::services::paste_key::PasteKey::CtrlV => {
-                crate::platform::input::simulate_ctrl_v()
+                if restore_alt {
+                    crate::platform::input::simulate_ctrl_v()
+                } else {
+                    crate::platform::input::simulate_ctrl_v_without_alt()
+                }
             }
             crate::services::paste_key::PasteKey::ShiftInsert => {
-                crate::platform::input::simulate_shift_insert()
+                if restore_alt {
+                    crate::platform::input::simulate_shift_insert()
+                } else {
+                    crate::platform::input::simulate_shift_insert_without_alt()
+                }
             }
         }
         Ok(())
@@ -1677,7 +1842,9 @@ mod windows_clipboard {
 #[cfg(target_os = "windows")]
 pub use windows_clipboard::{
     ClipboardMonitor, SystemClipboardError, WindowsClipboardSource, capture_selection,
-    copy_to_clipboard, paste_into_active_window,
+    capture_selection_with_shortcut, clear_clipboard, clipboard_is_empty, copy_to_clipboard,
+    current_sequence_number, paste_into_active_window, resend_paste, simulate_paste,
+    snapshot_current_payloads, write_payloads,
 };
 
 #[cfg(not(target_os = "windows"))]
@@ -1727,4 +1894,48 @@ pub fn copy_to_clipboard(
     _suppressor: &ClipboardWriteSuppressor,
 ) -> Result<(), String> {
     Err("当前平台暂不支持写回系统剪贴板".to_owned())
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn capture_selection_with_shortcut(
+    _suppressor: &ClipboardWriteSuppressor,
+    _shortcut: SelectionShortcut,
+    _restore_alt: bool,
+) -> Result<Option<CapturedClipboard>, SystemClipboardError> {
+    Err(SystemClipboardError::UnsupportedPlatform)
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn snapshot_current_payloads() -> Result<Option<Vec<ClipboardPayload>>, SystemClipboardError> {
+    Err(SystemClipboardError::UnsupportedPlatform)
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn write_payloads(_payloads: &[ClipboardPayload]) -> Result<(), String> {
+    Err("当前平台暂不支持写回系统剪贴板".to_owned())
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn clear_clipboard() -> Result<(), String> {
+    Err("当前平台暂不支持清空系统剪贴板".to_owned())
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn clipboard_is_empty() -> Result<bool, SystemClipboardError> {
+    Err(SystemClipboardError::UnsupportedPlatform)
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn simulate_paste(_restore_alt: bool) -> Result<(), String> {
+    Err("当前平台暂不支持模拟粘贴".to_owned())
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn resend_paste(_restore_alt: bool) -> Result<(), String> {
+    Err("当前平台暂不支持模拟粘贴".to_owned())
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn current_sequence_number() -> u32 {
+    0
 }

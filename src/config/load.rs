@@ -45,6 +45,12 @@ pub fn from_str(content: &str) -> Result<LoadedConfig, ConfigLoadError> {
     let sound = read_group(root, "sound", &mut warnings, read_sound);
     let appearance = read_group(root, "appearance", &mut warnings, read_appearance);
     let shortcuts = read_group(root, "shortcuts", &mut warnings, read_shortcuts);
+    let capslock_clipboard = read_group(
+        root,
+        "capslockClipboard",
+        &mut warnings,
+        read_capslock_clipboard,
+    );
     let updates = read_group(root, "updates", &mut warnings, read_updates);
 
     Ok(LoadedConfig {
@@ -58,6 +64,7 @@ pub fn from_str(content: &str) -> Result<LoadedConfig, ConfigLoadError> {
             sound,
             appearance,
             shortcuts,
+            capslock_clipboard,
             updates,
         }
         .normalized(),
@@ -893,6 +900,48 @@ fn read_sound_effect(
     }
 }
 
+fn read_capslock_clipboard(
+    object: &Map<String, Value>,
+    warnings: &mut Vec<String>,
+) -> super::CapslockClipboardConfig {
+    let default = super::CapslockClipboardConfig::default();
+    // 兼容旧版单一 `enabled` 开关：新字段缺失时沿用它的值。
+    let legacy_enabled = object.get("enabled").and_then(Value::as_bool);
+    let primary_enabled = if object.contains_key("primaryEnabled") {
+        read_field(
+            object,
+            "primaryEnabled",
+            "capslockClipboard.primaryEnabled",
+            default.primary_enabled,
+            warnings,
+        )
+    } else {
+        legacy_enabled.unwrap_or(default.primary_enabled)
+    };
+    let alt_enabled = if object.contains_key("altEnabled") {
+        read_field(
+            object,
+            "altEnabled",
+            "capslockClipboard.altEnabled",
+            default.alt_enabled,
+            warnings,
+        )
+    } else {
+        legacy_enabled.unwrap_or(default.alt_enabled)
+    };
+    super::CapslockClipboardConfig {
+        primary_enabled,
+        alt_enabled,
+        restore_system_clipboard: read_field(
+            object,
+            "restoreSystemClipboard",
+            "capslockClipboard.restoreSystemClipboard",
+            default.restore_system_clipboard,
+            warnings,
+        ),
+    }
+}
+
 fn read_shortcuts(object: &Map<String, Value>, warnings: &mut Vec<String>) -> ShortcutsConfig {
     let default = ShortcutsConfig::default();
     ShortcutsConfig {
@@ -1136,6 +1185,35 @@ mod tests {
         assert!(invalid.config.clipboard.tags_multi_select);
         assert_eq!(invalid.warnings.len(), 1);
         assert!(invalid.warnings[0].contains("clipboard.tagsMultiSelect"));
+    }
+
+    #[test]
+    fn capslock_clipboard_defaults_legacy_and_invalid_fields() {
+        let defaults = super::from_str("{}")
+            .expect("无法读取默认配置")
+            .config
+            .capslock_clipboard;
+        assert!(defaults.primary_enabled);
+        assert!(defaults.alt_enabled);
+        assert!(defaults.restore_system_clipboard);
+
+        // 旧版单一 enabled 开关同时作用于两个槽位。
+        let legacy = super::from_str(r#"{"capslockClipboard":{"enabled":false}}"#)
+            .expect("无法读取旧版 CapsLock 配置");
+        assert!(!legacy.config.capslock_clipboard.primary_enabled);
+        assert!(!legacy.config.capslock_clipboard.alt_enabled);
+
+        // 只写一个槽位时，另一个保持默认开启。
+        let one_slot = super::from_str(r#"{"capslockClipboard":{"primaryEnabled":false}}"#)
+            .expect("无法读取单槽位配置");
+        assert!(!one_slot.config.capslock_clipboard.primary_enabled);
+        assert!(one_slot.config.capslock_clipboard.alt_enabled);
+
+        let invalid = super::from_str(r#"{"capslockClipboard":{"primaryEnabled":"invalid"}}"#)
+            .expect("无法读取字段无效的 CapsLock 配置");
+        assert!(invalid.config.capslock_clipboard.primary_enabled);
+        assert_eq!(invalid.warnings.len(), 1);
+        assert!(invalid.warnings[0].contains("capslockClipboard.primaryEnabled"));
     }
 
     #[test]
