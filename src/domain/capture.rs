@@ -44,6 +44,37 @@ impl FormatKind {
     }
 }
 
+pub(crate) fn image_format(name: &str) -> Option<image::ImageFormat> {
+    let name = name.to_ascii_lowercase();
+    let name = name.strip_prefix("registered:").unwrap_or(&name);
+    let name = if name == "cf_tiff" { "tiff" } else { name };
+    image::ImageFormat::from_mime_type(name)
+        .or_else(|| image::ImageFormat::from_extension(name))
+        .filter(|format| {
+            matches!(
+                format,
+                image::ImageFormat::Png
+                    | image::ImageFormat::WebP
+                    | image::ImageFormat::Jpeg
+                    | image::ImageFormat::Gif
+                    | image::ImageFormat::Bmp
+                    | image::ImageFormat::Tiff
+                    | image::ImageFormat::Ico
+            ) && format.reading_enabled()
+        })
+}
+
+pub(crate) fn image_format_priority(key: &str) -> u8 {
+    match image_format(key) {
+        Some(image::ImageFormat::Png) => 0,
+        Some(image::ImageFormat::WebP) => 1,
+        Some(_) => 2,
+        None if key.eq_ignore_ascii_case("CF_DIBV5") => 3,
+        None if key.eq_ignore_ascii_case("CF_DIB") => 4,
+        None => 5,
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum FormatRole {
     PlainText,
