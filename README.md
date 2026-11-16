@@ -27,8 +27,10 @@ Forked from [QcClip](https://github.com/mosheng1/QcClip) by [@mosheng1.](https:/
 ## 编译
 需要 rustup 装的 Rust、Visual Studio 的「使用 C++ 的桌面开发」工作负载，以及 Windows SDK。工具链版本由 rust-toolchain.toml 固定。
 
+```
 cargo run --locked                  # 开发版
 cargo build --release --locked      # 发布版
+```
 
 产物是 target/release/QcClip.exe。安装包、便携版和各架构的打包方式见 docs/packaging.md。
 
