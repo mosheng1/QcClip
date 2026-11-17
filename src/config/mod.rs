@@ -1546,6 +1546,18 @@ impl ListItemHeight {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ListTimeFormat {
+    #[default]
+    Absolute,
+    Relative,
+}
+
+impl ListTimeFormat {
+    pub const ALL: [Self; 2] = [Self::Absolute, Self::Relative];
+}
+
 pub const ADAPTIVE_MAX_LINES_MIN: u8 = 1;
 pub const ADAPTIVE_MAX_LINES_DEFAULT: u8 = 8;
 pub const ADAPTIVE_MAX_LINES_MAX: u8 = 15;
@@ -1645,6 +1657,7 @@ pub struct AppearanceConfig {
     pub list_item_style: ListItemStyle,
     pub card_item_gap: CardItemGap,
     pub list_item_height: ListItemHeight,
+    pub list_time_format: ListTimeFormat,
     pub adaptive_max_lines: u8,
     pub only_show_notes: bool,
     /// 是否为置顶条目绘制状态边框线。
@@ -1678,6 +1691,7 @@ impl Default for AppearanceConfig {
             list_item_style: ListItemStyle::default(),
             card_item_gap: CardItemGap::default(),
             list_item_height: ListItemHeight::default(),
+            list_time_format: ListTimeFormat::default(),
             adaptive_max_lines: ADAPTIVE_MAX_LINES_DEFAULT,
             only_show_notes: false,
             pinned_item_border: true,

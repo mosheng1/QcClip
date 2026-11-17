@@ -231,6 +231,31 @@ pub fn clipboard_source(
     }
 }
 
+pub fn list_item_time(
+    translator: &Translator,
+    timestamp_millis: i64,
+    format: crate::config::ListTimeFormat,
+) -> String {
+    match format {
+        crate::config::ListTimeFormat::Absolute => {
+            use chrono::Datelike as _;
+
+            chrono::DateTime::from_timestamp_millis(timestamp_millis)
+                .map(|time| {
+                    let time = time.with_timezone(&chrono::Local);
+                    let pattern = if time.year() == chrono::Local::now().year() {
+                        "%m-%d %H:%M"
+                    } else {
+                        "%Y-%m-%d %H:%M"
+                    };
+                    time.format(pattern).to_string()
+                })
+                .unwrap_or_else(|| "—".to_owned())
+        }
+        crate::config::ListTimeFormat::Relative => relative_time(translator, timestamp_millis),
+    }
+}
+
 pub fn relative_time(translator: &Translator, timestamp_millis: i64) -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -351,6 +376,40 @@ mod tests {
         zh_keys.sort();
         en_keys.sort();
         assert_eq!(zh_keys, en_keys);
+    }
+
+    #[test]
+    fn list_item_time_uses_local_absolute_time_by_default_and_supports_relative_time() {
+        use crate::config::ListTimeFormat;
+        use chrono::{Datelike as _, TimeZone as _};
+
+        let translator = Translator::builtin(Locale::zh_cn());
+        let current_year = chrono::Local::now().year();
+        for (year, expected) in [
+            (current_year, "11-17 14:30".to_owned()),
+            (
+                current_year - 1,
+                format!("{}-11-17 14:30", current_year - 1),
+            ),
+        ] {
+            let timestamp = chrono::Local
+                .with_ymd_and_hms(year, 11, 17, 14, 30, 37)
+                .single()
+                .expect("无法创建本地测试时间")
+                .timestamp_millis();
+            assert_eq!(
+                list_item_time(&translator, timestamp, ListTimeFormat::default()),
+                expected
+            );
+        }
+        assert_eq!(
+            list_item_time(
+                &translator,
+                chrono::Utc::now().timestamp_millis(),
+                ListTimeFormat::Relative
+            ),
+            "刚刚"
+        );
     }
 
     #[test]

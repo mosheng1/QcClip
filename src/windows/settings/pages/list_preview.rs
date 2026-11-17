@@ -19,7 +19,7 @@ use crate::{
     config::{
         AppearanceConfig, CardItemGap, ClipboardConfig, ClipboardDisplayPriority,
         ClipboardPreviewPriority, ClipboardPreviewType, ListItemHeight, ListItemStyle,
-        PreviewInformationField,
+        ListTimeFormat, PreviewInformationField,
     },
     config_runtime, i18n,
     ui::{SingleSelectOption, single_select, single_select_grid},
@@ -150,6 +150,34 @@ impl SettingsWindowView {
                         view.clone(),
                         "列表项行高",
                         move |appearance| appearance.list_item_height = height,
+                        save_error.clone(),
+                        cx,
+                    );
+                }
+            },
+            theme,
+            single_select_animation,
+        );
+        let list_time_format_selector = single_select(
+            "settings-list-time-format-select",
+            ListTimeFormat::ALL.into_iter().map(|format| {
+                SingleSelectOption::new(
+                    format,
+                    translator.translate(match format {
+                        ListTimeFormat::Absolute => "settings.list_preview.time_format.absolute",
+                        ListTimeFormat::Relative => "settings.list_preview.time_format.relative",
+                    }),
+                )
+            }),
+            appearance.list_time_format,
+            {
+                let view = view.clone();
+                let save_error = appearance_save_error.clone();
+                move |format, cx| {
+                    persist_appearance_change(
+                        view.clone(),
+                        "列表时间显示",
+                        move |appearance| appearance.list_time_format = format,
                         save_error.clone(),
                         cx,
                     );
@@ -444,6 +472,18 @@ impl SettingsWindowView {
                     only_show_notes_switch,
                 ),
             )
+            .child(
+                self.setting_row(
+                    theme,
+                    translator.translate("settings.list_preview.time_format"),
+                    Some(
+                        translator
+                            .translate("settings.list_preview.time_format_description")
+                            .into(),
+                    ),
+                    list_time_format_selector,
+                ),
+            )
             .child(self.highlight_element(
                 theme,
                 translator.translate("settings.item_display.title"),
@@ -614,6 +654,7 @@ fn reset_list_preview_appearance_fields(appearance: &mut AppearanceConfig) {
     appearance.list_item_style = default.list_item_style;
     appearance.card_item_gap = default.card_item_gap;
     appearance.list_item_height = default.list_item_height;
+    appearance.list_time_format = default.list_time_format;
     appearance.adaptive_max_lines = default.adaptive_max_lines;
     appearance.only_show_notes = default.only_show_notes;
     appearance.item_display = default.item_display;

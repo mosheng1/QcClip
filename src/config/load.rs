@@ -480,6 +480,13 @@ fn read_appearance(object: &Map<String, Value>, warnings: &mut Vec<String>) -> A
             default.list_item_height,
             warnings,
         ),
+        list_time_format: read_field(
+            object,
+            "listTimeFormat",
+            "appearance.listTimeFormat",
+            default.list_time_format,
+            warnings,
+        ),
         adaptive_max_lines: read_field(
             object,
             "adaptiveMaxLines",
@@ -1179,6 +1186,32 @@ mod tests {
         let invalid = super::from_str(r#"{"appearance":{"galleryGifAutoplay":"invalid"}}"#)
             .expect("无法读取无效配置");
         assert!(!invalid.config.appearance.gallery_gif_autoplay);
+        assert_eq!(invalid.warnings.len(), 1);
+    }
+
+    #[test]
+    fn list_time_format_defaults_to_absolute_and_round_trips() {
+        use crate::config::ListTimeFormat;
+
+        let old = super::from_str(r#"{"appearance":{}}"#).expect("无法读取已有配置");
+        assert_eq!(
+            old.config.appearance.list_time_format,
+            ListTimeFormat::Absolute
+        );
+        let mut config = old.config;
+        for format in ListTimeFormat::ALL {
+            config.appearance.list_time_format = format;
+            let encoded = serde_json::to_string(&config).expect("无法保存时间显示配置");
+            let restored = super::from_str(&encoded).expect("无法读取时间显示配置");
+            assert_eq!(restored.config.appearance.list_time_format, format);
+            assert!(restored.warnings.is_empty());
+        }
+        let invalid = super::from_str(r#"{"appearance":{"listTimeFormat":"invalid"}}"#)
+            .expect("无法读取无效配置");
+        assert_eq!(
+            invalid.config.appearance.list_time_format,
+            ListTimeFormat::Absolute
+        );
         assert_eq!(invalid.warnings.len(), 1);
     }
 

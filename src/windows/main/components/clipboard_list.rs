@@ -1916,7 +1916,8 @@ fn render_item_surface<T>(
     cx: &mut Context<T>,
 ) -> gpui::Div {
     let translator = i18n::translator(cx);
-    let display = config_runtime::appearance_config(cx).item_display;
+    let appearance = config_runtime::appearance_config(cx);
+    let display = appearance.item_display;
     let row_hover_group = format!("clipboard-row-hover-{}", item.history_id);
     let note_only = metrics.shows_only_note(&item.note_text);
     let show_note_header = !item.note_text.is_empty() && !note_only;
@@ -2204,11 +2205,11 @@ fn render_item_surface<T>(
         .overflow_hidden()
         .whitespace_nowrap()
         .when(display.enabled(ItemDisplayField::Time), |this| {
-            this.child(
-                div()
-                    .flex_shrink_0()
-                    .child(i18n::relative_time(&translator, item.last_seen_at)),
-            )
+            this.child(div().flex_shrink_0().child(i18n::list_item_time(
+                &translator,
+                item.last_seen_at,
+                appearance.list_time_format,
+            )))
         })
         .when(display.enabled(ItemDisplayField::Length), |this| {
             this.child(div().min_w_0().truncate().child(length))

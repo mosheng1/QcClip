@@ -621,6 +621,12 @@ fn search_target_specs() -> &'static [SearchTargetSpec] {
         },
         SearchTargetSpec {
             page: ListPreview,
+            title_key: "settings.list_preview.time_format",
+            description_key: Some("settings.list_preview.time_format_description"),
+            ratio: 0.38,
+        },
+        SearchTargetSpec {
+            page: ListPreview,
             title_key: "settings.item_display.title",
             description_key: None,
             ratio: 0.42,
