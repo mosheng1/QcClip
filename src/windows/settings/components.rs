@@ -195,7 +195,7 @@ where
         .id(id)
         .flex()
         .items_center()
-        .w(ui_rem(200.0))
+        .flex_none()
         .h(ui_rem(SETTINGS_DROPDOWN_HEIGHT))
         .rounded(px(6.0))
         .border_1()
@@ -209,7 +209,7 @@ where
         })
         .child(
             div()
-                .w(ui_rem(99.0))
+                .flex_none()
                 .h_full()
                 .on_children_prepainted(move |bounds, _, _| {
                     if let Some(bounds) = bounds.first().copied() {
@@ -223,7 +223,7 @@ where
                         .flex()
                         .items_center()
                         .justify_between()
-                        .size_full()
+                        .h_full()
                         .gap_1()
                         .px_3()
                         .text_sm()
@@ -238,7 +238,7 @@ where
                                 );
                             })
                         })
-                        .child(div().flex_1().min_w_0().truncate().child(left_label))
+                        .child(div().whitespace_nowrap().child(left_label))
                         .child(hover_icon(
                             format!("{id}-left"),
                             "chevron-down",
@@ -247,10 +247,16 @@ where
                         )),
                 ),
         )
-        .child(div().h(ui_rem(20.0)).w(px(1.0)).bg(theme.input))
         .child(
             div()
-                .w(ui_rem(99.0))
+                .h(ui_rem(20.0))
+                .w(px(1.0))
+                .flex_shrink_0()
+                .bg(theme.input),
+        )
+        .child(
+            div()
+                .flex_none()
                 .h_full()
                 .on_children_prepainted(move |bounds, _, _| {
                     if let Some(bounds) = bounds.first().copied() {
@@ -264,7 +270,7 @@ where
                         .flex()
                         .items_center()
                         .justify_between()
-                        .size_full()
+                        .h_full()
                         .gap_1()
                         .px_3()
                         .text_sm()
@@ -280,7 +286,7 @@ where
                             })
                         })
                         .when(right_fixed, |this| this.cursor_default())
-                        .child(div().flex_1().min_w_0().truncate().child(right_label))
+                        .child(div().whitespace_nowrap().child(right_label))
                         .when(!right_fixed, |this| {
                             this.child(hover_icon(
                                 format!("{id}-right"),
