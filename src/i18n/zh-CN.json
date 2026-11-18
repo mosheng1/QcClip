@@ -337,6 +337,8 @@
   "settings.notifications.description": "通知弹窗与复制、粘贴时的音效",
   "settings.list_preview.description": "列表条目的样式与悬停预览的内容",
   "settings.list_preview.time_format": "时间显示",
+  "settings.list_preview.show_tag_names": "完整显示标签文本",
+  "settings.list_preview.show_tag_names_description": "常驻显示标签名称与颜色，标签较多时可横向滚动。关闭后仅显示色块，悬停查看名称。",
   "settings.list_preview.time_format_description": "选择列表项使用绝对时间（本地日期与时间）或相对时间（如几分钟前）。",
   "settings.list_preview.time_format.absolute": "绝对时间",
   "settings.list_preview.time_format.relative": "相对时间",

@@ -20,6 +20,7 @@ pub(super) struct ListItemMetrics {
     pub(super) show_meta: bool,
     pub(super) info_row_progress: f32,
     pub(super) only_show_notes: bool,
+    pub(super) tag_footer_height: Pixels,
     pub(super) horizontal: bool,
     font_metrics: Option<crate::ui::fonts::AppFontMetrics>,
 }
@@ -68,6 +69,7 @@ impl ListItemMetrics {
             show_meta: height.shows_meta(),
             info_row_progress: 1.0,
             only_show_notes: false,
+            tag_footer_height: px(0.0),
             horizontal: false,
             font_metrics: None,
         };
@@ -133,6 +135,7 @@ impl ListItemMetrics {
                 px(0.0)
             }
             + self.preview_height
+            + self.tag_footer_height
             + px(MAX_ROW_BORDER_WIDTH);
         self.row_height = match self.style {
             ListItemStyle::Seamless => self.content_height,
@@ -453,7 +456,8 @@ impl ListItemMetrics {
             } else {
                 px(0.0)
             }
-            + header_height;
+            + header_height
+            + self.tag_footer_height;
         let preview_height = (viewport_height - self.card_vertical_inset * 2.0 - chrome)
             .max(self.preview_line_height);
         let lines = (f32::from(preview_height) / f32::from(self.preview_line_height))
@@ -504,6 +508,15 @@ impl ListItemMetrics {
         }
         self.info_row_progress = progress;
         self
+    }
+
+    pub(super) fn with_tag_names(mut self, enabled: bool) -> Self {
+        self.tag_footer_height = if enabled {
+            self.rem_size * 1.25
+        } else {
+            px(0.0)
+        };
+        self.with_preview_height(self.preview_height, self.preview_line_count)
     }
 
     pub(super) fn with_note_display(mut self, only_show_notes: bool) -> Self {
@@ -561,6 +574,52 @@ impl ListItemMetrics {
 #[cfg(test)]
 mod item_display_tests {
     use super::*;
+
+    #[test]
+    fn tag_name_footer_preserves_preview_space_and_survives_remeasurement() {
+        let base = ListItemMetrics::from_rem_size(
+            px(16.0),
+            ListItemStyle::Card,
+            CardItemGap::Eight,
+            ListItemHeight::Small,
+            3,
+        );
+        let named = base.with_tag_names(true);
+        assert_eq!(named.preview_height, base.preview_height);
+        assert_eq!(named.content_height - base.content_height, px(20.0));
+        assert_eq!(named.row_height - base.row_height, px(20.0));
+        let measured = named.with_preview_line_count(2);
+        let plain = base.with_preview_line_count(2);
+        assert_eq!(measured.row_height - plain.row_height, px(20.0));
+        assert!(named.with_tag_names(false) == base);
+    }
+
+    #[test]
+    fn horizontal_tag_footer_uses_preview_space_without_growing_the_card() {
+        for style in [ListItemStyle::Card, ListItemStyle::Seamless] {
+            for show_header in [false, true] {
+                for show_meta in [false, true] {
+                    let base = ListItemMetrics::from_rem_size(
+                        px(16.0),
+                        style,
+                        CardItemGap::Eight,
+                        ListItemHeight::Small,
+                        3,
+                    )
+                    .with_info_row(show_meta);
+                    let plain = base.with_horizontal_card(px(420.0), show_header);
+                    let named = base
+                        .with_tag_names(true)
+                        .with_horizontal_card(px(420.0), show_header);
+                    assert_eq!(named.tag_footer_height, px(20.0));
+                    assert_eq!(named.row_height, px(420.0));
+                    assert_eq!(named.row_height, plain.row_height);
+                    assert_eq!(named.content_height, plain.content_height);
+                    assert_eq!(plain.preview_height - named.preview_height, px(20.0));
+                }
+            }
+        }
+    }
 
     #[test]
     fn horizontal_card_uses_the_viewport_height_instead_of_the_vertical_line_limit() {

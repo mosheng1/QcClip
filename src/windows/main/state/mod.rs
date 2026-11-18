@@ -108,6 +108,7 @@ pub(crate) fn display_priority_roles(priority: ClipboardDisplayPriority) -> [For
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct AdaptiveHeightCacheKey {
+    pub(crate) show_tag_names: bool,
     pub(crate) viewport_width: Pixels,
     pub(crate) rem_size: Pixels,
     pub(crate) font_metrics: crate::ui::fonts::AppFontMetrics,
@@ -122,6 +123,7 @@ pub(crate) struct AdaptiveHeightCacheKey {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct ListLayoutCacheKey {
+    pub(crate) show_tag_names: bool,
     pub(crate) viewport_width: Pixels,
     pub(crate) viewport_height: Pixels,
     pub(crate) horizontal: bool,

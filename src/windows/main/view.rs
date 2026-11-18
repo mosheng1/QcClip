@@ -123,6 +123,7 @@ impl Render for MainWindow {
         self.prepare_adaptive_height_cache(
             AdaptiveHeightCacheKey {
                 viewport_width: window.viewport_size().width,
+                show_tag_names: appearance.show_tag_names,
                 rem_size: window.rem_size(),
                 font_metrics: crate::ui::fonts::AppFontMetrics::from_window(window, cx),
                 list_item_style: appearance.list_item_style,
@@ -525,6 +526,7 @@ impl MainWindow {
         self.prepare_adaptive_height_cache(
             AdaptiveHeightCacheKey {
                 viewport_width: width,
+                show_tag_names: appearance.show_tag_names,
                 rem_size: window.rem_size(),
                 font_metrics: crate::ui::fonts::AppFontMetrics::from_window(window, cx),
                 list_item_style: appearance.list_item_style,

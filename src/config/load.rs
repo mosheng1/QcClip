@@ -501,6 +501,13 @@ fn read_appearance(object: &Map<String, Value>, warnings: &mut Vec<String>) -> A
             default.only_show_notes,
             warnings,
         ),
+        show_tag_names: read_field(
+            object,
+            "showTagNames",
+            "appearance.showTagNames",
+            default.show_tag_names,
+            warnings,
+        ),
         pinned_item_border: read_field(
             object,
             "pinnedItemBorder",
@@ -1187,6 +1194,28 @@ mod tests {
             .expect("无法读取无效配置");
         assert!(!invalid.config.appearance.gallery_gif_autoplay);
         assert_eq!(invalid.warnings.len(), 1);
+    }
+
+    #[test]
+    fn tag_names_round_trip_and_default_to_disabled() {
+        let old = super::from_str(r#"{"appearance":{}}"#).expect("无法读取已有配置");
+        let encoded = serde_json::to_value(&old.config).unwrap();
+        assert_eq!(encoded["appearance"]["showTagNames"], false);
+
+        for enabled in [true, false] {
+            let input = format!(r#"{{"appearance":{{"showTagNames":{enabled}}}}}"#);
+            let loaded = super::from_str(&input).unwrap();
+            assert!(loaded.warnings.is_empty());
+            let encoded = serde_json::to_string(&loaded.config).unwrap();
+            let restored = super::from_str(&encoded).unwrap();
+            let value = serde_json::to_value(&restored.config).unwrap();
+            assert_eq!(value["appearance"]["showTagNames"], enabled);
+        }
+
+        let invalid = super::from_str(r#"{"appearance":{"showTagNames":"invalid"}}"#).unwrap();
+        assert_eq!(invalid.warnings.len(), 1);
+        let value = serde_json::to_value(&invalid.config).unwrap();
+        assert_eq!(value["appearance"]["showTagNames"], false);
     }
 
     #[test]

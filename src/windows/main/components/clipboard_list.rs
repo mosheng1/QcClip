@@ -349,6 +349,7 @@ pub fn render(
     .with_info_row(appearance.item_display.shows_info_row())
     .with_font_metrics(crate::ui::fonts::AppFontMetrics::from_window(window, cx))
     .with_note_display(appearance.only_show_notes)
+    .with_tag_names(appearance.show_tag_names)
     .with_info_row_progress(
         if appearance.item_display.info_visibility == ItemRegionVisibility::Hover {
             0.0
@@ -631,6 +632,7 @@ fn render_rows(
         list_item_height: metrics.height,
         adaptive_max_lines: metrics.adaptive_max_lines as u8,
         only_show_notes: metrics.only_show_notes,
+        show_tag_names: metrics.tag_footer_height > px(0.0),
         show_info_row: metrics.show_meta && metrics.info_row_progress > 0.0,
         show_horizontal_header,
         display_priority,
@@ -655,6 +657,7 @@ fn render_rows(
                 || cache.key.adaptive_max_lines != layout_key.adaptive_max_lines
                 || cache.key.font_metrics != layout_key.font_metrics
                 || cache.key.only_show_notes != layout_key.only_show_notes
+                || cache.key.show_tag_names != layout_key.show_tag_names
                 || cache.key.show_info_row != layout_key.show_info_row
                 || cache.key.show_horizontal_header != layout_key.show_horizontal_header)
     });
@@ -1183,14 +1186,14 @@ fn render_tag_indicators(
     theme: ThemeColor,
     animations_enabled: bool,
     hover_allowed: bool,
+    show_names: bool,
 ) -> AnyElement {
-    div()
-        .absolute()
-        .right(ui_rem(6.0))
-        .bottom(ui_rem(1.5))
+    let indicators = div()
+        .id(("clipboard-tag-indicators", item.history_id as u64))
         .flex()
         .items_end()
         .gap(ui_rem(2.0))
+        .when(show_names, |this| this.h_full().justify_end())
         .children(item.tag_ids.iter().filter_map(|tag_id| {
             tags.iter().find(|tag| tag.id == *tag_id).map(|tag| {
                 render_tag_indicator(
@@ -1199,10 +1202,29 @@ fn render_tag_indicators(
                     theme,
                     animations_enabled,
                     hover_allowed,
+                    show_names,
                 )
             })
-        }))
-        .into_any_element()
+        }));
+    if show_names {
+        // The scrollbar introduces its own relative wrapper. Keep positioning on
+        // a dedicated outer element so the tag content stays in normal flow and
+        // contributes its full width to the scroll area.
+        div()
+            .absolute()
+            .left(ui_rem(6.0))
+            .right(ui_rem(6.0))
+            .bottom(ui_rem(1.5))
+            .h(ui_rem(18.0))
+            .child(indicators.overflow_x_scrollbar())
+            .into_any_element()
+    } else {
+        indicators
+            .absolute()
+            .right(ui_rem(6.0))
+            .bottom(ui_rem(1.5))
+            .into_any_element()
+    }
 }
 
 fn render_tag_indicator(
@@ -1211,10 +1233,37 @@ fn render_tag_indicator(
     theme: ThemeColor,
     animations_enabled: bool,
     hover_allowed: bool,
+    show_name: bool,
 ) -> AnyElement {
     let group_name = format!("clipboard-tag-{row_id}-{}", tag.id);
     let tag_name = tag.name.clone();
     let tag_color = gpui::rgb_to_hsla(gpui::rgb(tag_color_value(&tag.color)));
+    if show_name {
+        return div()
+            .id(format!("clipboard-tag-indicator-{row_id}-{}", tag.id))
+            .map(|this| {
+                #[cfg(test)]
+                let this = this.debug_selector({
+                    let id = tag.id;
+                    move || format!("tag-name-{id}")
+                });
+                this
+            })
+            .flex_none()
+            .h(ui_rem(18.0))
+            .px(ui_rem(4.0))
+            .flex()
+            .items_center()
+            .rounded_sm()
+            .border_l_2()
+            .border_color(tag_color)
+            .bg(theme.popover)
+            .text_size(ui_rem(10.0))
+            .text_color(theme.foreground)
+            .whitespace_nowrap()
+            .child(tag_name)
+            .into_any_element();
+    }
     let mut name_label = div()
         .absolute()
         .right_0()
@@ -3688,6 +3737,7 @@ fn render_row(
             cx.theme().colors,
             tag_indicator_hover_enabled,
             hover_allowed,
+            config_runtime::appearance_config(cx).show_tag_names,
         ));
     if hover_allowed
         && crate::config_runtime::animation_enabled(cx, crate::config::AnimationKind::ListItemHover)
@@ -4103,6 +4153,136 @@ mod tests {
     use crate::i18n::{Locale, Translator};
     use gpui::px;
     use std::collections::HashMap;
+
+    #[gpui::test]
+    fn tag_name_footer_stays_in_row_and_scrolls_to_last_tag(cx: &mut gpui::TestAppContext) {
+        use super::*;
+        use gpui::{ScrollDelta, VisualTestContext};
+
+        struct TagRow {
+            tag_count: i64,
+        }
+        impl Render for TagRow {
+            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                window.set_rem_size(px(16.0));
+                let tags: Vec<Tag> = (1..=self.tag_count)
+                    .map(|id| Tag {
+                        id,
+                        uuid: format!("tag-{id}"),
+                        name: format!("Long tag name {id}"),
+                        normalized_name: format!("long tag name {id}"),
+                        color: "#4080ff".into(),
+                        sort_order: id,
+                        created_at: 0,
+                        updated_at: 0,
+                    })
+                    .collect();
+                let item = ClipboardListItem {
+                    history_id: 1,
+                    item_id: 1,
+                    favorite_id: None,
+                    tag_ids: tags.iter().map(|tag| tag.id).collect(),
+                    note_text: String::new(),
+                    preview_text: String::new(),
+                    preview_char_count: 0,
+                    preview_options: Vec::new(),
+                    all_format_options: Vec::new(),
+                    content_kind: ContentKind::Text,
+                    paste_count: 0,
+                    is_pinned: false,
+                    sort_order: 0,
+                    last_seen_at: 0,
+                    shortcut: String::new(),
+                    source_app_name: None,
+                    source_device_name: None,
+                    source_app_icon: None,
+                    is_selected: false,
+                };
+                let metrics = ListItemMetrics::from_rem_size(
+                    px(16.0),
+                    ListItemStyle::Card,
+                    CardItemGap::Eight,
+                    ListItemHeight::Small,
+                    3,
+                )
+                .with_tag_names(true);
+                // Use the same fixed content height, clipping and positioning context as a row.
+                div().size_full().p(px(24.0)).child(
+                    div()
+                        .relative()
+                        .w(px(240.0))
+                        .h(metrics.content_height)
+                        .overflow_hidden()
+                        .debug_selector(|| "tag-row".into())
+                        .child(div().h(metrics.content_height - metrics.tag_footer_height))
+                        .child(render_tag_indicators(
+                            &item,
+                            &tags,
+                            cx.theme().colors.clone(),
+                            false,
+                            false,
+                            true,
+                        )),
+                )
+            }
+        }
+
+        fn draw(cx: &mut VisualTestContext) {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.draw(cx).clear(cx);
+            });
+        }
+
+        cx.update(gpui_component::init);
+        let (view, cx) = cx.add_window_view(|_, _| TagRow { tag_count: 2 });
+        let cx: &mut VisualTestContext = cx;
+        draw(cx);
+        let row = cx.debug_bounds("tag-row").unwrap();
+        let last = cx.debug_bounds("tag-name-2").unwrap();
+        assert_eq!(last.right(), row.right() - px(6.0), "标签应与色块一样靠右");
+        assert_eq!(last.bottom(), row.bottom() - px(1.5));
+
+        view.update(cx, |view, cx| {
+            view.tag_count = 8;
+            cx.notify();
+        });
+        draw(cx);
+        let row = cx.debug_bounds("tag-row").unwrap();
+        let first = cx.debug_bounds("tag-name-1").unwrap();
+        assert!(
+            first.top() >= row.bottom() - px(20.0),
+            "tag must occupy the reserved footer: {first:?}, row: {row:?}"
+        );
+        assert!(
+            first.bottom() <= row.bottom(),
+            "tag must not be clipped below its row: {first:?}, row: {row:?}"
+        );
+        assert_eq!(first.left(), row.left() + px(6.0));
+        let last_before = cx.debug_bounds("tag-name-8").unwrap();
+        assert!(last_before.right() > row.right());
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(row.left() + px(20.0), row.bottom() - px(10.0)),
+            delta: ScrollDelta::Pixels(point(px(-10000.0), px(0.0))),
+            ..Default::default()
+        });
+        draw(cx);
+        let last = cx.debug_bounds("tag-name-8").unwrap();
+        assert!(
+            last.left() < last_before.left(),
+            "horizontal wheel must move the tags"
+        );
+        assert!(
+            last.left() >= row.left() + px(6.0),
+            "last tag must be fully reachable"
+        );
+        assert!(
+            last.right() <= row.right() - px(6.0),
+            "last tag must fit inside the footer"
+        );
+        assert!(last.top() >= row.bottom() - px(20.0));
+        assert!(last.bottom() <= row.bottom());
+    }
 
     #[test]
     fn card_border_normal_and_selected_colors_are_solid() {

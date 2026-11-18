@@ -337,6 +337,8 @@
   "settings.notifications.description": "Notification pop-ups and copy and paste sounds.",
   "settings.list_preview.description": "How list items look and what the hover preview shows.",
   "settings.list_preview.time_format": "Time display",
+  "settings.list_preview.show_tag_names": "Show full tag names",
+  "settings.list_preview.show_tag_names_description": "Always show tag names with their colors. Scroll horizontally when there are many tags. Disable to show color indicators with names on hover.",
   "settings.list_preview.time_format_description": "Show list item timestamps as absolute local date and time or relative time (such as minutes ago).",
   "settings.list_preview.time_format.absolute": "Absolute time",
   "settings.list_preview.time_format.relative": "Relative time",

@@ -1660,6 +1660,8 @@ pub struct AppearanceConfig {
     pub list_time_format: ListTimeFormat,
     pub adaptive_max_lines: u8,
     pub only_show_notes: bool,
+    /// 常驻显示标签完整名称，而不是仅显示色块。
+    pub show_tag_names: bool,
     /// 是否为置顶条目绘制状态边框线。
     pub pinned_item_border: bool,
     /// 是否为已粘贴过的条目绘制状态边框线。
@@ -1694,6 +1696,7 @@ impl Default for AppearanceConfig {
             list_time_format: ListTimeFormat::default(),
             adaptive_max_lines: ADAPTIVE_MAX_LINES_DEFAULT,
             only_show_notes: false,
+            show_tag_names: false,
             pinned_item_border: true,
             pasted_item_border: true,
             item_display: ItemDisplayConfig::default(),

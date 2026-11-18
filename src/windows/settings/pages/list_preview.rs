@@ -214,6 +214,22 @@ impl SettingsWindowView {
                     )
                 }
             });
+        let show_tag_names_switch = Switch::new("settings-show-tag-names")
+            .checked(appearance.show_tag_names)
+            .accessibility_label(translator.translate("settings.list_preview.show_tag_names"))
+            .on_click({
+                let view = view.clone();
+                let save_error = appearance_save_error.clone();
+                move |checked, _, cx| {
+                    persist_appearance_change(
+                        view.clone(),
+                        "完整显示标签文本",
+                        move |appearance| appearance.show_tag_names = *checked,
+                        save_error.clone(),
+                        cx,
+                    );
+                }
+            });
         let gallery_gif_autoplay_switch = Switch::new("settings-gallery-gif-autoplay")
             .checked(appearance.gallery_gif_autoplay)
             .accessibility_label(
@@ -484,6 +500,18 @@ impl SettingsWindowView {
                     list_time_format_selector,
                 ),
             )
+            .child(
+                self.setting_row(
+                    theme,
+                    translator.translate("settings.list_preview.show_tag_names"),
+                    Some(
+                        translator
+                            .translate("settings.list_preview.show_tag_names_description")
+                            .into(),
+                    ),
+                    show_tag_names_switch,
+                ),
+            )
             .child(self.highlight_element(
                 theme,
                 translator.translate("settings.item_display.title"),
@@ -657,6 +685,7 @@ fn reset_list_preview_appearance_fields(appearance: &mut AppearanceConfig) {
     appearance.list_time_format = default.list_time_format;
     appearance.adaptive_max_lines = default.adaptive_max_lines;
     appearance.only_show_notes = default.only_show_notes;
+    appearance.show_tag_names = default.show_tag_names;
     appearance.item_display = default.item_display;
     appearance.pinned_item_border = default.pinned_item_border;
     appearance.pasted_item_border = default.pasted_item_border;
@@ -788,6 +817,22 @@ fn open_preview_information_sheet(
             .map(|this| crate::window_material::sheet_surface(this, cx))
             .child(content)
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reset_list_preview_restores_tag_name_display() {
+        let mut appearance = AppearanceConfig::default();
+        let mut value = serde_json::to_value(&appearance).unwrap();
+        value["showTagNames"] = true.into();
+        appearance = serde_json::from_value(value).unwrap();
+        reset_list_preview_appearance_fields(&mut appearance);
+        let value = serde_json::to_value(&appearance).unwrap();
+        assert_eq!(value["showTagNames"], false);
+    }
 }
 
 const fn clipboard_display_priority_label_key(priority: ClipboardDisplayPriority) -> &'static str {
