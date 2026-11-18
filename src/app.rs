@@ -279,24 +279,7 @@ pub fn run() {
 
             let main_window = cx
                 .open_window(
-                    WindowOptions {
-                        window_bounds: Some(WindowBounds::Windowed(bounds)),
-                        titlebar: Some(TitlebarOptions {
-                            appears_transparent: true,
-                            ..Default::default()
-                        }),
-                        focus: false,
-                        show: initially_visible,
-                        inactive_frame_interval: None,
-                        kind: WindowKind::Normal,
-                        is_movable: true,
-                        is_resizable: true,
-                        is_minimizable: false,
-                        window_min_size: Some(size(px(WINDOW_MIN_SIZE), px(WINDOW_MIN_SIZE))),
-                        window_background: WindowBackgroundAppearance::Transparent,
-                        display_id,
-                        ..Default::default()
-                    },
+                    main_window_options(bounds, display_id),
                     {
                         let history_repository = history_repository.clone();
                         let favorite_repository = favorite_repository.clone();
@@ -436,6 +419,32 @@ fn initialize_database(paths: &AppPaths) -> Result<Database, DatabaseError> {
     Database::open(paths.database_path())
 }
 
+fn main_window_options(
+    bounds: Bounds<gpui::Pixels>,
+    display_id: Option<gpui::DisplayId>,
+) -> WindowOptions {
+    WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        titlebar: Some(TitlebarOptions {
+            appears_transparent: true,
+            ..Default::default()
+        }),
+        focus: false,
+        // 必须等 configure_window 移除 APPWINDOW 后再由可见性服务显示，
+        // 包括启动时恢复贴边窗口，避免 Shell 提前登记任务栏按钮。
+        show: false,
+        inactive_frame_interval: None,
+        kind: WindowKind::Normal,
+        is_movable: true,
+        is_resizable: true,
+        is_minimizable: false,
+        window_min_size: Some(size(px(WINDOW_MIN_SIZE), px(WINDOW_MIN_SIZE))),
+        window_background: WindowBackgroundAppearance::Transparent,
+        display_id,
+        ..Default::default()
+    }
+}
+
 fn initial_window_size(state: &PersistedMainWindowState) -> (f32, f32) {
     let size = state.restored_size();
     (size.width, size.height)
@@ -445,6 +454,24 @@ fn initial_window_size(state: &PersistedMainWindowState) -> (f32, f32) {
 mod tests {
     use super::{WINDOW_HEIGHT, WINDOW_MIN_SIZE, WINDOW_WIDTH, initial_window_size};
     use crate::state_runtime::{PersistedMainWindowState, PersistedWindowSize};
+
+    #[test]
+    fn main_window_is_created_hidden_before_native_styles_are_configured() {
+        let bounds = gpui::Bounds {
+            origin: gpui::point(gpui::px(0.0), gpui::px(0.0)),
+            size: gpui::size(gpui::px(360.0), gpui::px(520.0)),
+        };
+        let options = super::main_window_options(bounds, None);
+        assert!(!options.show, "主窗口不得以 APPWINDOW 样式提前显示");
+        assert!(!options.focus);
+        assert_eq!(options.kind, gpui::WindowKind::Normal);
+        assert!(options.is_resizable);
+        assert!(!options.is_minimizable);
+        assert_eq!(
+            options.window_bounds,
+            Some(gpui::WindowBounds::Windowed(bounds))
+        );
+    }
 
     #[test]
     fn initial_window_size_uses_persisted_logical_size() {

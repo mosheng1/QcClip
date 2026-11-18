@@ -533,17 +533,7 @@ impl MainWindowService {
         }
         cx.defer(move |cx| {
             let result = window.update(cx, |_, window, cx| {
-                window.on_window_should_close(cx, |_, cx| {
-                    if config_runtime::clipboard_config(cx)
-                        .window_position
-                        .is_screen_edge()
-                    {
-                        cx.defer(hide_main_window_explicitly);
-                        false
-                    } else {
-                        true
-                    }
-                });
+                window.on_window_should_close(cx, main_window_should_close);
                 let position_result =
                     window_visibility::position_initial_window(window, initial_logical_size, cx);
                 let hide_result =
@@ -827,6 +817,16 @@ pub(crate) fn show_main_window_page(
     ) {
         tracing::error!("显示主窗口失败：{error}");
     }
+}
+
+#[cfg(test)]
+mod lifecycle_tests;
+
+fn main_window_should_close(_: &mut gpui::Window, cx: &mut App) -> bool {
+    // 主面板属于常驻服务：Alt+F4、系统菜单或任务栏关闭都只隐藏，
+    // 真正退出仍由托盘的退出操作负责。
+    cx.defer(hide_main_window_explicitly);
+    false
 }
 
 pub fn hide_main_window_explicitly(cx: &mut App) {

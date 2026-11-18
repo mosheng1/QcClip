@@ -685,8 +685,8 @@ pub(crate) fn hide_initial_window(
         // 贴边隐藏必须让 HWND 保持可见，仅通过屏幕坐标隐藏窗口。
         platform_window::set_window_visible(window, true)?;
     } else if initially_visible {
-        // 贴边恢复失败时，窗口是按可见状态创建的，按普通窗口隐藏兜底，
-        // 避免全局状态已经隐藏但 HWND 仍然留在屏幕上。
+        // 贴边恢复失败时，显式按普通窗口隐藏兜底，
+        // 避免初始化期间的显示操作让 HWND 与全局隐藏状态不一致。
         platform_window::set_window_visible(window, false)?;
     }
     cx.update_global::<MainWindowService, _>(|service, _| {
