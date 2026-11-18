@@ -3130,6 +3130,15 @@ pub fn configure_window(window: &Window) {
 
     let hwnd = HWND(handle.hwnd.get() as *mut _);
 
+    // Shell 只会在仍带普通窗口样式时移除任务栏按钮，必须先隐藏再修改扩展样式。
+    // SAFETY: hwnd 来自当前 GPUI 窗口句柄，只查询并同步隐藏该窗口，不激活窗口。
+    let was_visible = unsafe { IsWindowVisible(hwnd).as_bool() };
+    if was_visible {
+        unsafe {
+            let _ = ShowWindow(hwnd, SW_HIDE);
+        }
+    }
+
     // 保留工具窗口行为，避免普通窗口出现在任务栏中。可调整大小样式由 GPUI 在创建时设置。
     // SAFETY: hwnd 来自当前 GPUI 窗口句柄，只修改该窗口的扩展样式并通知系统刷新窗口框架。
     let ex_style = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) };
@@ -3140,17 +3149,6 @@ pub fn configure_window(window: &Window) {
         & !(WS_EX_APPWINDOW.0 as isize);
     unsafe {
         SetWindowLongPtrW(hwnd, GWL_EXSTYLE, tool_window_style);
-    }
-
-    // GPUI 以 WS_EX_APPWINDOW 创建窗口；若创建时已显示（启动时恢复贴边状态），任务栏按钮
-    // 在显示那一刻就已登记，事后修改扩展样式不会移除它。任务栏只在显示/隐藏时重新判断，
-    // 因此对已可见的窗口同步隐藏再无激活显示一次，让工具窗口样式生效。
-    // SAFETY: hwnd 来自当前 GPUI 窗口句柄，只切换该窗口的可见状态，不激活窗口。
-    unsafe {
-        if IsWindowVisible(hwnd).as_bool() {
-            let _ = ShowWindow(hwnd, SW_HIDE);
-            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-        }
     }
 
     // Normal 窗口和工具窗口的 DWM 默认圆角策略可能不同，这里固定使用标准圆角。
@@ -3196,6 +3194,13 @@ pub fn configure_window(window: &Window) {
         tracing::error!("设置窗口置顶失败：{error}");
     }
     configure_frameless_window(window, false);
+
+    // SAFETY: 仅在原本可见时恢复显示；样式和框架已配置完成，且不抢占焦点。
+    if was_visible {
+        unsafe {
+            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        }
+    }
 }
 
 #[cfg(not(target_os = "windows"))]
