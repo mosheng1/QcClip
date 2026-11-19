@@ -140,7 +140,8 @@ impl CaptureService {
                 hashed: None,
                 formats_changed: true,
             })
-        } else if local {
+        } else {
+            // 本地捕获和首次同步接收共用全文校验，合并同文条目的原始格式。
             find_text_merge(
                 transaction,
                 captured,
@@ -148,8 +149,6 @@ impl CaptureService {
                 exact_existing.as_ref().map(|existing| existing.0),
                 &hashed,
             )?
-        } else {
-            None
         };
         let captured = text_merge
             .as_ref()

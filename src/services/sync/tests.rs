@@ -334,6 +334,80 @@ fn content_dedup_preserves_local_source_and_capture_count() {
 }
 
 #[test]
+fn remote_desktop_text_dedup_preserves_formats_in_both_arrival_orders() {
+    for local_first in [true, false] {
+        let source = Fixture::new();
+        let target = Fixture::new();
+        let mut rich = text_capture("远程桌面复制的同一段文字");
+        rich.source_application.name = Some("聊天程序".into());
+        rich.formats.push(RawFormat::captured(
+            "windows",
+            "registered:HTML Format",
+            "HTML Format",
+            FormatKind::Html,
+            "<b>远程桌面复制的同一段文字</b>".as_bytes().to_vec(),
+            1,
+            true,
+        ));
+        let source_id = CaptureService::new(source.db.clone(), source.blobs.clone())
+            .store_captured_clipboard_with_status(&rich)
+            .unwrap()
+            .item_id;
+        let packet = source.packet(source_id, Mode::NewContent, 1);
+        let mut plain = text_capture("远程桌面复制的同一段文字");
+        plain.source_application.name = Some("远程桌面".into());
+        let capture = CaptureService::new(target.db.clone(), target.blobs.clone());
+        let local = local_first.then(|| {
+            capture
+                .store_captured_clipboard_with_status(&plain)
+                .unwrap()
+                .item_id
+        });
+        // 本机先捕获时，保留合并前的快照，模拟两端同时发出同步事件。
+        let reply = local.map(|id| target.packet(id, Mode::NewContent, 1));
+        let received = repository::apply_with_feedback(
+            &target.db,
+            &target.blobs,
+            &packet.event,
+            &packet.resources,
+            "来源电脑",
+        )
+        .unwrap()
+        .change
+        .unwrap();
+        let local = local.unwrap_or_else(|| {
+            capture
+                .store_captured_clipboard_with_status(&plain)
+                .unwrap()
+                .item_id
+        });
+        assert_eq!(received.item_id, local);
+        let reply = reply.unwrap_or_else(|| target.packet(local, Mode::NewContent, 1));
+        repository::apply(&source.db, &source.blobs, &reply.event, &reply.resources).unwrap();
+
+        for (fixture, item_id, app) in [
+            (&source, source_id, "聊天程序"),
+            (&target, local, "远程桌面"),
+        ] {
+            assert_eq!(fixture.count("clipboard_items"), 1);
+            assert_eq!(fixture.count("clipboard_history"), 1);
+            let connection = fixture.db.connect().unwrap();
+            let stored = repository::load_formats(&connection, &fixture.blobs, item_id).unwrap();
+            assert_eq!(stored.formats.len(), 2);
+            assert_eq!(stored.formats[1].bytes, rich.formats[1].bytes);
+            let history: (i64, String) = connection
+                .query_row(
+                    "SELECT capture_count, last_source_app_name FROM clipboard_history",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(history, (1, app.into()));
+        }
+    }
+}
+
+#[test]
 fn watermarks_are_per_item_and_per_stream() {
     let source = Fixture::new();
     let target = Fixture::new();
@@ -415,6 +489,7 @@ fn corrupted_resources_do_not_create_visible_or_pending_items() {
 fn partial_formats_keep_local_hash_separate_from_source_hash() {
     let source = Fixture::new();
     let target = Fixture::new();
+    let local_item = target.capture("部分格式");
     let mut capture = text_capture("部分格式");
     capture.formats.push(RawFormat::captured(
         "windows",
@@ -434,6 +509,9 @@ fn partial_formats_keep_local_hash_separate_from_source_hash() {
     packet.resources.remove(&removed.resource.id);
     packet.event.complete = false;
     repository::apply(&target.db, &target.blobs, &packet.event, &packet.resources).unwrap();
+    assert_eq!(target.count("clipboard_items"), 1);
+    assert_eq!(target.count("clipboard_history"), 1);
+    assert_eq!(target.capture("部分格式"), local_item);
     let (local, remote): (Vec<u8>, Vec<u8>) = target.db.connect().unwrap().query_row("SELECT i.content_hash, s.source_hash FROM clipboard_items i JOIN sync_items s ON s.item_id = i.id", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
     assert_ne!(local, remote);
     assert_eq!(remote, packet.event.source_hash);

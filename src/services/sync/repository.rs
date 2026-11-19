@@ -580,12 +580,6 @@ pub fn apply_with_feedback(
                     .any(|f| f.stable_identity() == old.stable_identity())
             });
             captured.formats.extend(stored.formats);
-        } else if !event.complete {
-            let exists: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM clipboard_items WHERE hash_version = ?1 AND content_hash = ?2)",
-                params![incoming_hash.hash_version, incoming_hash.content_hash.as_slice()], |r| r.get(0))?;
-            if exists {
-                return fail("格式子集与本地记录重合，但缺少可信来源映射，已拒绝猜测合并");
-            }
         }
         for (index, f) in captured.formats.iter_mut().enumerate() {
             f.format_order = index as u32;

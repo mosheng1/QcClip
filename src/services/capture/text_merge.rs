@@ -23,7 +23,7 @@ pub(super) const CANDIDATE_QUERY: &str = "SELECT i.id FROM clipboard_items i
                  UNION
                  SELECT item_id FROM clipboard_formats
                  WHERE format_kind = 'text' AND substr(preview_text, 1, 128) IS NULL
-             ) AND i.capture_state = 'ready' AND i.origin_kind IN ('captured', 'imported')
+             ) AND i.capture_state = 'ready' AND i.origin_kind IN ('captured', 'imported', 'synced')
                AND NOT EXISTS (SELECT 1 FROM clipboard_formats f WHERE f.item_id = i.id
                    AND f.format_namespace = 'qcclip' AND f.format_key = 'custom-text')
                AND NOT EXISTS (SELECT 1 FROM clipboard_items child WHERE child.parent_item_id = i.id)
@@ -417,7 +417,7 @@ fn load_capture(
     text_only: bool,
 ) -> Result<Option<CapturedClipboard>, CaptureError> {
     let eligible: bool = transaction.query_row(
-        "SELECT capture_state = 'ready' AND origin_kind IN ('captured', 'imported')
+        "SELECT capture_state = 'ready' AND origin_kind IN ('captured', 'imported', 'synced')
              AND NOT EXISTS (SELECT 1 FROM clipboard_items WHERE parent_item_id = ?1)
          FROM clipboard_items WHERE id = ?1",
         [item_id],
