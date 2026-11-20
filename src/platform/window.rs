@@ -1996,7 +1996,7 @@ pub(crate) fn install_window_drag_constraints_hook(
             (*hook).on_move_finished = on_move_finished;
             (*hook).screen_boundaries =
                 crate::windows::main::screen_boundary::ScreenBoundaries::capture();
-            disable_window_snap(hwnd, (*hook).original_style);
+            disable_window_snap(hwnd);
         }
         return Ok(());
     }
@@ -2005,7 +2005,7 @@ pub(crate) fn install_window_drag_constraints_hook(
     // SAFETY: hwnd 已通过 IsWindow 校验，仅修改当前窗口样式。
     let original_style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) };
     // SAFETY: 只移除当前窗口的系统分屏相关样式，不修改全局系统设置。
-    unsafe { disable_window_snap(hwnd, original_style) };
+    unsafe { disable_window_snap(hwnd) };
 
     // SAFETY: hwnd 是当前 GPUI 窗口，保存原窗口过程并安装本模块的消息转发过程。
     let previous = unsafe {
@@ -2074,7 +2074,7 @@ struct WindowConstraintsHook {
 }
 
 #[cfg(target_os = "windows")]
-unsafe fn disable_window_snap(hwnd: windows::Win32::Foundation::HWND, original_style: isize) {
+unsafe fn disable_window_snap(hwnd: windows::Win32::Foundation::HWND) {
     use windows::Win32::UI::WindowsAndMessaging::{
         GWL_STYLE, GetWindowLongPtrW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
         SWP_NOOWNERZORDER, SWP_NOSIZE, SetWindowLongPtrW, SetWindowPos, WS_MAXIMIZEBOX,
@@ -2083,11 +2083,13 @@ unsafe fn disable_window_snap(hwnd: windows::Win32::Foundation::HWND, original_s
     let current_style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) };
     // 只移除最大化/系统分屏样式，保留 WS_THICKFRAME 以支持窗口边缘调整大小。
     let snap_styles = WS_MAXIMIZEBOX.0 as isize;
-    if current_style == (original_style & !snap_styles) {
+    let style = current_style & !snap_styles;
+    if current_style == style {
         return;
     }
+    // 窗口可能在隐藏时安装钩子，必须保留当前的可见性等运行时样式。
     unsafe {
-        SetWindowLongPtrW(hwnd, GWL_STYLE, original_style & !snap_styles);
+        SetWindowLongPtrW(hwnd, GWL_STYLE, style);
         let _ = SetWindowPos(
             hwnd,
             None,
@@ -2104,10 +2106,14 @@ unsafe fn disable_window_snap(hwnd: windows::Win32::Foundation::HWND, original_s
 unsafe fn restore_window_style(hwnd: windows::Win32::Foundation::HWND, style: isize) {
     use windows::Win32::UI::WindowsAndMessaging::{
         GWL_STYLE, GetWindowLongPtrW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
-        SWP_NOOWNERZORDER, SWP_NOSIZE, SetWindowLongPtrW, SetWindowPos,
+        SWP_NOOWNERZORDER, SWP_NOSIZE, SetWindowLongPtrW, SetWindowPos, WS_MAXIMIZEBOX,
     };
 
-    if unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) } == style {
+    let current_style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) };
+    let snap_styles = WS_MAXIMIZEBOX.0 as isize;
+    // 只恢复钩子改动过的样式，避免覆盖窗口当前的显示、最小化等状态。
+    let style = (current_style & !snap_styles) | (style & snap_styles);
+    if current_style == style {
         return;
     }
     unsafe {
@@ -2830,6 +2836,67 @@ mod native_resize_tests {
         fn drop(&mut self) {
             // SAFETY: 测试窗口由当前线程创建，并在同一线程销毁。
             let _ = unsafe { DestroyWindow(self.0) };
+        }
+    }
+
+    #[test]
+    fn snap_style_changes_preserve_current_window_visibility() {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GWL_STYLE, GetWindowLongPtrW, IsWindowVisible, SW_HIDE, SW_SHOWNOACTIVATE, ShowWindow,
+            WS_MAXIMIZEBOX, WS_SYSMENU, WS_THICKFRAME, WS_VISIBLE,
+        };
+
+        // SAFETY: 使用系统窗口类在屏幕外创建隐藏窗口，所有操作均在创建线程执行。
+        let window = TestWindow(
+            unsafe {
+                CreateWindowExW(
+                    Default::default(),
+                    windows::core::w!("STATIC"),
+                    windows::core::w!("拖拽可见性测试"),
+                    WS_POPUP | WS_SYSMENU | WS_THICKFRAME | WS_MAXIMIZEBOX,
+                    -32000,
+                    -32000,
+                    360,
+                    520,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            }
+            .expect("无法创建拖拽可见性测试窗口"),
+        );
+
+        // SAFETY: 测试窗口有效，模拟隐藏创建后显示并再次开始拖拽的样式切换。
+        unsafe {
+            let original_style = GetWindowLongPtrW(window.0, GWL_STYLE);
+            disable_window_snap(window.0);
+            let _ = ShowWindow(window.0, SW_SHOWNOACTIVATE);
+            assert!(IsWindowVisible(window.0).as_bool());
+
+            disable_window_snap(window.0);
+            assert!(IsWindowVisible(window.0).as_bool(), "拖拽不得隐藏窗口");
+            assert_eq!(
+                GetWindowLongPtrW(window.0, GWL_STYLE),
+                (original_style | WS_VISIBLE.0 as isize) & !(WS_MAXIMIZEBOX.0 as isize)
+            );
+
+            restore_window_style(window.0, original_style);
+            assert_eq!(
+                GetWindowLongPtrW(window.0, GWL_STYLE),
+                original_style | WS_VISIBLE.0 as isize,
+                "恢复分屏样式不得清除当前可见状态"
+            );
+
+            let visible_style = GetWindowLongPtrW(window.0, GWL_STYLE);
+            disable_window_snap(window.0);
+            let _ = ShowWindow(window.0, SW_HIDE);
+            restore_window_style(window.0, visible_style);
+            assert_eq!(
+                GetWindowLongPtrW(window.0, GWL_STYLE),
+                original_style,
+                "恢复分屏样式不得显示当前隐藏的窗口"
+            );
         }
     }
 

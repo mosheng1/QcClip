@@ -689,11 +689,32 @@ pub(crate) fn hide_initial_window(
         // 避免初始化期间的显示操作让 HWND 与全局隐藏状态不一致。
         platform_window::set_window_visible(window, false)?;
     }
-    cx.update_global::<MainWindowService, _>(|service, _| {
+    let generation = cx.update_global::<MainWindowService, _>(|service, _| {
         service.window_state.cancel_visibility_transition();
         service.window_state.set_visibility(false);
+        service.window_state.visibility_transition_generation()
     });
-    platform_window::set_window_rendering_enabled(window, false)?;
+    if attachment.is_some() && panel.is_none() {
+        // 隐藏创建的窗口尚无已绘制内容，先在贴边隐藏坐标绘制一帧，保留屏幕内的边缘。
+        platform_window::set_window_rendering_enabled(window, true)?;
+        window.refresh();
+        // 帧回调先于绘制执行，下一帧再暂停，避免首帧尚未提交就停止绘制。
+        window.on_next_frame(move |window, _| {
+            window.on_next_frame(move |window, cx| {
+                let should_suspend = cx.read_global::<MainWindowService, _>(|service, _| {
+                    !service.window_state.is_logically_visible()
+                        && service.window_state.visibility_transition_generation() == generation
+                });
+                if should_suspend
+                    && let Err(error) = platform_window::set_window_rendering_enabled(window, false)
+                {
+                    tracing::error!("暂停贴边窗口绘制失败：{error}");
+                }
+            });
+        });
+    } else {
+        platform_window::set_window_rendering_enabled(window, false)?;
+    }
     crate::services::memory_trim::schedule(cx);
     sync_mouse_leave_state(cx);
     Ok(())
