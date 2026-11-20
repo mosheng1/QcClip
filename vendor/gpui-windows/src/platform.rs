@@ -352,6 +352,7 @@ impl WindowsPlatform {
                         unsafe {
                             let _ = RedrawWindow(Some(hwnd.as_raw()), None, None, RDW_INVALIDATE);
                         }
+                        request_transparent_window_frame(hwnd.as_raw());
                     }
                 }
             })

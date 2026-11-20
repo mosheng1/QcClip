@@ -34,6 +34,7 @@ pub(crate) const WM_GPUI_KEYBOARD_LAYOUT_CHANGED: u32 = WM_USER + 6;
 pub(crate) const WM_GPUI_GPU_DEVICE_LOST: u32 = WM_USER + 7;
 pub(crate) const WM_GPUI_KEYDOWN: u32 = WM_USER + 8;
 pub(crate) const WM_GPUI_END_SESSION: u32 = WM_USER + 9;
+pub(crate) const WM_GPUI_REQUEST_FRAME: u32 = WM_USER + 10;
 
 const SIZE_MOVE_LOOP_TIMER_ID: usize = 1;
 /// SPI_GETWHEELSCROLLLINES 在“一次滚动一个屏幕”时返回的值。
@@ -44,6 +45,34 @@ const WHEEL_PIXELS_PER_LINE: f32 = 100.0 / 3.0;
 const WHEEL_PAGE_MIN_FRACTION: f32 = 0.875;
 const WHEEL_PAGE_MAX_OVERLAP: f32 = 40.0;
 const RENDERING_SUSPENDED_PROP: PCWSTR = w!("GPUI.RenderingSuspended");
+const FRAME_REQUEST_PENDING_PROP: PCWSTR = w!("GPUI.FrameRequestPending");
+
+pub(crate) fn request_transparent_window_frame(handle: HWND) {
+    // WS_EX_TRANSPARENT 的 WM_PAINT 会等待同线程底层窗口；持续重绘时改用普通投递消息。
+    // SAFETY: 只查询窗口样式并保存布尔标记；窗口失效时系统调用返回失败。
+    unsafe {
+        if GetWindowLongPtrW(handle, GWL_EXSTYLE) & WS_EX_TRANSPARENT.0 as isize == 0
+            || !GetPropW(handle, FRAME_REQUEST_PENDING_PROP).is_invalid()
+        {
+            return;
+        }
+        // 垂直同步线程是唯一投递方，每个窗口最多保留一个未处理的帧请求。
+        if SetPropW(handle, FRAME_REQUEST_PENDING_PROP, Some(HANDLE(1 as _)))
+            .context("标记窗口帧请求失败")
+            .log_err()
+            .is_none()
+        {
+            return;
+        }
+        if PostMessageW(Some(handle), WM_GPUI_REQUEST_FRAME, WPARAM(0), LPARAM(0))
+            .context("投递窗口帧请求失败")
+            .log_err()
+            .is_none()
+        {
+            let _ = RemovePropW(handle, FRAME_REQUEST_PENDING_PROP);
+        }
+    }
+}
 
 pub(crate) fn window_is_renderable(handle: HWND) -> bool {
     // SAFETY: 只读取窗口可见性和绘制标记，失效句柄会返回不可见。
@@ -210,6 +239,11 @@ impl WindowsWindowInner {
             WM_INPUTLANGCHANGE => self.handle_input_language_changed(),
             WM_SHOWWINDOW => self.handle_window_visibility_changed(handle, wparam),
             WM_GPUI_CURSOR_STYLE_CHANGED => self.handle_cursor_changed(lparam),
+            WM_GPUI_REQUEST_FRAME => {
+                // SAFETY: 本消息对应的帧请求已经出队，允许下一次垂直同步再次投递。
+                let _ = unsafe { RemovePropW(handle, FRAME_REQUEST_PENDING_PROP) };
+                self.draw_window(handle, false)
+            }
             WM_GPUI_FORCE_UPDATE_WINDOW => self.draw_window(handle, true),
             WM_GPUI_GPU_DEVICE_LOST => self.handle_device_lost(lparam),
             DM_POINTERHITTEST => self.handle_dm_pointer_hit_test(wparam),
@@ -411,6 +445,8 @@ impl WindowsWindowInner {
     }
 
     fn handle_destroy_msg(&self, handle: HWND) -> Option<isize> {
+        // SAFETY: 销毁前移除帧请求标记，不持有需要释放的内存。
+        let _ = unsafe { RemovePropW(handle, FRAME_REQUEST_PENDING_PROP) };
         let callback = { self.state.callbacks.close.take() };
         // Re-enable parent window if this was a modal dialog
         if let Some(parent_hwnd) = self.parent_hwnd {
