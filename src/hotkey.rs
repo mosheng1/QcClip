@@ -1272,6 +1272,7 @@ impl HotkeyRuntime {
             return Ok(());
         }
         self.global_enabled = enabled;
+        crate::services::capslock_clipboard::set_global_hotkeys_active(enabled);
         #[cfg(target_os = "windows")]
         self.middle_mouse
             .configure(shortcuts.middle_mouse, enabled && !self.suspended);

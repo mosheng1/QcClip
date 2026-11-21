@@ -163,6 +163,9 @@ impl ConfigRuntime {
                 tracing::error!("重新加载快捷键配置失败：{error}");
             }
         }
+        if previous.capslock_clipboard != config.capslock_clipboard {
+            crate::services::capslock_clipboard::set_config(config.capslock_clipboard);
+        }
         cx.refresh_windows();
     }
 }
@@ -361,6 +364,10 @@ pub(crate) fn animation_enabled(cx: &App, kind: AnimationKind) -> bool {
 
 pub(crate) fn clipboard_config(cx: &App) -> ClipboardConfig {
     cx.read_global::<ConfigRuntime, _>(|runtime, _| runtime.config.clipboard.clone())
+}
+
+pub(crate) fn capslock_clipboard_config(cx: &App) -> crate::config::CapslockClipboardConfig {
+    cx.read_global::<ConfigRuntime, _>(|runtime, _| runtime.config.capslock_clipboard)
 }
 
 pub(crate) fn preview_information_config(cx: &App) -> PreviewInformationConfig {
@@ -631,17 +638,25 @@ pub(crate) fn set_paste_key_mode(mode: PasteKeyMode, cx: &mut App) -> Result<boo
 }
 
 pub(crate) fn reset_general_config(cx: &mut App) -> Result<bool, ConfigError> {
-    let (path, current, mut next) = cx.read_global::<ConfigRuntime, _>(|runtime, _| {
-        (
-            runtime.path.clone(),
-            runtime.config.general.clone(),
-            runtime.config.clone(),
-        )
-    });
+    let (path, current, current_capslock, mut next) =
+        cx.read_global::<ConfigRuntime, _>(|runtime, _| {
+            (
+                runtime.path.clone(),
+                runtime.config.general.clone(),
+                runtime.config.capslock_clipboard,
+                runtime.config.clone(),
+            )
+        });
     let mut default = AppConfig::default().general;
     default.global_notification_enabled = current.global_notification_enabled;
     default.notifications = current.notifications.clone();
-    if current == default {
+    // 本页展示的两个 CapsLock 槽位开关一并恢复默认；界面上不提供入口的
+    // “操作后恢复系统剪贴板”保持用户现有取值。
+    let default_capslock = crate::config::CapslockClipboardConfig {
+        restore_system_clipboard: current_capslock.restore_system_clipboard,
+        ..Default::default()
+    };
+    if current == default && current_capslock == default_capslock {
         return Ok(false);
     }
 
@@ -667,6 +682,7 @@ pub(crate) fn reset_general_config(cx: &mut App) -> Result<bool, ConfigError> {
     let language = default.language;
     let hide_tray_icon = default.hide_tray_icon;
     next.general = default;
+    next.capslock_clipboard = default_capslock;
     if let Err(error) = persist_config(&path, &next) {
         if current.launch_at_login != next.general.launch_at_login {
             if let Err(restore_error) =
@@ -690,6 +706,9 @@ pub(crate) fn reset_general_config(cx: &mut App) -> Result<bool, ConfigError> {
     cx.update_global::<ConfigRuntime, _>(|runtime, _| {
         runtime.config = next;
     });
+    if current_capslock != default_capslock {
+        crate::services::capslock_clipboard::set_config(default_capslock);
+    }
     i18n::set_locale(Locale::new(language.code()), cx);
     if current.hide_tray_icon != hide_tray_icon {
         crate::services::tray::TrayService::sync_visibility(cx);
@@ -884,6 +903,32 @@ pub(crate) fn set_clipboard_config(
     {
         crate::windows::main::MainWindowService::cancel_hover_preview(cx);
     }
+    cx.refresh_windows();
+    Ok(true)
+}
+
+pub(crate) fn set_capslock_clipboard_config(
+    capslock_clipboard: crate::config::CapslockClipboardConfig,
+    cx: &mut App,
+) -> Result<bool, ConfigError> {
+    let (current, path, mut next) = cx.read_global::<ConfigRuntime, _>(|runtime, _| {
+        (
+            runtime.config.capslock_clipboard,
+            runtime.path.clone(),
+            runtime.config.clone(),
+        )
+    });
+    if current == capslock_clipboard {
+        return Ok(false);
+    }
+
+    next.capslock_clipboard = capslock_clipboard;
+    persist_config(&path, &next)?;
+
+    cx.update_global::<ConfigRuntime, _>(|runtime, _| {
+        runtime.config = next;
+    });
+    crate::services::capslock_clipboard::set_config(capslock_clipboard);
     cx.refresh_windows();
     Ok(true)
 }

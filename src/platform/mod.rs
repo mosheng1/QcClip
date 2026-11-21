@@ -1,4 +1,5 @@
 pub(crate) mod auto_start;
+pub(crate) mod capslock_keys;
 pub mod clipboard;
 #[cfg(target_os = "windows")]
 pub mod drag_preview;

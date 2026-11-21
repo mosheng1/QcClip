@@ -249,6 +249,10 @@ pub fn run() {
                 cx,
             );
             crate::hotkey::HotkeyRuntime::install(cx);
+            crate::services::capslock_clipboard::install(
+                clipboard_write_suppressor.clone(),
+                crate::config_runtime::capslock_clipboard_config(cx),
+            );
             #[cfg(target_os = "windows")]
             crate::services::tray::TrayService::install(cx);
 

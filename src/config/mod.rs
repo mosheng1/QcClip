@@ -32,6 +32,7 @@ pub struct AppConfig {
     pub sound: SoundConfig,
     pub appearance: AppearanceConfig,
     pub shortcuts: ShortcutsConfig,
+    pub capslock_clipboard: CapslockClipboardConfig,
     pub updates: UpdateConfig,
 }
 
@@ -47,7 +48,33 @@ impl Default for AppConfig {
             sound: SoundConfig::default(),
             appearance: AppearanceConfig::default(),
             shortcuts: ShortcutsConfig::default(),
+            capslock_clipboard: CapslockClipboardConfig::default(),
             updates: UpdateConfig::default(),
+        }
+    }
+}
+
+/// CapsLock 双剪贴板设置。
+///
+/// 两套槽位只在内存中保留最新值，不进历史、不落库、不参与同步与清理。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[serde(default)]
+pub struct CapslockClipboardConfig {
+    /// `CapsLock+C/X/V` 独立剪贴板 1。
+    pub primary_enabled: bool,
+    /// `CapsLock+Alt+C/X/V` 独立剪贴板 2。
+    pub alt_enabled: bool,
+    /// 每次操作后把系统剪贴板恢复为操作前的内容，避免原生 `Ctrl+V` 粘到槽位内容。
+    pub restore_system_clipboard: bool,
+}
+
+impl Default for CapslockClipboardConfig {
+    fn default() -> Self {
+        Self {
+            primary_enabled: true,
+            alt_enabled: true,
+            restore_system_clipboard: true,
         }
     }
 }
