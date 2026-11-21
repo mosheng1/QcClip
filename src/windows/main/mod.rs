@@ -473,6 +473,9 @@ impl MainWindowService {
             let main_view = main_view
                 .read_with(cx, |view, cx| view.active_list_entity(cx))
                 .unwrap_or(main_view);
+            if main_view.read_with(cx, |view, _| !view.multi_selected_item_ids.is_empty()) {
+                return;
+            }
             let into_main_input = crate::services::focus::input_window_is_foreground();
             let started = main_view.update(cx, |view, cx| {
                 view.paste_selected_item_as_plain_text(into_main_input, cx)
@@ -499,7 +502,9 @@ impl MainWindowService {
             let into_main_input = Self::is_logically_visible(cx)
                 && crate::services::focus::input_window_is_foreground();
             main_view.update(cx, |view, cx| {
-                view.paste_history_index(index, into_main_input, cx)
+                if view.multi_selected_item_ids.is_empty() {
+                    view.paste_history_index(index, into_main_input, cx)
+                }
             });
         }
     }
@@ -867,6 +872,33 @@ pub(crate) fn dispatch_session_shortcut(id: SessionShortcutId, cx: &mut App) {
     } else {
         main_view
     };
+    let has_multi_selection =
+        main_view.read_with(cx, |main, _| !main.multi_selected_item_ids.is_empty());
+    if has_multi_selection {
+        match id {
+            SessionShortcutId::ExecutePaste => {
+                if let Err(error) = window.update(cx, |_, _, cx| {
+                    main_view.update(cx, |main, cx| main.paste_multi_selected_items(cx))
+                }) {
+                    tracing::debug!(%error, "执行多选粘贴快捷键失败");
+                }
+                return;
+            }
+            SessionShortcutId::DeleteItem => {
+                if let Err(error) = window.update(cx, |_, window, cx| {
+                    main_view.update(cx, |main, cx| main.delete_multi_selected_items(window, cx))
+                }) {
+                    tracing::debug!(%error, "执行多选删除快捷键失败");
+                }
+                return;
+            }
+            SessionShortcutId::ToggleFavorite
+            | SessionShortcutId::TogglePinned
+            | SessionShortcutId::PinToScreen
+            | SessionShortcutId::SplitWords => return,
+            _ => {}
+        }
+    }
     let favorite_removal =
         main_view.read_with(cx, |main, _| main.favorite_removal_target_for_shortcut(id));
     if let Some((favorite_id, history_id)) = favorite_removal {

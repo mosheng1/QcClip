@@ -868,6 +868,15 @@ fn keyboard_hover_is_suppressed(
         .is_some_and(|keyboard_sequence| Some(keyboard_sequence) == current_mouse_move_sequence)
 }
 
+fn hover_selection_allowed(
+    multi_selection_active: bool,
+    keyboard_mouse_move_sequence: Option<u64>,
+    current_mouse_move_sequence: Option<u64>,
+) -> bool {
+    !multi_selection_active
+        && !keyboard_hover_is_suppressed(keyboard_mouse_move_sequence, current_mouse_move_sequence)
+}
+
 fn shortcut_uses_favorite_removal(
     shortcut: crate::config::SessionShortcutId,
     active_tab: TabId,
@@ -898,8 +907,8 @@ pub(crate) fn move_id_to_target(
 #[cfg(test)]
 mod tests {
     use super::{
-        TabId, hover_preview_allowed, keyboard_hover_is_suppressed, move_id_to_target,
-        shortcut_uses_favorite_removal,
+        TabId, hover_preview_allowed, hover_selection_allowed, keyboard_hover_is_suppressed,
+        move_id_to_target, shortcut_uses_favorite_removal,
     };
     use crate::config::SessionShortcutId;
 
@@ -919,6 +928,12 @@ mod tests {
         assert!(keyboard_hover_is_suppressed(Some(7), Some(7)));
         assert!(!keyboard_hover_is_suppressed(Some(7), Some(8)));
         assert!(!keyboard_hover_is_suppressed(None, None));
+    }
+
+    #[test]
+    fn mouse_hover_does_not_change_selection_during_multi_selection() {
+        assert!(!hover_selection_allowed(true, None, None));
+        assert!(hover_selection_allowed(false, None, None));
     }
 
     #[test]

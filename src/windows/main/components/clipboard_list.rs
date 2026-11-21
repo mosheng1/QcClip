@@ -164,6 +164,7 @@ struct ClipboardRowContent {
     can_reorder: bool,
     focused: bool,
     selection_number: Option<usize>,
+    multi_selection_active: bool,
     metrics: ListItemMetrics,
     list_item_style: ListItemStyle,
     display_priority: ClipboardDisplayPriority,
@@ -199,6 +200,7 @@ impl Render for ClipboardRowView {
                     content.can_reorder,
                     content.focused.then_some(content.item.history_id),
                     content.selection_number,
+                    content.multi_selection_active,
                     content.metrics,
                     content.list_item_style,
                     content.display_priority,
@@ -862,6 +864,7 @@ fn render_rows(
                                         item,
                                         can_reorder,
                                         selection_number,
+                                        multi_selection_active: !multi_selected_item_ids.is_empty(),
                                         metrics: row_metrics,
                                         list_item_style,
                                         display_priority,
@@ -1304,8 +1307,12 @@ fn render_hover_actions(
     item: &ClipboardListItem,
     active_tab: TabId,
     hover_allowed: bool,
+    multi_selection_active: bool,
     cx: &mut Context<MainWindow>,
 ) -> Option<(AnyElement, usize)> {
+    if multi_selection_active {
+        return None;
+    }
     let display = config_runtime::appearance_config(cx).item_display;
     if display.actions_visibility == ItemRegionVisibility::Hidden {
         return None;
@@ -2908,6 +2915,11 @@ fn run_row_mouse_behavior(
     window: &mut Window,
     cx: &mut Context<MainWindow>,
 ) {
+    if !this.multi_selected_item_ids.is_empty() {
+        this.select_list_item_with_modifiers(target.row_id, Default::default());
+        cx.notify();
+        return;
+    }
     if !behavior.matches_click_count(click_count) {
         return;
     }
@@ -2955,6 +2967,7 @@ fn render_row(
     can_reorder: bool,
     selected_item_id: Option<HistoryItemId>,
     selection_number: Option<usize>,
+    multi_selection_active: bool,
     metrics: ListItemMetrics,
     list_item_style: ListItemStyle,
     display_priority: ClipboardDisplayPriority,
@@ -2995,7 +3008,8 @@ fn render_row(
         hover_group.clone()
     };
     let main_window = cx.entity();
-    let hover_actions = render_hover_actions(&item, active_tab, hover_allowed, cx);
+    let hover_actions =
+        render_hover_actions(&item, active_tab, hover_allowed, multi_selection_active, cx);
     let mut row = render_item_surface(
         &item,
         selected,

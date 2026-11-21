@@ -121,7 +121,8 @@ impl MainWindow {
     }
 
     pub(crate) fn can_follow_mouse_hover(&mut self) -> bool {
-        if keyboard_hover_is_suppressed(
+        if !hover_selection_allowed(
+            !self.multi_selected_item_ids.is_empty(),
             self.keyboard_selection_mouse_move_sequence,
             crate::platform::input::pointer_snapshot().map(|snapshot| snapshot.mouse_move_sequence),
         ) {
