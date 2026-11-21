@@ -15,27 +15,27 @@ mod windows_impl {
     pub(crate) fn set_enabled(enabled: bool, run_as_administrator: bool) -> io::Result<()> {
         let current_user = RegKey::predef(HKEY_CURRENT_USER);
         let (run_key, _) = current_user.create_subkey(RUN_KEY_PATH)?;
-        if enabled && run_as_administrator {
-            create_elevated_task()?;
-            delete_run_value(&run_key)?;
-            Ok(())
-        } else if enabled {
-            delete_elevated_task()?;
-            let executable = env::current_exe()?;
-            run_key.set_value(VALUE_NAME, &startup_command(&executable))
+        if enabled {
+            create_task(run_as_administrator)?;
+            delete_run_value(&run_key)
         } else {
-            delete_elevated_task()?;
+            delete_task()?;
             delete_run_value(&run_key)?;
             Ok(())
         }
     }
 
-    fn create_elevated_task() -> io::Result<()> {
+    fn create_task(run_as_administrator: bool) -> io::Result<()> {
         let executable = env::current_exe()?;
         let command = startup_command(&executable);
+        let run_level = if run_as_administrator {
+            "HIGHEST"
+        } else {
+            "LIMITED"
+        };
         let status = Command::new("schtasks.exe")
             .args([
-                "/create", "/sc", "onlogon", "/tn", TASK_NAME, "/tr", &command, "/rl", "highest",
+                "/create", "/sc", "onlogon", "/tn", TASK_NAME, "/tr", &command, "/rl", run_level,
                 "/it", "/f",
             ])
             .creation_flags(CREATE_NO_WINDOW)
@@ -44,13 +44,13 @@ mod windows_impl {
             Ok(())
         } else {
             Err(io::Error::other(format!(
-                "创建管理员登录任务失败，退出码：{}",
+                "创建登录任务失败，退出码：{}",
                 status.code().unwrap_or(-1)
             )))
         }
     }
 
-    fn delete_elevated_task() -> io::Result<()> {
+    fn delete_task() -> io::Result<()> {
         let query = Command::new("schtasks.exe")
             .args(["/query", "/tn", TASK_NAME])
             .creation_flags(CREATE_NO_WINDOW)
@@ -66,7 +66,7 @@ mod windows_impl {
             Ok(())
         } else {
             Err(io::Error::other(format!(
-                "删除管理员登录任务失败，退出码：{}",
+                "删除登录任务失败，退出码：{}",
                 status.code().unwrap_or(-1)
             )))
         }
