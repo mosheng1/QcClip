@@ -1,5 +1,6 @@
 pub(crate) mod application_filter;
 pub mod application_icon;
+pub(crate) mod capslock_clipboard;
 pub mod capture;
 pub mod custom_text;
 pub mod data_management;

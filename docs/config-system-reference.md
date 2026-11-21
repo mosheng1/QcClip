@@ -48,11 +48,14 @@
 | `sound` | 粘贴、复制和便捷粘贴滚动的音效与音量 |
 | `appearance` | 明暗模式、主题 ID、界面缩放、窗口材质、背景图片、透明度、列表样式和动画 |
 | `shortcuts` | 全局快捷键、快捷粘贴 1～9 和窗口操作快捷键 |
+| `capslockClipboard` | CapsLock 双剪贴板开关（`primaryEnabled`、`altEnabled`）；`restoreSystemClipboard` 仅保留旧配置兼容，始终按开启处理 |
 | `updates` | 检查频率、自动下载（`autoDownload`，默认开启）、更新通知和代理 |
 
 默认值由各配置类型的 `Default` 提供，加载与更新时按相应模型规则规范化。设置页不维护另一套默认值。
 
 `clipboard.captureFormats` 包含 `all` 开关和原生格式名称数组 `names`。默认只读取常规格式；名单支持增删和恢复默认，空名单表示不捕获新内容。全量模式保留名单，关闭后继续使用。保存成功后更新后台快照，下一次捕获生效，读取系统剪贴板时不持有配置锁。读取与延迟渲染处理见 [Windows 剪贴板实现](../src/platform/clipboard.rs)。
+
+`capslockClipboard.primaryEnabled` 与 `capslockClipboard.altEnabled`（均默认开启）分别控制 `CapsLock+C/X/V` 和 `CapsLock+Alt+C/X/V` 两套只在内存中保留最新值的槽位；两个开关位于“设置 → 常规”的“管理员启动”下方，并随“重置本页设置”恢复默认。内容不进历史、不落库、不参与同步与清理，退出即清空。每次操作后都会把系统剪贴板恢复为操作前的内容（操作前为空则显式清空，避免槽位内容残留），设置界面不提供开关；`capslockClipboard.restoreSystemClipboard` 仅为旧配置兼容而保留，读取到 `false` 也不会关闭恢复。恢复只覆盖文本、HTML、图片、文件等可还原格式，应用私有格式会丢失，属于尽力恢复；操作前内容超过 32 MB 时跳过恢复，只保证不污染默认历史。默认开启后 CapsLock 由钩子接管：轻按（300 毫秒内）仍切换大小写，长按后松手不切换；非管理员运行时钩子收不到提权窗口的按键，在这些窗口里组合键无效。实现见 [services/capslock_clipboard.rs](../src/services/capslock_clipboard.rs) 与 [platform/capslock_keys.rs](../src/platform/capslock_keys.rs)。
 
 主窗口列表支持 `single`（单栏）、`side-by-side`（左右双栏）和 `stacked`（上下双栏），可在“设置 → 主窗口”或标题栏更多菜单切换。普通窗口使用 `clipboard.listLayout`，默认单栏；贴边窗口使用 `clipboard.edgeListLayouts`，按左右贴边、上下贴边分为两组，默认分别为上下双栏、左右双栏。三组布局独立保存，切换定位后恢复各自偏好，均可选择单栏或任一种双栏方向。双栏同时显示剪贴板与收藏，共用搜索、类型筛选与标签筛选，分别保留滚动和选择状态；鼠标进入列表或使用切换列表快捷键选择当前操作列表。两栏不显示独立标题，当前操作列表以主题色顶部边框标记。上下贴边保留横向卡片列表，左右贴边使用纵向列表。普通窗口的左右与上下双栏分别记忆尺寸，默认客户区大小为 860×560 和 420×760；贴边窗口沿屏幕边缘铺满，厚度仍按每条边独立记忆，最大不超过屏幕对应方向的一半。
 

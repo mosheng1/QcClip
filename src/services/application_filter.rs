@@ -1,6 +1,9 @@
 use std::{
     path::Path,
-    sync::{Arc, OnceLock},
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use gpui::{App, AppContext as _, BorrowAppContext as _, Global, RenderImage};
@@ -23,6 +26,15 @@ impl ApplicationInfo {
 }
 
 static FOREGROUND_SENDER: OnceLock<async_channel::Sender<isize>> = OnceLock::new();
+/// 当前前台应用是否命中“指定应用”过滤。
+///
+/// CapsLock 双剪贴板工作线程不是 GPUI 线程，只能读取这个原子标记；
+/// 命中期间忽略所有组合键命令，与“禁用内容监听/全局快捷键”的设置语义一致。
+static FOREGROUND_FILTER_MATCHED: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn foreground_filter_matched() -> bool {
+    FOREGROUND_FILTER_MATCHED.load(Ordering::Relaxed)
+}
 
 pub(crate) struct ApplicationFilterService {
     #[cfg(target_os = "windows")]
@@ -112,6 +124,7 @@ impl ApplicationFilterService {
                     .iter()
                     .any(|filter| same_application(application, filter))
             });
+        FOREGROUND_FILTER_MATCHED.store(matched, Ordering::Relaxed);
         let Some(_) = cx.try_global::<Self>() else {
             return;
         };

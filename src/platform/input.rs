@@ -596,8 +596,38 @@ mod windows_input {
         simulate_shortcut(raw_input::Key::ControlLeft, raw_input::Key::Insert);
     }
 
+    pub(crate) fn simulate_ctrl_x() {
+        simulate_shortcut(raw_input::Key::ControlLeft, raw_input::Key::KeyX);
+    }
+
+    // CapsLock+Alt 组合键由低级钩子吞掉物理 Alt 的按下/抬起，模拟结束后不能再恢复
+    // Alt，否则前台程序会把重新按下解释成菜单激活。
+    pub(crate) fn simulate_ctrl_v_without_alt() {
+        simulate_shortcut_without_alt_restore(raw_input::Key::ControlLeft, raw_input::Key::KeyV);
+    }
+
+    pub(crate) fn simulate_shift_insert_without_alt() {
+        simulate_shortcut_without_alt_restore(raw_input::Key::ShiftLeft, raw_input::Key::Insert);
+    }
+
+    pub(crate) fn simulate_ctrl_insert_without_alt() {
+        simulate_shortcut_without_alt_restore(raw_input::Key::ControlLeft, raw_input::Key::Insert);
+    }
+
+    pub(crate) fn simulate_ctrl_x_without_alt() {
+        simulate_shortcut_without_alt_restore(raw_input::Key::ControlLeft, raw_input::Key::KeyX);
+    }
+
     /// 模拟“单个修饰键 + 主按键”组合，`modifier` 只能是 Ctrl 或 Shift。
     fn simulate_shortcut(modifier: raw_input::Key, key: raw_input::Key) {
+        simulate_shortcut_inner(modifier, key, true);
+    }
+
+    fn simulate_shortcut_without_alt_restore(modifier: raw_input::Key, key: raw_input::Key) {
+        simulate_shortcut_inner(modifier, key, false);
+    }
+
+    fn simulate_shortcut_inner(modifier: raw_input::Key, key: raw_input::Key, restore_alt: bool) {
         let _shortcut_guard = match SHORTCUT_SIMULATION_LOCK.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
@@ -620,7 +650,7 @@ mod windows_input {
 
         // 不重新按下触发键：触发键若先于 Ctrl 等修饰键恢复，会被前台程序
         // 当作普通字符；若与修饰键同时恢复，又可能再次触发全局快捷键。
-        modifiers.restore_physical();
+        modifiers.restore_physical(restore_alt);
     }
 
     #[derive(Clone, Copy)]
@@ -689,13 +719,21 @@ mod windows_input {
             }
         }
 
-        fn restore_physical(&self) {
+        fn restore_physical(&self, restore_alt: bool) {
             // 临时用于粘贴/复制组合键的左 Ctrl 或左 Shift 不属于物理状态，只恢复粘贴前已按下的修饰键。
             let physical_state = match physical_key_state().lock() {
                 Ok(state) => *state,
                 Err(poisoned) => *poisoned.into_inner(),
             };
             for modifier in self.keys {
+                if !restore_alt
+                    && matches!(
+                        modifier.key,
+                        raw_input::Key::AltLeft | raw_input::Key::AltRight
+                    )
+                {
+                    continue;
+                }
                 if should_restore_modifier(
                     modifier.was_pressed,
                     modifier.release_generation,
@@ -1011,6 +1049,8 @@ pub(crate) use windows_input::{
 #[cfg(target_os = "windows")]
 pub(crate) use windows_input::{
     clear_trigger_key, modifier_is_physically_pressed, set_pointer_change_notifier,
-    set_trigger_key_code, simulate_ctrl_insert, simulate_ctrl_v, simulate_shift_insert,
+    set_trigger_key_code, simulate_ctrl_insert, simulate_ctrl_insert_without_alt, simulate_ctrl_v,
+    simulate_ctrl_v_without_alt, simulate_ctrl_x, simulate_ctrl_x_without_alt,
+    simulate_shift_insert, simulate_shift_insert_without_alt,
     trigger_shortcut_is_physically_pressed,
 };

@@ -22,12 +22,14 @@ src/
 ├── window_material.rs              # 窗口材质与背景
 ├── domain/                         # 捕获、剪贴板和 HTML 数据模型
 ├── platform/                       # 剪贴板、窗口、输入和系统能力
+│   └── capslock_keys.rs            # CapsLock 组合键钩子与状态机
 ├── services/
 │   ├── database/                   # SQLite 连接、结构、兼容校验和仓储
 │   ├── storage/                    # 原始字节文件写入、读取和校验
 │   ├── capture/                    # 捕获哈希、预览和持久化编排
 │   ├── sync/                       # 设备身份、配对、LAN 与 WebDAV 事件同步
 │   ├── paste.rs                    # 剪贴板恢复、复制和粘贴
+│   ├── capslock_clipboard.rs       # CapsLock 双剪贴板槽位、抑制与恢复
 │   ├── custom_text.rs              # 自定义文本和原始内容恢复
 │   ├── recovery.rs                 # 启动恢复与未完成数据处理
 │   ├── data_management.rs          # 数据统计、导入导出、清理和目录迁移
