@@ -147,10 +147,13 @@ impl ConfigRuntime {
         } else {
             crate::windows::notification::NotificationService::dismiss_disabled(cx);
         }
-        if previous.general.launch_at_login != config.general.launch_at_login {
-            if let Err(error) =
-                crate::platform::auto_start::set_enabled(config.general.launch_at_login)
-            {
+        if previous.general.launch_at_login != config.general.launch_at_login
+            || previous.general.run_as_administrator != config.general.run_as_administrator
+        {
+            if let Err(error) = crate::platform::auto_start::set_enabled(
+                config.general.launch_at_login,
+                config.general.run_as_administrator,
+            ) {
                 tracing::error!("同步开机自启设置失败：{error}");
             }
         }
@@ -550,7 +553,27 @@ pub(crate) fn set_run_as_administrator(enabled: bool, cx: &mut App) -> Result<bo
     }
 
     next.general.run_as_administrator = enabled;
-    persist_config(&path, &next)?;
+    let should_sync_auto_start = next.general.launch_at_login
+        && (!enabled || crate::platform::elevation::is_elevated().unwrap_or(false));
+    let previous_auto_start_admin = current;
+    if should_sync_auto_start {
+        crate::platform::auto_start::set_enabled(next.general.launch_at_login, enabled)
+            .map_err(|source| ConfigError::System { source })?;
+    }
+    if let Err(error) = persist_config(&path, &next) {
+        if should_sync_auto_start
+            && let Err(restore_error) = crate::platform::auto_start::set_enabled(
+                next.general.launch_at_login,
+                previous_auto_start_admin,
+            )
+        {
+            return Err(ConfigError::AutoStartRollback {
+                config: error.to_string(),
+                restore: restore_error.to_string(),
+            });
+        }
+        return Err(error);
+    }
     cx.update_global::<ConfigRuntime, _>(|runtime, _| runtime.config = next);
     Ok(true)
 }
@@ -645,16 +668,24 @@ pub(crate) fn reset_general_config(cx: &mut App) -> Result<bool, ConfigError> {
         return Ok(false);
     }
 
-    if current.launch_at_login != default.launch_at_login {
-        crate::platform::auto_start::set_enabled(default.launch_at_login)
-            .map_err(|source| ConfigError::System { source })?;
+    if current.launch_at_login != default.launch_at_login
+        || current.run_as_administrator != default.run_as_administrator
+    {
+        crate::platform::auto_start::set_enabled(
+            default.launch_at_login,
+            default.run_as_administrator,
+        )
+        .map_err(|source| ConfigError::System { source })?;
     }
     if current.inactive_window_scroll_compatibility {
         if let Err(error) = crate::platform::input::set_inactive_window_scroll_compatibility(false)
         {
-            if current.launch_at_login != default.launch_at_login
-                && let Err(restore_error) =
-                    crate::platform::auto_start::set_enabled(current.launch_at_login)
+            if (current.launch_at_login != default.launch_at_login
+                || current.run_as_administrator != default.run_as_administrator)
+                && let Err(restore_error) = crate::platform::auto_start::set_enabled(
+                    current.launch_at_login,
+                    current.run_as_administrator,
+                )
             {
                 return Err(ConfigError::AutoStartRollback {
                     config: error,
@@ -668,10 +699,13 @@ pub(crate) fn reset_general_config(cx: &mut App) -> Result<bool, ConfigError> {
     let hide_tray_icon = default.hide_tray_icon;
     next.general = default;
     if let Err(error) = persist_config(&path, &next) {
-        if current.launch_at_login != next.general.launch_at_login {
-            if let Err(restore_error) =
-                crate::platform::auto_start::set_enabled(current.launch_at_login)
-            {
+        if current.launch_at_login != next.general.launch_at_login
+            || current.run_as_administrator != next.general.run_as_administrator
+        {
+            if let Err(restore_error) = crate::platform::auto_start::set_enabled(
+                current.launch_at_login,
+                current.run_as_administrator,
+            ) {
                 return Err(ConfigError::AutoStartRollback {
                     config: error.to_string(),
                     restore: restore_error.to_string(),
@@ -727,8 +761,13 @@ fn update_with_auto_start(
 ) -> Result<bool, ConfigError> {
     let previous_enabled = launch_at_login(cx);
     if previous_enabled != enabled {
-        crate::platform::auto_start::set_enabled(enabled)
-            .map_err(|source| ConfigError::System { source })?;
+        crate::platform::auto_start::set_enabled(
+            enabled,
+            cx.read_global::<ConfigRuntime, _>(|runtime, _| {
+                runtime.config.general.run_as_administrator
+            }),
+        )
+        .map_err(|source| ConfigError::System { source })?;
     }
 
     let (current, path, mut next) = cx.read_global::<ConfigRuntime, _>(|runtime, _| {
@@ -744,7 +783,12 @@ fn update_with_auto_start(
     }
     if let Err(error) = persist_config(&path, &next) {
         if previous_enabled != enabled {
-            if let Err(restore_error) = crate::platform::auto_start::set_enabled(previous_enabled) {
+            if let Err(restore_error) = crate::platform::auto_start::set_enabled(
+                previous_enabled,
+                cx.read_global::<ConfigRuntime, _>(|runtime, _| {
+                    runtime.config.general.run_as_administrator
+                }),
+            ) {
                 return Err(ConfigError::AutoStartRollback {
                     config: error.to_string(),
                     restore: restore_error.to_string(),

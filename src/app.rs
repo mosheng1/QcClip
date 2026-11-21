@@ -162,10 +162,11 @@ pub fn run() {
                     Err(error) => tracing::error!("读取管理员权限状态失败：{error}"),
                 }
             }
-            if crate::config_runtime::launch_at_login(cx) {
-                if let Err(error) = crate::platform::auto_start::set_enabled(true) {
-                    tracing::error!("同步开机自启设置失败：{error}");
-                }
+            if let Err(error) = crate::platform::auto_start::set_enabled(
+                crate::config_runtime::launch_at_login(cx),
+                crate::config_runtime::run_as_administrator(cx),
+            ) {
+                tracing::error!("同步开机自启设置失败：{error}");
             }
             DataManagementService::install(
                 _database.clone(),
