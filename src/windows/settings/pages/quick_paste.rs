@@ -12,8 +12,9 @@ use super::super::{
     },
 };
 use crate::{
-    config::QuickPasteConfig,
+    config::{QuickPasteConfig, QuickPasteMode},
     config_runtime, i18n,
+    ui::{SingleSelectOption, single_select},
     windows::menu::{DropdownItem, DropdownItemId},
 };
 
@@ -25,6 +26,10 @@ impl SettingsWindowView {
         let theme = cx.theme().colors;
         let translator = i18n::translator(cx);
         let config = config_runtime::quick_paste_config(cx);
+        let single_select_animation = config_runtime::animation_enabled(
+            cx,
+            crate::config::AnimationKind::SingleSelectIndicator,
+        );
         let view = cx.entity().clone();
         let reset_error = translator.translate("settings.quick_paste.save_error");
         let reset_view = view.clone();
@@ -59,6 +64,33 @@ impl SettingsWindowView {
             })
             .collect::<Vec<_>>();
         let save_error = translator.translate("settings.quick_paste.save_error");
+        let mode_save_error = save_error.clone();
+        let mode_selector = single_select(
+            "settings-quick-paste-mode-select",
+            QuickPasteMode::ALL.into_iter().map(|mode| {
+                SingleSelectOption::new(
+                    mode,
+                    translator.translate(match mode {
+                        QuickPasteMode::ReleaseToPaste => "settings.quick_paste.mode.release",
+                        QuickPasteMode::HoldToScroll => "settings.quick_paste.mode.hold",
+                    }),
+                )
+            }),
+            config.mode,
+            {
+                let view = view.clone();
+                move |mode, cx| {
+                    persist_quick_paste_toggle_change(
+                        view.clone(),
+                        move |config| config.mode = mode,
+                        mode_save_error.clone(),
+                        cx,
+                    );
+                }
+            },
+            cx.theme().colors,
+            single_select_animation,
+        );
         let visible_items_save_error = save_error.clone();
         let selector = settings_dropdown(
             "settings-quick-paste-visible-items",
@@ -188,6 +220,25 @@ impl SettingsWindowView {
                 translator.translate("settings.quick_paste.description"),
                 reset_button,
             ))
+            .child(
+                self.setting_row(
+                    theme,
+                    translator.translate("settings.quick_paste.mode"),
+                    Some(
+                        translator
+                            .translate(match config.mode {
+                                QuickPasteMode::ReleaseToPaste => {
+                                    "settings.quick_paste.mode.release_description"
+                                }
+                                QuickPasteMode::HoldToScroll => {
+                                    "settings.quick_paste.mode.hold_description"
+                                }
+                            })
+                            .into(),
+                    ),
+                    mode_selector,
+                ),
+            )
             .child(
                 self.setting_row(
                     theme,

@@ -932,11 +932,24 @@ pub struct HistoryConfig {
 #[serde(rename_all = "camelCase")]
 #[serde(default)]
 pub struct QuickPasteConfig {
+    pub mode: QuickPasteMode,
     pub visible_items: u8,
     pub window_width: u16,
     pub select_with_up_down: bool,
     pub switch_list_with_left_right: bool,
     pub keep_last_position: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum QuickPasteMode {
+    ReleaseToPaste,
+    #[default]
+    HoldToScroll,
+}
+
+impl QuickPasteMode {
+    pub const ALL: [Self; 2] = [Self::ReleaseToPaste, Self::HoldToScroll];
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1112,6 +1125,7 @@ impl QuickPasteConfig {
                 .unwrap_or_default()
         };
         Self {
+            mode: self.mode,
             visible_items,
             window_width,
             select_with_up_down: self.select_with_up_down,
@@ -1134,6 +1148,7 @@ impl Default for HistoryConfig {
 impl Default for QuickPasteConfig {
     fn default() -> Self {
         Self {
+            mode: QuickPasteMode::default(),
             visible_items: 7,
             window_width: 300,
             select_with_up_down: true,

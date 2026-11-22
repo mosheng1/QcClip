@@ -830,6 +830,7 @@ fn read_sound(object: &Map<String, Value>, warnings: &mut Vec<String>) -> SoundC
 fn read_quick_paste(object: &Map<String, Value>, warnings: &mut Vec<String>) -> QuickPasteConfig {
     let default = QuickPasteConfig::default();
     QuickPasteConfig {
+        mode: read_field(object, "mode", "quickPaste.mode", default.mode, warnings),
         visible_items: read_field(
             object,
             "visibleItems",
@@ -1294,7 +1295,8 @@ mod tests {
     use crate::config::{
         AppearanceMode, CardItemGap, ClipboardDisplayPriority, ClipboardMouseBehavior,
         ClipboardWindowPosition, InterfaceLanguage, ListItemHeight, ListItemStyle, PasteKeyMode,
-        ShortcutBinding, SoundPreset, TitlebarPosition, TrayClickAction, WindowMaterial,
+        QuickPasteMode, ShortcutBinding, SoundPreset, TitlebarPosition, TrayClickAction,
+        WindowMaterial,
     };
 
     #[test]
@@ -1673,6 +1675,25 @@ mod tests {
 
             assert!(loaded.warnings.is_empty(), "粘贴方式不应产生警告");
             assert_eq!(loaded.config.general.paste_key_mode, mode);
+        }
+    }
+
+    #[test]
+    fn quick_paste_mode_defaults_and_loads() {
+        assert_eq!(
+            from_str(r#"{}"#)
+                .expect("空配置应当可以加载")
+                .config
+                .quick_paste
+                .mode,
+            QuickPasteMode::HoldToScroll
+        );
+        for mode in QuickPasteMode::ALL {
+            let json = serde_json::json!({ "quickPaste": { "mode": mode } });
+            let loaded = from_str(&json.to_string()).expect("便捷粘贴模式应当可以加载");
+
+            assert!(loaded.warnings.is_empty(), "便捷粘贴模式不应产生警告");
+            assert_eq!(loaded.config.quick_paste.mode, mode);
         }
     }
 

@@ -1012,5 +1012,5 @@ pub(crate) use windows_input::{
 pub(crate) use windows_input::{
     clear_trigger_key, modifier_is_physically_pressed, set_pointer_change_notifier,
     set_trigger_key_code, simulate_ctrl_insert, simulate_ctrl_v, simulate_shift_insert,
-    trigger_shortcut_is_physically_pressed,
+    trigger_key_is_physically_pressed, trigger_shortcut_is_physically_pressed,
 };

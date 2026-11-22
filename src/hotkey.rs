@@ -21,6 +21,7 @@ const PLAIN_TEXT_PASTE_INITIAL_REPEAT_DELAY: Duration = Duration::from_millis(30
 const PLAIN_TEXT_PASTE_REPEAT_INTERVAL: Duration = Duration::from_millis(120);
 const QUICK_PASTE_NAVIGATION_INITIAL_REPEAT_DELAY: Duration = Duration::from_millis(250);
 const QUICK_PASTE_NAVIGATION_REPEAT_INTERVAL: Duration = Duration::from_millis(50);
+const QUICK_PASTE_HOLD_SCROLL_INITIAL_DELAY: Duration = Duration::from_millis(350);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RegistrationStatus {
@@ -53,6 +54,7 @@ pub(crate) struct HotkeyRuntime {
     pressed_session_hotkeys: HashMap<u32, (u64, u64)>,
     pressed_plain_text_paste: Option<(u32, u64, u64)>,
     pressed_quick_paste: Option<(u32, u64, u64)>,
+    pressed_quick_paste_trigger: Option<QuickPasteTriggerPress>,
     pressed_quick_paste_navigation: HashMap<u32, (u64, u64)>,
     suspended_main_status: Option<RegistrationStatus>,
     suspended_settings_status: Option<RegistrationStatus>,
@@ -133,6 +135,15 @@ struct QuickPasteNavigationRegistration {
     registered_by_quick_paste: bool,
 }
 
+#[derive(Clone, Copy)]
+struct QuickPasteTriggerPress {
+    id: u32,
+    hotkey_generation: u64,
+    press_generation: u64,
+    initial_press: bool,
+    navigated: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ActiveHotkey {
     command: HotkeyCommand,
@@ -210,6 +221,7 @@ impl HotkeyRuntime {
             pressed_session_hotkeys: HashMap::new(),
             pressed_plain_text_paste: None,
             pressed_quick_paste: None,
+            pressed_quick_paste_trigger: None,
             pressed_quick_paste_navigation: HashMap::new(),
             suspended_main_status: None,
             suspended_settings_status: None,
@@ -365,18 +377,42 @@ impl HotkeyRuntime {
                             if is_hotkey_event_active(event, cx) =>
                         {
                             set_quick_paste_trigger_key(event, cx);
-                            let started = cx.update_global::<HotkeyRuntime, _>(|runtime, _| {
-                                runtime.mark_quick_paste_pressed(event)
-                            });
+                            let hold_to_scroll = crate::config_runtime::quick_paste_config(cx).mode
+                                == crate::config::QuickPasteMode::HoldToScroll;
+                            let (started, trigger_press) =
+                                cx.update_global::<HotkeyRuntime, _>(|runtime, _| {
+                                    let started = runtime.mark_quick_paste_pressed(event);
+                                    let trigger_press = hold_to_scroll
+                                        .then(|| {
+                                            runtime.begin_quick_paste_trigger_press(event, started)
+                                        })
+                                        .flatten();
+                                    (started, trigger_press)
+                                });
                             if started {
                                 crate::windows::quick_paste::QuickPasteWindowService::show(cx);
+                            }
+                            if let Some(press_generation) = trigger_press {
+                                start_quick_paste_hold_scroll(event, press_generation, cx);
                             }
                         }
                         (HotkeyCommand::QuickPaste, HotKeyState::Released)
                             if is_hotkey_event_active(event, cx) =>
                         {
+                            let hold_to_scroll = crate::config_runtime::quick_paste_config(cx).mode
+                                == crate::config::QuickPasteMode::HoldToScroll;
+                            let tap_to_navigate =
+                                cx.update_global::<HotkeyRuntime, _>(|runtime, _| {
+                                    runtime.mark_quick_paste_trigger_released(event)
+                                });
+                            if tap_to_navigate {
+                                crate::windows::quick_paste::QuickPasteWindowService::navigate(
+                                    QuickPasteNavigation::Down,
+                                    cx,
+                                );
+                            }
                             #[cfg(target_os = "windows")]
-                            spawn_quick_paste_release(event, cx);
+                            spawn_quick_paste_release(event, hold_to_scroll, cx);
                             #[cfg(not(target_os = "windows"))]
                             {
                                 let was_pressed =
@@ -1503,6 +1539,60 @@ impl HotkeyRuntime {
         true
     }
 
+    fn begin_quick_paste_trigger_press(
+        &mut self,
+        event: HotkeyEvent,
+        initial_press: bool,
+    ) -> Option<u64> {
+        if !self.pressed_quick_paste.is_some_and(|(id, generation, _)| {
+            id == event.id && generation == event.active.generation
+        }) || self.pressed_quick_paste_trigger.is_some_and(|press| {
+            press.id == event.id && press.hotkey_generation == event.active.generation
+        }) {
+            return None;
+        }
+        self.next_press_generation = self.next_press_generation.wrapping_add(1);
+        let press_generation = self.next_press_generation;
+        self.pressed_quick_paste_trigger = Some(QuickPasteTriggerPress {
+            id: event.id,
+            hotkey_generation: event.active.generation,
+            press_generation,
+            initial_press,
+            navigated: false,
+        });
+        Some(press_generation)
+    }
+
+    fn mark_quick_paste_trigger_released(&mut self, event: HotkeyEvent) -> bool {
+        if !self.pressed_quick_paste_trigger.is_some_and(|press| {
+            press.id == event.id && press.hotkey_generation == event.active.generation
+        }) {
+            return false;
+        }
+        let Some(press) = self.pressed_quick_paste_trigger.take() else {
+            return false;
+        };
+        !press.initial_press && !press.navigated
+    }
+
+    fn mark_quick_paste_trigger_navigated(
+        &mut self,
+        event: HotkeyEvent,
+        press_generation: u64,
+    ) -> bool {
+        let Some(press) = self.pressed_quick_paste_trigger.as_mut() else {
+            return false;
+        };
+        if press.id != event.id
+            || press.hotkey_generation != event.active.generation
+            || press.press_generation != press_generation
+        {
+            return false;
+        }
+        press.navigated = true;
+        true
+    }
+
     fn mark_quick_paste_released(&mut self, event: HotkeyEvent) -> bool {
         if self
             .pressed_quick_paste
@@ -1511,6 +1601,7 @@ impl HotkeyRuntime {
             })
         {
             self.pressed_quick_paste = None;
+            self.pressed_quick_paste_trigger = None;
             true
         } else {
             false
@@ -1678,7 +1769,46 @@ fn quick_paste_index_is_physically_pressed(event: HotkeyEvent, cx: &App) -> bool
 }
 
 #[cfg(target_os = "windows")]
-fn spawn_quick_paste_release(event: HotkeyEvent, cx: &mut App) {
+fn quick_paste_chord_has_pressed_key(event: HotkeyEvent, cx: &App) -> bool {
+    let modifiers = cx.read_global::<HotkeyRuntime, _>(|runtime, _| {
+        runtime
+            .quick_paste_hotkey
+            .filter(|hotkey| hotkey.id() == event.id)
+            .map(|hotkey| hotkey.mods)
+    });
+    if crate::platform::input::trigger_key_is_physically_pressed() {
+        return true;
+    }
+    modifiers.is_some_and(|modifiers| {
+        (modifiers.contains(HotkeyModifiers::CONTROL)
+            && (crate::platform::input::modifier_is_physically_pressed(
+                raw_input::Key::ControlLeft,
+            ) || crate::platform::input::modifier_is_physically_pressed(
+                raw_input::Key::ControlRight,
+            )))
+            || (modifiers.contains(HotkeyModifiers::ALT)
+                && (crate::platform::input::modifier_is_physically_pressed(
+                    raw_input::Key::AltLeft,
+                ) || crate::platform::input::modifier_is_physically_pressed(
+                    raw_input::Key::AltRight,
+                )))
+            || (modifiers.contains(HotkeyModifiers::SHIFT)
+                && (crate::platform::input::modifier_is_physically_pressed(
+                    raw_input::Key::ShiftLeft,
+                ) || crate::platform::input::modifier_is_physically_pressed(
+                    raw_input::Key::ShiftRight,
+                )))
+            || (modifiers.contains(HotkeyModifiers::SUPER)
+                && (crate::platform::input::modifier_is_physically_pressed(
+                    raw_input::Key::MetaLeft,
+                ) || crate::platform::input::modifier_is_physically_pressed(
+                    raw_input::Key::MetaRight,
+                )))
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn spawn_quick_paste_release(event: HotkeyEvent, hold_to_scroll: bool, cx: &mut App) {
     cx.spawn(async move |cx| {
         loop {
             cx.background_executor()
@@ -1688,7 +1818,11 @@ fn spawn_quick_paste_release(event: HotkeyEvent, cx: &mut App) {
                 if !is_hotkey_event_active(event, cx) {
                     return true;
                 }
-                !quick_paste_is_physically_pressed(event, cx)
+                if hold_to_scroll {
+                    !quick_paste_chord_has_pressed_key(event, cx)
+                } else {
+                    !quick_paste_is_physically_pressed(event, cx)
+                }
             });
             if released {
                 break;
@@ -2014,6 +2148,39 @@ fn spawn_quick_paste_navigation_repeat(
         }
     })
     .detach();
+}
+
+fn start_quick_paste_hold_scroll(event: HotkeyEvent, press_generation: u64, cx: &mut App) {
+    #[cfg(target_os = "windows")]
+    cx.spawn(async move |cx| {
+        cx.background_executor()
+            .timer(QUICK_PASTE_HOLD_SCROLL_INITIAL_DELAY)
+            .await;
+        loop {
+            let keep_repeating = cx.update(|cx| {
+                let trigger_pressed = cx.update_global::<HotkeyRuntime, _>(|runtime, _| {
+                    runtime.mark_quick_paste_trigger_navigated(event, press_generation)
+                });
+                if !is_hotkey_event_active(event, cx) || !trigger_pressed {
+                    return false;
+                }
+                crate::windows::quick_paste::QuickPasteWindowService::navigate(
+                    QuickPasteNavigation::Down,
+                    cx,
+                );
+                true
+            });
+            if !keep_repeating {
+                break;
+            }
+            cx.background_executor()
+                .timer(QUICK_PASTE_NAVIGATION_REPEAT_INTERVAL)
+                .await;
+        }
+    })
+    .detach();
+    #[cfg(not(target_os = "windows"))]
+    let _ = event;
 }
 
 pub(crate) fn activate_quick_paste_navigation(config: QuickPasteConfig, cx: &mut App) {
@@ -2741,6 +2908,7 @@ mod tests {
             pressed_session_hotkeys: HashMap::new(),
             pressed_plain_text_paste: None,
             pressed_quick_paste: None,
+            pressed_quick_paste_trigger: None,
             pressed_quick_paste_navigation: HashMap::new(),
             suspended_main_status: None,
             suspended_settings_status: None,
@@ -2779,6 +2947,43 @@ mod tests {
             platform: false,
             key: key.to_owned(),
         }
+    }
+
+    #[test]
+    fn quick_paste_hold_mode_rearms_after_trigger_release() {
+        let mut runtime = runtime_for_test(None);
+        let active = ActiveHotkey {
+            command: HotkeyCommand::QuickPaste,
+            generation: 1,
+        };
+        let pressed = HotkeyEvent {
+            id: 1,
+            active,
+            state: HotKeyState::Pressed,
+        };
+        let released = HotkeyEvent {
+            state: HotKeyState::Released,
+            ..pressed
+        };
+
+        assert!(runtime.mark_quick_paste_pressed(pressed));
+        let first_press = runtime
+            .begin_quick_paste_trigger_press(pressed, true)
+            .expect("首次按下应启动长按计时");
+        assert!(!runtime.mark_quick_paste_trigger_released(released));
+
+        assert!(!runtime.mark_quick_paste_pressed(pressed));
+        let second_press = runtime
+            .begin_quick_paste_trigger_press(pressed, false)
+            .expect("窗口会话中再次按下应重新启动长按计时");
+        assert_ne!(first_press, second_press);
+        assert!(runtime.mark_quick_paste_trigger_released(released));
+
+        let held_press = runtime
+            .begin_quick_paste_trigger_press(pressed, false)
+            .expect("下一次按下仍应可用");
+        assert!(runtime.mark_quick_paste_trigger_navigated(pressed, held_press));
+        assert!(!runtime.mark_quick_paste_trigger_released(released));
     }
 
     #[test]
