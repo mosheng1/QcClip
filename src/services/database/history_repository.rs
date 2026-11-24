@@ -10,7 +10,10 @@ use thiserror::Error;
 use crate::config::HistoryConfig;
 use crate::domain::clipboard::{ClipboardItemId, ContentKind, FormatPreview, HistoryItemId};
 use crate::platform::image_temp_file::remove_openable_image_files;
-use crate::services::storage::{RawBlob, RawBlobStore};
+use crate::services::{
+    image_preview::parse_file_list,
+    storage::{RawBlob, RawBlobStore},
+};
 
 use super::{
     Database,
@@ -145,6 +148,94 @@ impl HistoryRepository {
         policy: &HistoryConfig,
     ) -> Result<ListOrderSnapshot, HistoryQueryError> {
         self.query_order(query, Some(policy), true)
+    }
+
+    pub fn invalid_file_history_ids(&self) -> Result<Vec<HistoryItemId>, HistoryQueryError> {
+        let connection = self.database.connect_read()?;
+        let mut statement = connection.prepare(
+            "SELECT h.id, h.item_id
+             FROM clipboard_history AS h
+             JOIN clipboard_items AS i ON i.id = h.item_id
+             WHERE i.capture_state = 'ready'
+               AND i.content_kind = 'file_list'
+               AND h.is_pinned = 0
+             ORDER BY h.id",
+        )?;
+        let candidates = statement
+            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut invalid_ids = Vec::new();
+        for (history_id, item_id) in candidates {
+            let mut paths = Vec::new();
+            let mut format_statement = connection.prepare(
+                "SELECT f.storage_kind, f.inline_data, b.sha256, b.byte_length, b.relative_path
+                 FROM clipboard_formats AS f
+                 LEFT JOIN binary_blobs AS b ON b.id = f.blob_id
+                 WHERE f.item_id = ?1 AND f.format_kind = 'file_list'
+                 ORDER BY f.format_order",
+            )?;
+            let formats = format_statement
+                .query_map([item_id], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<Vec<u8>>>(1)?,
+                        row.get::<_, Option<Vec<u8>>>(2)?,
+                        row.get::<_, Option<i64>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            for (storage_kind, inline_data, hash, byte_length, relative_path) in formats {
+                let bytes = match storage_kind.as_str() {
+                    "inline" => inline_data,
+                    "external" => {
+                        let (Some(hash), Some(byte_length), Some(relative_path)) =
+                            (hash, byte_length, relative_path)
+                        else {
+                            return Err(HistoryQueryError::InvalidFileListSource(
+                                "外部文件列表缺少数据引用".to_owned(),
+                            ));
+                        };
+                        let hash: [u8; 32] = hash.try_into().map_err(|value: Vec<u8>| {
+                            HistoryQueryError::InvalidImageSource(format!(
+                                "文件列表哈希长度为 {}，应为 32",
+                                value.len()
+                            ))
+                        })?;
+                        let byte_length = u64::try_from(byte_length).map_err(|_| {
+                            HistoryQueryError::InvalidNonNegativeValue(
+                                "clipboard_formats.byte_length".to_owned(),
+                            )
+                        })?;
+                        Some(
+                            self.blob_store
+                                .read_for_preview(&RawBlob::from_record(
+                                    hash,
+                                    byte_length,
+                                    relative_path,
+                                ))
+                                .map_err(HistoryQueryError::FileListStorage)?,
+                        )
+                    }
+                    _ => None,
+                };
+                if let Some(bytes) = bytes {
+                    paths.extend(parse_file_list(&bytes));
+                }
+            }
+            if !paths.is_empty()
+                && paths.iter().all(|path| match path.try_exists() {
+                    Ok(exists) => !exists,
+                    Err(error) => {
+                        tracing::debug!(path = %path.display(), %error, "检查文件列表路径失败");
+                        false
+                    }
+                })
+            {
+                invalid_ids.push(history_id);
+            }
+        }
+        Ok(invalid_ids)
     }
 
     fn query_order(
@@ -1605,6 +1696,71 @@ mod tests {
             preview_candidate: Some("1 个文件 · test.txt".to_owned()),
             source_application: SourceApplication::default(),
         }
+    }
+
+    fn file_capture_for(path: &str) -> CapturedClipboard {
+        #[cfg(target_os = "windows")]
+        let bytes = {
+            let mut bytes = vec![0; 20];
+            bytes[0..4].copy_from_slice(&20_u32.to_le_bytes());
+            bytes[16..20].copy_from_slice(&1_u32.to_le_bytes());
+            bytes.extend(path.encode_utf16().flat_map(u16::to_le_bytes));
+            bytes.extend_from_slice(&[0, 0, 0, 0]);
+            bytes
+        };
+        #[cfg(not(target_os = "windows"))]
+        let bytes = path.as_bytes().to_vec();
+        let format = RawFormat::captured(
+            "mime",
+            "application/x-file-list",
+            "文件列表",
+            FormatKind::FileList,
+            bytes,
+            0,
+            true,
+        );
+        CapturedClipboard {
+            primary_format_identity: Some((
+                format.format_namespace.clone(),
+                format.format_key.clone(),
+            )),
+            formats: vec![format],
+            preview_candidate: Some("文件列表".to_owned()),
+            source_application: SourceApplication::default(),
+        }
+    }
+
+    #[test]
+    fn invalid_file_history_scan_keeps_existing_and_pinned_paths() {
+        let services = TestServices::new();
+        let existing_path = services._directory.path().join("existing.txt");
+        std::fs::write(&existing_path, "存在").expect("创建测试文件失败");
+        let missing_id = services.store(file_capture_for(
+            &services
+                ._directory
+                .path()
+                .join("missing.txt")
+                .to_string_lossy(),
+        ));
+        services.store(file_capture_for(&existing_path.to_string_lossy()));
+        let pinned_id = services.store(file_capture_for(
+            &services
+                ._directory
+                .path()
+                .join("pinned-missing.txt")
+                .to_string_lossy(),
+        ));
+        services
+            .repository
+            .set_pinned(pinned_id, true)
+            .expect("置顶测试文件历史失败");
+        assert_eq!(
+            services
+                .repository
+                .invalid_file_history_ids()
+                .expect("扫描失效文件历史失败"),
+            vec![missing_id]
+        );
     }
 
     #[test]

@@ -20,8 +20,12 @@ pub(crate) mod package;
 use crate::{
     app_paths::write_location,
     config::HistoryConfig,
+    domain::clipboard::HistoryItemId,
     services::{
-        database::{Database, HistoryCleanupReport, HistoryRepository},
+        database::{
+            Database, HistoryCleanupReport, HistoryDeleteError, HistoryQueryError,
+            HistoryRepository,
+        },
         storage::{RawBlobError, RawBlobStore},
     },
 };
@@ -85,6 +89,10 @@ pub enum DataManagementError {
     Storage(#[from] RawBlobError),
     #[error("历史清理失败：{0}")]
     Cleanup(#[from] crate::services::database::HistoryCleanupError),
+    #[error("删除历史内容失败：{0}")]
+    HistoryDelete(#[from] HistoryDeleteError),
+    #[error("读取历史内容失败：{0}")]
+    HistoryQuery(#[from] HistoryQueryError),
     #[error("导入数据文件格式无效：{0}")]
     InvalidDataFile(String),
     #[error("导出路径无效：{0}")]
@@ -391,6 +399,35 @@ impl DataManagementService {
             return Ok(HistoryCleanupReport::default());
         }
         self.cleanup_history(policy)
+    }
+
+    pub fn find_invalid_file_history_ids(&self) -> Result<Vec<HistoryItemId>, DataManagementError> {
+        let _operation = super::data_runtime::begin_operation()
+            .map_err(|_| DataManagementError::DataSwitching)?;
+        let repository = HistoryRepository::new(self.database.clone(), self.blob_store.clone());
+        Ok(repository.invalid_file_history_ids()?)
+    }
+
+    pub fn cleanup_invalid_file_history(
+        &self,
+        expected_ids: &[HistoryItemId],
+    ) -> Result<usize, DataManagementError> {
+        super::data_runtime::with_exclusive_operation(|| {
+            let repository = HistoryRepository::new(self.database.clone(), self.blob_store.clone());
+            let expected_ids = expected_ids.iter().copied().collect::<HashSet<_>>();
+            let ids = repository
+                .invalid_file_history_ids()?
+                .into_iter()
+                .filter(|history_id| expected_ids.contains(history_id))
+                .collect::<Vec<_>>();
+            let removed = repository.delete_many(&ids)?;
+            if removed > 0
+                && let Err(error) = self.reclaim_database_space()
+            {
+                tracing::warn!("失效文件项已清理，但数据库空间回收失败：{error}");
+            }
+            Ok(removed)
+        })
     }
 
     pub fn clear_all_history(&self) -> Result<HistoryCleanupReport, DataManagementError> {

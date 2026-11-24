@@ -295,6 +295,10 @@ pub enum HistoryQueryError {
     InvalidApplicationIcon(String),
     #[error("读取 HTML 原始数据失败：{0}")]
     HtmlStorage(#[from] crate::services::storage::RawBlobError),
+    #[error("读取文件列表原始数据失败：{0}")]
+    FileListStorage(crate::services::storage::RawBlobError),
+    #[error("数据库中的文件列表数据引用无效：{0}")]
+    InvalidFileListSource(String),
 }
 
 pub(super) fn parse_application_icon_source(

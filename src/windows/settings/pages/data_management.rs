@@ -234,6 +234,15 @@ impl SettingsWindowView {
             .disabled(self.data_busy)
             .label(translator.translate("settings.data_management.cleanup"))
             .on_click(move |_, _, cx| start_cleanup(cleanup_view.clone(), cx));
+        let invalid_file_cleanup_view = view.clone();
+        let invalid_file_cleanup_button = Button::new("settings-data-invalid-file-cleanup")
+            .warning()
+            .small()
+            .disabled(self.data_busy)
+            .label(translator.translate("settings.data_management.invalid_file_cleanup"))
+            .on_click(move |_, _, cx| {
+                start_invalid_file_cleanup(invalid_file_cleanup_view.clone(), cx)
+            });
         let export_view = view.clone();
         let export_button = Button::new("settings-data-export")
             .secondary()
@@ -415,7 +424,13 @@ impl SettingsWindowView {
                 .w(ui_rem(390.0))
                 .max_w_full()
                 .gap_2()
-                .child(cleanup_button.w_full())
+                .child(
+                    h_flex()
+                        .w_full()
+                        .gap_2()
+                        .child(cleanup_button.flex_1())
+                        .child(invalid_file_cleanup_button.flex_1()),
+                )
                 .child(
                     h_flex()
                         .w_full()
@@ -1955,6 +1970,133 @@ fn start_data_replacement(
 
 fn start_cleanup(view: gpui::Entity<SettingsWindowView>, cx: &mut App) {
     start_history_cleanup(view, false, cx);
+}
+
+fn start_invalid_file_cleanup(view: Entity<SettingsWindowView>, cx: &mut App) {
+    if view.read(cx).data_busy {
+        return;
+    }
+    if !crate::windows::main::MainWindowService::begin_blocking_operation(
+        "settings.data_management.invalid_file_cleanup",
+        cx,
+    ) {
+        return;
+    }
+    let service = cx.read_global::<DataManagementService, _>(|service, _| service.clone());
+    let translator = crate::i18n::translator(cx);
+    view.update(cx, |view, cx| {
+        view.data_busy = true;
+        view.data_error = None;
+        view.data_message = None;
+        cx.notify();
+    });
+    cx.spawn(async move |cx| {
+        let scan_result = cx
+            .background_executor()
+            .spawn({
+                let service = service.clone();
+                async move { service.find_invalid_file_history_ids() }
+            })
+            .await;
+        let Ok(history_ids) = scan_result else {
+            let error = scan_result.expect_err("扫描结果已被消费");
+            tracing::error!("扫描失效文件项失败：{error}");
+            view.update(cx, |view, cx| {
+                view.data_busy = false;
+                view.data_error = notify_settings_error(
+                    SettingsPage::DataManagement,
+                    Some(
+                        translator.translate("settings.data_management.invalid_file_cleanup_error"),
+                    ),
+                    cx,
+                );
+                cx.notify();
+            });
+            cx.update(crate::windows::main::MainWindowService::finish_blocking_operation);
+            return;
+        };
+        if history_ids.is_empty() {
+            view.update(cx, |view, cx| {
+                view.data_busy = false;
+                view.data_message = notify_settings_status(
+                    SettingsPage::DataManagement,
+                    Some(
+                        translator.translate("settings.data_management.invalid_file_cleanup_none"),
+                    ),
+                    NotificationLevel::Info,
+                    cx,
+                );
+                cx.notify();
+            });
+            cx.update(crate::windows::main::MainWindowService::finish_blocking_operation);
+            return;
+        }
+
+        let count = history_ids.len().to_string();
+        let dialog = rfd::AsyncMessageDialog::new()
+            .set_title(translator.translate("settings.data_management.invalid_file_cleanup"))
+            .set_description(translator.translate_with_args(
+                "settings.data_management.invalid_file_cleanup_confirm_detail",
+                &[("count", count)],
+            ))
+            .set_level(rfd::MessageLevel::Warning)
+            .set_buttons(rfd::MessageButtons::OkCancel);
+        if dialog.show().await != rfd::MessageDialogResult::Ok {
+            view.update(cx, |view, cx| {
+                view.data_busy = false;
+                cx.notify();
+            });
+            cx.update(crate::windows::main::MainWindowService::finish_blocking_operation);
+            return;
+        }
+
+        let result = cx
+            .background_executor()
+            .spawn({
+                let service = service.clone();
+                async move { service.cleanup_invalid_file_history(&history_ids) }
+            })
+            .await;
+        let cleaned = result.is_ok();
+        view.update(cx, |view, cx| {
+            view.data_busy = false;
+            match result {
+                Ok(removed) => {
+                    view.data_message = notify_settings_status(
+                        SettingsPage::DataManagement,
+                        Some(translator.translate_with_args(
+                            "settings.data_management.invalid_file_cleanup_success",
+                            &[("count", removed.to_string())],
+                        )),
+                        NotificationLevel::Success,
+                        cx,
+                    );
+                }
+                Err(error) => {
+                    tracing::error!("清理失效文件项失败：{error}");
+                    view.data_error = notify_settings_error(
+                        SettingsPage::DataManagement,
+                        Some(
+                            translator
+                                .translate("settings.data_management.invalid_file_cleanup_error"),
+                        ),
+                        cx,
+                    );
+                }
+            }
+            view.data_stats = None;
+            view.data_stats_policy = None;
+            view.data_stats_request_id = view.data_stats_request_id.wrapping_add(1);
+            view.data_stats_loading = false;
+            view.refresh_data_stats(cx);
+            cx.notify();
+        });
+        if cleaned {
+            cx.update(crate::windows::main::MainWindowService::refresh_history);
+        }
+        cx.update(crate::windows::main::MainWindowService::finish_blocking_operation);
+    })
+    .detach();
 }
 
 fn start_history_cleanup(view: Entity<SettingsWindowView>, clear_all: bool, cx: &mut App) {
