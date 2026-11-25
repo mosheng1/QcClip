@@ -282,6 +282,31 @@ fn decode_text(format: &RawFormat) -> String {
             .collect();
         String::from_utf16_lossy(&units)
     } else {
+        #[cfg(target_os = "windows")]
+        if format.format_namespace == "windows"
+            && matches!(format.format_key.as_str(), "CF_TEXT" | "CF_OEMTEXT")
+        {
+            use windows::Win32::Globalization::{CP_ACP, CP_OEMCP, MultiByteToWideChar};
+
+            let code_page = if format.format_key == "CF_OEMTEXT" {
+                CP_OEMCP
+            } else {
+                CP_ACP
+            };
+            let bytes = bytes.split(|byte| *byte == 0).next().unwrap_or_default();
+            if bytes.is_empty() {
+                return String::new();
+            }
+            // UTF-16 单元数不超过源字节数，按此分配可容纳完整转换结果。
+            let mut units = vec![0; bytes.len()];
+            // 安全：输入、输出缓冲区在调用期间均有效，长度由切片传入。
+            let length = unsafe {
+                MultiByteToWideChar(code_page, Default::default(), bytes, Some(&mut units))
+            };
+            if length > 0 {
+                return String::from_utf16_lossy(&units[..length as usize]);
+            }
+        }
         decode_utf8(bytes)
     }
 }
@@ -479,6 +504,66 @@ mod tests {
         let preview = generate_preview(&value).expect("无法生成文本预览");
         assert_eq!(preview.formats[0].text, "👨‍👩‍👧‍👦a");
         assert_eq!(preview.formats[0].char_count, 2);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_text_preview_decodes_native_code_pages() {
+        use windows::Win32::Globalization::{
+            GetACP, GetOEMCP, WC_NO_BEST_FIT_CHARS, WideCharToMultiByte,
+        };
+        use windows::core::{BOOL, PCSTR};
+
+        // 按当前系统代码页生成字节，避免回归测试依赖操作系统语言。
+        for (key, code_page) in [
+            ("CF_OEMTEXT", unsafe { GetOEMCP() }),
+            ("CF_TEXT", unsafe { GetACP() }),
+        ] {
+            let units = "café".encode_utf16().collect::<Vec<_>>();
+            let mut bytes = vec![0; 32];
+            let mut used_default = BOOL::default();
+            // 禁用近似映射；UTF-8 代码页只接受零标志且不接受默认字符标志指针。
+            let flags = if code_page == 65001 {
+                0
+            } else {
+                WC_NO_BEST_FIT_CHARS
+            };
+            let default_flag = (code_page != 65001).then_some(&mut used_default as *mut BOOL);
+            // 安全：输入、输出缓冲区和默认字符标志在调用期间均有效。
+            let written = unsafe {
+                WideCharToMultiByte(
+                    code_page,
+                    flags,
+                    &units,
+                    Some(&mut bytes),
+                    PCSTR::null(),
+                    default_flag,
+                )
+            };
+            assert!(written > 0, "无法生成 {key} 测试数据");
+            bytes.truncate(written as usize);
+            bytes.extend_from_slice(b"\0ignored");
+            let value = captured(RawFormat::captured(
+                "windows",
+                key,
+                key,
+                FormatKind::Text,
+                bytes,
+                0,
+                true,
+            ));
+            let preview = generate_preview(&value).expect("无法生成系统文本预览");
+            let expected = if used_default.as_bool() {
+                "caf?"
+            } else {
+                "café"
+            };
+            assert_eq!(
+                preview.formats[0].text, expected,
+                "{key} 代码页 {code_page}"
+            );
+            assert_eq!(preview.formats[0].char_count, 4);
+        }
     }
 
     #[test]
