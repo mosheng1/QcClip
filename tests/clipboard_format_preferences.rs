@@ -11,6 +11,7 @@ fn released_config_uses_native_common_format_defaults() {
         config::load::from_str(r#"{"schemaVersion":1,"clipboard":{"autoFocusSearch":true}}"#)
             .expect("无法加载已发布的配置");
     let formats = &loaded.config.clipboard.capture_formats;
+    assert!(loaded.config.clipboard.respect_history_exclusion);
     assert!(!formats.all);
     for name in [
         "CF_UNICODETEXT",

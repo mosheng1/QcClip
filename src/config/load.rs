@@ -576,6 +576,13 @@ fn read_clipboard(object: &Map<String, Value>, warnings: &mut Vec<String>) -> Cl
     );
     ClipboardConfig {
         capture_formats: read_group(object, "captureFormats", warnings, read_clipboard_formats),
+        respect_history_exclusion: read_field(
+            object,
+            "respectHistoryExclusion",
+            "clipboard.respectHistoryExclusion",
+            default.respect_history_exclusion,
+            warnings,
+        ),
         mouse_left_behavior: read_field(
             object,
             "mouseLeftBehavior",

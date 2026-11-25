@@ -13,9 +13,27 @@ impl SettingsWindowView {
     pub(super) fn render_clipboard_formats(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().colors;
         let translator = i18n::translator(cx);
-        let formats = config_runtime::clipboard_config(cx).capture_formats;
+        let clipboard = config_runtime::clipboard_config(cx);
+        let formats = clipboard.capture_formats;
         let view = cx.entity().clone();
         let save_error = translator.translate("settings.clipboard.save_error");
+        let respect_history_exclusion_switch = Switch::new("clipboard-respect-history-exclusion")
+            .checked(clipboard.respect_history_exclusion)
+            .accessibility_label(
+                translator.translate("settings.clipboard.respect_history_exclusion"),
+            )
+            .on_click({
+                let view = view.clone();
+                let save_error = save_error.clone();
+                move |checked, _, cx| {
+                    persist_clipboard_change(
+                        view.clone(),
+                        |clipboard| clipboard.respect_history_exclusion = *checked,
+                        save_error.clone(),
+                        cx,
+                    );
+                }
+            });
         let all_switch = Switch::new("clipboard-capture-all")
             .checked(formats.all)
             .on_click({
@@ -237,6 +255,22 @@ impl SettingsWindowView {
                 );
         }
         section
+            .when(cfg!(target_os = "windows"), |section| {
+                section.child(
+                    self.setting_row(
+                        theme,
+                        translator.translate("settings.clipboard.respect_history_exclusion"),
+                        Some(
+                            translator
+                                .translate(
+                                    "settings.clipboard.respect_history_exclusion_description",
+                                )
+                                .into(),
+                        ),
+                        respect_history_exclusion_switch,
+                    ),
+                )
+            })
             .border_b_1()
             .border_color(theme.border)
             .into_any_element()

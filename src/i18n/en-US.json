@@ -729,6 +729,8 @@
   "settings.clipboard.capture_formats_count": "Read format list ({count})",
   "settings.clipboard.capture_formats_description": "When Read all formats is off, only the formats below are read, which is usually faster. Enter the exact clipboard name, such as CF_UNICODETEXT, HTML Format, PNG or Biff12; do not enter categories like image or text.",
   "settings.clipboard.capture_all_formats": "Read all formats",
+  "settings.clipboard.respect_history_exclusion": "Respect clipboard exclusion markers",
+  "settings.clipboard.respect_history_exclusion_description": "Skip clipboard content with ExcludeClipboardContentFromMonitorProcessing (excluded from monitoring), or CanIncludeInClipboardHistory set to 0 (excluded from history).",
   "settings.clipboard.capture_all_formats_description": "Try every format offered by the source application for better compatibility. Some formats must be generated on demand, so copying large content may briefly slow that application; a few formats also cannot be saved for later pasting.",
   "settings.clipboard.native_format_placeholder": "Enter a native format name, e.g. Biff12 or Embed Source",
   "settings.clipboard.edit_formats": "Edit list",

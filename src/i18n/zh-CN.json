@@ -729,6 +729,8 @@
   "settings.clipboard.capture_formats_count": "读取格式名单（{count}）",
   "settings.clipboard.capture_formats_description": "关闭“读取全部格式”时，只读取下面名单中的格式，通常更快。请填写剪贴板实际名称，例如 CF_UNICODETEXT、HTML Format、PNG 或 Biff12，不要填写“图片”或“文本”。",
   "settings.clipboard.capture_all_formats": "读取全部格式",
+  "settings.clipboard.respect_history_exclusion": "尊重剪贴板排除标记",
+  "settings.clipboard.respect_history_exclusion_description": "开启时，跳过包含 ExcludeClipboardContentFromMonitorProcessing（禁止监控处理）标记，或 CanIncludeInClipboardHistory 值为 0（禁止加入历史）的剪贴板内容。",
   "settings.clipboard.capture_all_formats_description": "尝试读取来源应用提供的所有格式，通常兼容性更好。但部分格式需要来源应用临时生成，复制大型内容时可能让来源应用短暂变慢；也有少数格式无法保存为可再次粘贴的内容。",
   "settings.clipboard.native_format_placeholder": "填写原生格式名称，如 Biff12 或 Embed Source",
   "settings.clipboard.edit_formats": "编辑名单",

@@ -1043,6 +1043,12 @@ fn search_target_specs() -> &'static [SearchTargetSpec] {
         },
         SearchTargetSpec {
             page: Capture,
+            title_key: "settings.clipboard.respect_history_exclusion",
+            description_key: Some("settings.clipboard.respect_history_exclusion_description"),
+            ratio: 0.23,
+        },
+        SearchTargetSpec {
+            page: Capture,
             title_key: "settings.application_filter.enabled",
             description_key: Some("settings.application_filter.enabled_description"),
             ratio: 0.29,

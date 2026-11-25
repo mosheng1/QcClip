@@ -883,6 +883,7 @@ fn default_search_engines() -> Vec<SearchEngine> {
 #[serde(default)]
 pub struct ClipboardConfig {
     pub capture_formats: ClipboardFormatConfig,
+    pub respect_history_exclusion: bool,
     pub mouse_left_behavior: ClipboardMouseBehavior,
     pub mouse_middle_behavior: ClipboardMouseBehavior,
     pub display_priority: ClipboardDisplayPriority,
@@ -1162,6 +1163,7 @@ impl Default for ClipboardConfig {
     fn default() -> Self {
         Self {
             capture_formats: ClipboardFormatConfig::default(),
+            respect_history_exclusion: true,
             mouse_left_behavior: ClipboardMouseBehavior::SinglePaste,
             mouse_middle_behavior: ClipboardMouseBehavior::SinglePlainTextPaste,
             display_priority: ClipboardDisplayPriority::default(),

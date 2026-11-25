@@ -65,8 +65,9 @@ impl ConfigRuntime {
     pub(crate) fn install(path: impl Into<PathBuf>, cx: &mut App) {
         let path = path.into();
         let config = load_config(&path);
-        crate::platform::clipboard::set_capture_format_config(
+        crate::platform::clipboard::set_capture_config(
             config.clipboard.capture_formats.clone(),
+            config.clipboard.respect_history_exclusion,
         );
         crate::services::paste::set_formatted_paste_enabled(config.clipboard.formatted_paste);
         crate::services::paste_key::sync(&config);
@@ -76,8 +77,9 @@ impl ConfigRuntime {
     pub(crate) fn reload(path: impl Into<PathBuf>, cx: &mut App) -> ConfigReload {
         let path = path.into();
         let config = load_config(&path);
-        crate::platform::clipboard::set_capture_format_config(
+        crate::platform::clipboard::set_capture_config(
             config.clipboard.capture_formats.clone(),
+            config.clipboard.respect_history_exclusion,
         );
         crate::services::paste::set_formatted_paste_enabled(config.clipboard.formatted_paste);
         crate::services::paste_key::sync(&config);
@@ -907,7 +909,10 @@ pub(crate) fn set_clipboard_config(
     next.clipboard = clipboard.clone();
     persist_config(&path, &next)?;
     crate::services::paste::set_formatted_paste_enabled(clipboard.formatted_paste);
-    crate::platform::clipboard::set_capture_format_config(clipboard.capture_formats);
+    crate::platform::clipboard::set_capture_config(
+        clipboard.capture_formats,
+        clipboard.respect_history_exclusion,
+    );
 
     cx.update_global::<ConfigRuntime, _>(|runtime, _| {
         runtime.config = next;
@@ -1196,6 +1201,7 @@ mod tests {
         config.clipboard.capture_formats.names = vec!["Biff12".into(), "Embed Source".into()];
         for all in [false, true, false] {
             config.clipboard.capture_formats.all = all;
+            config.clipboard.respect_history_exclusion = !all;
             persist_config(&path, &config).expect("无法保存原生格式配置");
             assert_eq!(load_config(&path), config);
         }

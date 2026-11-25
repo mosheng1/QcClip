@@ -119,10 +119,10 @@ pub fn run() {
         clipboard_write_suppressor.clone(),
     );
     let config_path = app_paths.config_path();
-    crate::platform::clipboard::set_capture_format_config(
-        crate::config_runtime::load_config(&config_path)
-            .clipboard
-            .capture_formats,
+    let clipboard_config = crate::config_runtime::load_config(&config_path).clipboard;
+    crate::platform::clipboard::set_capture_config(
+        clipboard_config.capture_formats,
+        clipboard_config.respect_history_exclusion,
     );
     let (clipboard_monitor, clipboard_events) =
         match ClipboardMonitor::start(clipboard_write_suppressor.clone()) {

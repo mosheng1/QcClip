@@ -10,20 +10,20 @@ use std::{
 use crate::config::ClipboardFormatConfig;
 use crate::domain::capture::{CapturedClipboard, FormatKind};
 
-static CAPTURE_FORMAT_CONFIG: OnceLock<RwLock<ClipboardFormatConfig>> = OnceLock::new();
+static CAPTURE_CONFIG: OnceLock<RwLock<(ClipboardFormatConfig, bool)>> = OnceLock::new();
 
-pub(crate) fn set_capture_format_config(config: ClipboardFormatConfig) {
-    let mut current = CAPTURE_FORMAT_CONFIG
-        .get_or_init(|| RwLock::new(ClipboardFormatConfig::default()))
+pub(crate) fn set_capture_config(config: ClipboardFormatConfig, respect_history_exclusion: bool) {
+    let mut current = CAPTURE_CONFIG
+        .get_or_init(|| RwLock::new((ClipboardFormatConfig::default(), true)))
         .write()
         .unwrap_or_else(|error| error.into_inner());
-    *current = config.normalized();
+    *current = (config.normalized(), respect_history_exclusion);
 }
 
 #[cfg(target_os = "windows")]
-fn capture_format_config() -> ClipboardFormatConfig {
-    CAPTURE_FORMAT_CONFIG
-        .get_or_init(|| RwLock::new(ClipboardFormatConfig::default()))
+fn capture_config() -> (ClipboardFormatConfig, bool) {
+    CAPTURE_CONFIG
+        .get_or_init(|| RwLock::new((ClipboardFormatConfig::default(), true)))
         .read()
         .unwrap_or_else(|error| error.into_inner())
         .clone()
@@ -370,12 +370,12 @@ mod windows_clipboard {
 
         pub fn capture_current(&self) -> Result<Option<CapturedClipboard>, SystemClipboardError> {
             // 先释放配置锁，再访问系统剪贴板，避免延迟渲染阻塞设置保存。
-            let config = super::capture_format_config();
+            let (config, respect_history_exclusion) = super::capture_config();
             // 枚举、原始格式和文件摘要共用一次打开，避免外部工具在读取中途替换内容。
             let clipboard =
                 ClipboardGuard::open_for_capture().map_err(SystemClipboardError::Open)?;
             let native_formats = clipboard.formats();
-            if should_ignore_clipboard(&native_formats, |format_id| {
+            if should_ignore_clipboard(&native_formats, respect_history_exclusion, |format_id| {
                 clipboard.read_buffer(format_id)
             }) {
                 tracing::debug!("剪贴板忽略标记已跳过本次捕获");
@@ -828,8 +828,12 @@ mod windows_clipboard {
 
     fn should_ignore_clipboard(
         formats: &[NativeFormat],
+        respect_history_exclusion: bool,
         mut read_buffer: impl FnMut(u32) -> Result<Vec<u8>, String>,
     ) -> bool {
+        if !respect_history_exclusion {
+            return false;
+        }
         // 排除标记只需存在，即使没有可读取的数据也应跳过整次捕获。
         if formats.iter().any(|format| {
             format
@@ -1566,8 +1570,21 @@ mod windows_clipboard {
                     native_format("CanIncludeInClipboardHistory"),
                     native_format(name),
                 ];
-                assert!(should_ignore_clipboard(&formats, |_| {
+                assert!(should_ignore_clipboard(&formats, true, |_| {
                     panic!("排除标记存在时不应读取剪贴板数据")
+                }));
+            }
+        }
+
+        #[test]
+        fn disabled_history_exclusion_keeps_content_without_reading_markers() {
+            for name in [
+                "ExcludeClipboardContentFromMonitorProcessing",
+                "CanIncludeInClipboardHistory",
+            ] {
+                let formats = [native_format(name)];
+                assert!(!should_ignore_clipboard(&formats, false, |_| {
+                    panic!("关闭历史排除标记后不应读取控制标记")
                 }));
             }
         }
@@ -1584,7 +1601,7 @@ mod windows_clipboard {
                 (vec![], false),
             ] {
                 assert_eq!(
-                    should_ignore_clipboard(&formats, |format_id| {
+                    should_ignore_clipboard(&formats, true, |format_id| {
                         assert_eq!(format_id, 49_152);
                         Ok(bytes.clone())
                     }),
@@ -1597,7 +1614,7 @@ mod windows_clipboard {
         #[test]
         fn unreadable_history_marker_does_not_block_normal_capture() {
             let formats = [native_format("CanIncludeInClipboardHistory")];
-            assert!(!should_ignore_clipboard(&formats, |_| {
+            assert!(!should_ignore_clipboard(&formats, true, |_| {
                 Err("标记数据不可读取".to_owned())
             }));
         }
@@ -1612,7 +1629,7 @@ mod windows_clipboard {
                     native_format("CanUploadToCloudClipboard"),
                 ],
             ] {
-                assert!(!should_ignore_clipboard(&formats, |_| {
+                assert!(!should_ignore_clipboard(&formats, true, |_| {
                     panic!("不应读取与本地历史过滤无关的格式")
                 }));
             }
