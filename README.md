@@ -263,3 +263,5 @@ cargo build --release --locked
 ```
 
 默认生成的程序位于 `target/release/QcClip.exe`。安装包、便携版及不同架构的打包方法见 [打包说明](docs/packaging.md)。
+
+表情图像来自 [Twemoji](https://github.com/jdecked/twemoji)，由 Twitter、Jason Sofonia、Justine De Caires 及其他贡献者提供，采用 [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) 许可。项目仅提取并无损压缩所需图片，素材内容未作修改，详见[资源说明](assets/data/emoji/README.md)。

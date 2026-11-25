@@ -1,9 +1,9 @@
 use crate::ui::scale::ui_rem;
 
-use std::rc::Rc;
+use std::{collections::HashSet, rc::Rc, sync::Arc};
 
 use gpui::prelude::*;
-use gpui::{AnyElement, Context, IntoElement, Window, div, px};
+use gpui::{AnyElement, Context, IntoElement, RenderImage, Window, div, img, px, size};
 use gpui_component::{ActiveTheme as _, tooltip::Tooltip};
 
 use crate::{
@@ -35,6 +35,7 @@ pub fn render(main: &mut MainWindow, window: &Window, cx: &mut Context<MainWindo
         .uses_horizontal_list();
     let is_emoji = main.symbol_category == SymbolCategoryId::Emoji;
     let content = if is_emoji {
+        main.ensure_emoji_resources(cx);
         let data = emoji::data();
         let columns = symbol_layout::grid_columns(
             main,
@@ -245,16 +246,68 @@ fn render_virtual_list(
     columns: u16,
     cx: &mut Context<MainWindow>,
 ) -> AnyElement {
-    symbol_list::render_virtual_list(
+    let item_sizes = Rc::new(
+        rows.iter()
+            .map(|row| {
+                size(
+                    px(0.0),
+                    px(symbol_list::row_height(row) * crate::ui::scale::theme_scale(cx)),
+                )
+            })
+            .collect(),
+    );
+    let loading_rows = rows.clone();
+    let main_window = cx.weak_entity();
+    let list = symbol_list::render_sized_virtual_list(
         "emoji-list",
-        rows,
+        item_sizes,
         main.emoji_scroll_handle.clone(),
         MainWindow::handle_emoji_scroll_wheel,
-        move |row_index, _category, item_indices, cx| {
-            render_emoji_row(row_index, item_indices, data, columns, cx)
+        move |this, range, _, cx| {
+            range
+                .filter_map(|index| {
+                    rows.get(index).map(|row| match row {
+                        EmojiListRow::Header { label, .. } => symbol_list::render_header(label, cx),
+                        EmojiListRow::Empty { label } => symbol_list::render_empty(label, cx),
+                        EmojiListRow::Items { item_indices, .. } => {
+                            render_emoji_row(index, item_indices, data, columns, this, cx)
+                        }
+                    })
+                })
+                .collect()
         },
         cx,
-    )
+    );
+    div()
+        .flex_1()
+        .min_h_0()
+        .w_full()
+        .flex()
+        .flex_col()
+        .child(list)
+        .on_children_prepainted(move |_, window, cx| {
+            let _ = main_window.update(cx, |this, cx| {
+                // 首行测量也会调用行渲染，完成布局后再按实际视口调度和淘汰图片。
+                let scale = crate::ui::scale::window_scale(window);
+                let top = -f32::from(this.emoji_scroll_handle.offset().y) / scale;
+                let height =
+                    f32::from(this.emoji_scroll_handle.base_handle().bounds().size.height) / scale;
+                let mut row_top = 0.0;
+                let mut indices = HashSet::new();
+                for row in loading_rows.iter() {
+                    let row_bottom = row_top + symbol_list::row_height(row);
+                    if row_bottom >= top - symbol_list::ROW_HEIGHT
+                        && row_top <= top + height + symbol_list::ROW_HEIGHT
+                        && let EmojiListRow::Items { item_indices, .. } = row
+                    {
+                        indices.extend(item_indices.iter().copied());
+                    }
+                    row_top = row_bottom;
+                }
+                this.ensure_emoji_images(indices, window, cx);
+            });
+        })
+        .into_any_element()
 }
 
 fn render_emoji_row(
@@ -262,6 +315,7 @@ fn render_emoji_row(
     item_indices: &[usize],
     data: &'static emoji::EmojiData,
     columns: u16,
+    main: &MainWindow,
     cx: &mut Context<MainWindow>,
 ) -> AnyElement {
     symbol_list::render_grid_row(
@@ -269,7 +323,15 @@ fn render_emoji_row(
         item_indices,
         &data.items,
         columns,
-        render_emoji_item,
+        |row_index, item_index, item, cx| {
+            render_emoji_item(
+                row_index,
+                item_index,
+                item,
+                main.emoji_image(item_index),
+                cx,
+            )
+        },
         cx,
     )
 }
@@ -277,6 +339,7 @@ fn render_emoji_item(
     row_index: usize,
     item_index: usize,
     item: &EmojiItem,
+    image: Option<Arc<RenderImage>>,
     cx: &mut Context<MainWindow>,
 ) -> AnyElement {
     let glyph = item.glyph.clone();
@@ -303,11 +366,12 @@ fn render_emoji_item(
                 .items_center()
                 .justify_center()
                 .overflow_hidden()
-                .whitespace_nowrap()
-                .text_size(ui_rem(28.0))
-                .line_height(ui_rem(34.0))
-                .font_family("Segoe UI Emoji")
-                .child(item.glyph.clone()),
+                .children(image.map(|image| {
+                    // 隐藏时最后一帧可能仍被保留，元素只持弱引用，避免阻止图片释放。
+                    let image = Arc::downgrade(&image);
+                    img(move |_: &mut Window, _: &mut gpui::App| image.upgrade().map(Ok))
+                        .size(ui_rem(28.0))
+                })),
         )
         .into_any_element()
 }

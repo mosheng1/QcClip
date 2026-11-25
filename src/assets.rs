@@ -1,6 +1,6 @@
 use gpui::{AssetSource, SharedString};
 use rust_embed::RustEmbed;
-use std::borrow::Cow;
+use std::{borrow::Cow, collections::HashMap};
 
 #[derive(RustEmbed)]
 #[folder = "assets"]
@@ -11,6 +11,13 @@ pub struct Assets;
 impl Assets {
     pub fn new() -> Self {
         Self
+    }
+
+    pub(crate) fn load_emoji_images() -> gpui::Result<HashMap<String, String>> {
+        let packed = EmbeddedAssets::get("data/emoji/twemoji.json.zst")
+            .ok_or_else(|| std::io::Error::other("缺少内嵌 Twemoji 资源包"))?;
+        let json = zstd::stream::decode_all(packed.data.as_ref())?;
+        Ok(serde_json::from_slice(&json)?)
     }
 }
 
@@ -29,5 +36,36 @@ impl AssetSource for Assets {
 
     fn list(&self, _path: &str) -> gpui::Result<Vec<SharedString>> {
         Ok(Vec::new())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::emoji;
+    use std::sync::Arc;
+
+    #[test]
+    fn twemoji_covers_picker_and_skin_variants() {
+        let images = Assets::load_emoji_images().unwrap();
+        let renderer = gpui::SvgRenderer::new(Arc::new(Assets::new()));
+        for item in &emoji::data().items {
+            for glyph in std::iter::once(&item.glyph).chain(&item.skin_variants) {
+                let svg = images
+                    .get(&emoji::annotation_key(glyph))
+                    .expect("表情缺少 SVG 资源");
+                renderer
+                    .parse_svg(svg.as_bytes())
+                    .expect("表情 SVG 无法解析");
+            }
+        }
+        for glyph in ["😀", "✈️", "#️⃣", "👨‍👩‍👧‍👦", "👋🏻", "🫪"]
+        {
+            let svg = images.get(&emoji::annotation_key(glyph)).unwrap();
+            let image = renderer
+                .render_single_frame(svg.as_bytes(), 2.0)
+                .expect("表情 SVG 无法渲染");
+            assert!(image.size(0).width.0 > 0);
+        }
     }
 }

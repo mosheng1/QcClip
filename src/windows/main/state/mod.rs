@@ -1,4 +1,5 @@
 mod actions;
+mod emoji;
 mod gallery;
 mod heatmap;
 mod history;
@@ -204,6 +205,7 @@ pub struct MainWindow {
     pub(crate) recent_symbols: Vec<String>,
     pub(crate) emoji_scroll_handle: VirtualListScrollHandle,
     pub(crate) emoji_rows_cache: Option<EmojiRowsCache>,
+    emoji_resources: Option<emoji::EmojiResources>,
     pub(crate) emoji_category_row_indices: HashMap<EmojiCategoryId, usize>,
     pub(crate) emoji_scroll_target: Option<EmojiCategoryId>,
     pub(crate) symbol_group: SymbolGroupId,
@@ -465,6 +467,7 @@ impl MainWindow {
             recent_symbols: persisted_state.main_window.recent_symbols,
             emoji_scroll_handle: VirtualListScrollHandle::new(),
             emoji_rows_cache: None,
+            emoji_resources: None,
             emoji_category_row_indices: HashMap::new(),
             emoji_scroll_target: None,
             symbol_group: SymbolGroupId::Recent,

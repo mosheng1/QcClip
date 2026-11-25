@@ -994,6 +994,9 @@ pub(crate) fn set_visibility(
             crate::services::memory_trim::schedule(cx);
         }
         if !visible {
+            let _ = window.update(cx, |_, window, cx| {
+                MainWindowService::handle_window_hidden(window, cx);
+            });
             crate::windows::preview::PreviewWindowService::destroy(cx);
         }
         if visible {
@@ -1348,6 +1351,9 @@ fn apply_visibility_animation_frame(
                 .finish_visibility_transition(generation)
         });
         if finished {
+            if !animation_show(animation) {
+                MainWindowService::handle_window_hidden(window, cx);
+            }
             platform_window::set_window_rendering_enabled(window, animation_show(animation))?;
             if animation_show(animation) {
                 MainWindowService::handle_window_shown(window, cx);

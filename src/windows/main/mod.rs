@@ -155,6 +155,13 @@ impl MainWindowService {
         }
     }
 
+    pub(crate) fn handle_window_hidden(window: &mut Window, cx: &mut App) {
+        let main_view = cx.global::<Self>().main_view.clone();
+        if let Some(main_view) = main_view {
+            main_view.update(cx, |main, cx| main.clear_emoji_resources(window, cx));
+        }
+    }
+
     pub(crate) fn clipboard_write_suppressor(
         cx: &App,
     ) -> Option<crate::platform::clipboard::ClipboardWriteSuppressor> {

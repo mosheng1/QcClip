@@ -105,6 +105,16 @@ impl Render for MainWindow {
             self.clear_gallery_resources();
         }
         self.cleanup_gallery_image_atlas(window);
+        let emoji_active = self.active_tab == TabId::Emoji
+            && self.symbol_category == super::tabs::SymbolCategoryId::Emoji;
+        let window_visible = MainWindowService::is_logically_visible(cx);
+        let visibility_transition = cx
+            .global::<MainWindowService>()
+            .window_state
+            .is_visibility_transition_active();
+        if !emoji_active || (!window_visible && !visibility_transition) {
+            self.clear_emoji_resources(window, cx);
+        }
         self.advance_scroll_animation(
             window,
             !is_blocked
@@ -152,7 +162,10 @@ impl Render for MainWindow {
             match self.symbol_category {
                 super::tabs::SymbolCategoryId::Symbols => symbol_picker::render(self, window, cx),
                 super::tabs::SymbolCategoryId::Gallery => gallery_picker::render(self, window, cx),
-                super::tabs::SymbolCategoryId::Emoji => emoji_picker::render(self, window, cx),
+                super::tabs::SymbolCategoryId::Emoji if window_visible || visibility_transition => {
+                    emoji_picker::render(self, window, cx)
+                }
+                super::tabs::SymbolCategoryId::Emoji => div().into_any_element(),
             }
         } else {
             self.sync_split_filters(cx);

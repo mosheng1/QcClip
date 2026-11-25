@@ -132,6 +132,141 @@ fn draw_window(window: gpui::AnyWindowHandle, cx: &mut gpui::TestAppContext) {
     }
 }
 
+#[gpui::test]
+fn twemoji_images_are_released_after_scrolling_leaving_and_hiding(cx: &mut gpui::TestAppContext) {
+    let fixture = Fixture::new(cx);
+    fixture.main.update(cx, |main, cx| {
+        main.select_symbol_category(SymbolCategoryId::Emoji, cx);
+        main.select_tab(TabId::Emoji, cx);
+    });
+    let window = fixture.open_window(cx);
+    let first_image = fixture.main.read_with(cx, |main, _| {
+        let (index, image) = (0..crate::emoji::data().items.len())
+            .find_map(|index| main.emoji_image(index).map(|image| (index, image)))
+            .expect("表情页应加载可见图片");
+        (index, Arc::downgrade(&image))
+    });
+    fixture.main.update(cx, |main, cx| {
+        main.emoji_scroll_handle
+            .set_offset(gpui::point(px(0.0), px(-6000.0)));
+        cx.notify();
+    });
+    draw_window(window, cx);
+    assert!(
+        fixture
+            .main
+            .read_with(cx, |main, _| main.emoji_image(first_image.0).is_none())
+    );
+    assert!(first_image.1.upgrade().is_none(), "滚出视口的图片应释放");
+    let next_image = fixture.main.read_with(cx, |main, _| {
+        let image = (0..crate::emoji::data().items.len())
+            .find_map(|index| main.emoji_image(index))
+            .unwrap();
+        Arc::downgrade(&image)
+    });
+    fixture
+        .main
+        .update(cx, |main, cx| main.select_tab(TabId::Clipboard, cx));
+    draw_window(window, cx);
+    assert!(
+        fixture
+            .main
+            .read_with(cx, |main, _| main.emoji_resources.is_none())
+    );
+    assert!(next_image.upgrade().is_none(), "离开表情页应释放图片");
+
+    fixture
+        .main
+        .update(cx, |main, cx| main.select_tab(TabId::Emoji, cx));
+    draw_window(window, cx);
+    assert!(
+        fixture
+            .main
+            .read_with(cx, |main, _| main.emoji_resources.is_some())
+    );
+    let hidden_image = fixture.main.read_with(cx, |main, _| {
+        let image = (0..crate::emoji::data().items.len())
+            .find_map(|index| main.emoji_image(index))
+            .unwrap();
+        Arc::downgrade(&image)
+    });
+    cx.update_window(window, |_, window, cx| {
+        cx.update_global::<MainWindowService, _>(|service, _| {
+            service.window_state.set_visibility(false)
+        });
+        MainWindowService::handle_window_hidden(window, cx);
+    })
+    .unwrap();
+    assert!(
+        hidden_image.upgrade().is_none(),
+        "隐藏后无需再次绘制即可释放图片"
+    );
+    draw_window(window, cx);
+    assert!(
+        fixture
+            .main
+            .read_with(cx, |main, _| main.emoji_resources.is_none()),
+        "隐藏后的绘制不能重新加载资源"
+    );
+    cx.update(|cx| {
+        cx.update_global::<MainWindowService, _>(|service, _| {
+            service.window_state.set_visibility(true)
+        });
+    });
+    draw_window(window, cx);
+    assert!(
+        fixture.main.read_with(cx, |main, _| {
+            (0..crate::emoji::data().items.len()).any(|index| main.emoji_image(index).is_some())
+        }),
+        "再次显示后应能重新加载图片"
+    );
+}
+
+#[gpui::test]
+fn twemoji_pending_loads_do_not_restore_released_resources(cx: &mut gpui::TestAppContext) {
+    let fixture = Fixture::new(cx);
+    let window = fixture.open_window(cx);
+    cx.update_window(window, |_, window, cx| {
+        fixture.main.update(cx, |main, cx| {
+            main.ensure_emoji_resources(cx);
+            main.clear_emoji_resources(window, cx);
+        });
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert!(
+        fixture
+            .main
+            .read_with(cx, |main, _| main.emoji_resources.is_none())
+    );
+
+    fixture.main.update(cx, |main, cx| {
+        main.select_symbol_category(SymbolCategoryId::Emoji, cx);
+        main.select_tab(TabId::Emoji, cx);
+    });
+    draw_window(window, cx);
+    cx.update_window(window, |_, window, cx| {
+        fixture.main.update(cx, |main, cx| {
+            let index = crate::emoji::data().items.len() - 1;
+            assert!(main.emoji_image(index).is_none());
+            main.ensure_emoji_images(HashSet::from([index]), window, cx);
+            main.clear_emoji_resources(window, cx);
+        });
+    })
+    .unwrap();
+    cx.update(|cx| {
+        cx.update_global::<MainWindowService, _>(|service, _| {
+            service.window_state.set_visibility(false)
+        });
+    });
+    cx.run_until_parked();
+    assert!(
+        fixture
+            .main
+            .read_with(cx, |main, _| main.emoji_resources.is_none())
+    );
+}
+
 #[test]
 fn split_ratios_default_for_old_state_and_validate_saved_values() {
     use state_runtime::PersistedMainWindowState;

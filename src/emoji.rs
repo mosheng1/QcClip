@@ -217,7 +217,7 @@ fn code_points_to_string(code_points: &str) -> Option<String> {
         .collect()
 }
 
-fn annotation_key(value: &str) -> String {
+pub(crate) fn annotation_key(value: &str) -> String {
     value
         .chars()
         .filter(|character| *character != '\u{fe0f}')

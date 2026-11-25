@@ -192,7 +192,7 @@ where
         .into_any_element()
 }
 
-fn render_header(label: &str, cx: &mut Context<MainWindow>) -> AnyElement {
+pub(super) fn render_header(label: &str, cx: &mut Context<MainWindow>) -> AnyElement {
     div()
         .h(ui_rem(HEADER_HEIGHT))
         .w_full()
@@ -207,7 +207,7 @@ fn render_header(label: &str, cx: &mut Context<MainWindow>) -> AnyElement {
         .into_any_element()
 }
 
-fn render_empty(label: &str, cx: &mut Context<MainWindow>) -> AnyElement {
+pub(super) fn render_empty(label: &str, cx: &mut Context<MainWindow>) -> AnyElement {
     div()
         .h(ui_rem(ROW_HEIGHT))
         .w_full()
