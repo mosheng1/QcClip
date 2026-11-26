@@ -431,10 +431,10 @@ impl SessionShortcutId {
     pub const ALL: [Self; 15] = [
         Self::SelectPreviousItem,
         Self::SelectNextItem,
-        Self::SelectFirstItem,
-        Self::SelectLastItem,
         Self::PreviousTab,
         Self::NextTab,
+        Self::SelectFirstItem,
+        Self::SelectLastItem,
         Self::ToggleWindowFixed,
         Self::FocusSearch,
         Self::ExecutePaste,
