@@ -560,18 +560,6 @@ impl SettingsWindowView {
             .child(
                 self.setting_row(
                     theme,
-                    translator.translate("settings.clipboard.filter_mode"),
-                    Some(
-                        translator
-                            .translate("settings.clipboard.filter_mode_description")
-                            .into(),
-                    ),
-                    filter_mode_selector,
-                ),
-            )
-            .child(
-                self.setting_row(
-                    theme,
                     translator.translate("settings.clipboard.filter_hover_switch"),
                     Some(
                         translator
@@ -582,6 +570,18 @@ impl SettingsWindowView {
                 ),
             )
             .child(self.hover_delay_row(theme, HoverBar::Filter, &clipboard, &translator))
+            .child(
+                self.setting_row(
+                    theme,
+                    translator.translate("settings.clipboard.filter_mode"),
+                    Some(
+                        translator
+                            .translate("settings.clipboard.filter_mode_description")
+                            .into(),
+                    ),
+                    filter_mode_selector,
+                ),
+            )
             .child(
                 self.setting_row(
                     theme,
