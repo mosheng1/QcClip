@@ -1,9 +1,14 @@
-use std::{cell::Cell, rc::Rc, time::Duration};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+    time::Duration,
+};
 
 use gpui::{
-    Action, AnyElement, AnyView, App, AppContext, Bounds, Context, ElementId, IntoElement,
-    MouseButton, ParentElement, Pixels, Render, SharedString, StatefulInteractiveElement,
-    StyleRefinement, Styled, Window, div, prelude::FluentBuilder, px,
+    Action, AnyElement, AnyView, App, AppContext, Bounds, Context, ElementId, Entity, EntityId,
+    Global, IntoElement, MouseButton, ParentElement, Pixels, Render, SharedString,
+    StatefulInteractiveElement, StyleRefinement, Styled, WeakEntity, Window, WindowId, div,
+    prelude::FluentBuilder, px,
 };
 use gpui_base::{
     Tooltip as BaseTooltip, TooltipOverlay as BaseTooltipOverlay,
@@ -20,6 +25,35 @@ use crate::{
 
 pub(crate) fn init(_cx: &mut App) {
     // No app-level init needed — TooltipOverlay is per-window via Root.
+}
+
+/// 允许应用把所有托管提示交给独立窗口，同时保留组件原有的内容构建方式。
+pub struct WindowTooltipHost {
+    pub dispatch: Rc<dyn Fn(WindowTooltipEvent, &mut Window, &mut App)>,
+    pub window_id: Option<WindowId>,
+}
+
+impl Global for WindowTooltipHost {}
+
+pub enum WindowTooltipEvent {
+    Show(WeakEntity<WindowTooltipTrigger>),
+    Hide(EntityId),
+    Refresh(EntityId),
+}
+
+pub struct WindowTooltipTrigger {
+    pub bounds: Bounds<Pixels>,
+    pub placement: Option<Placement>,
+    pub build: Rc<dyn Fn(&mut Window, &mut App) -> AnyView>,
+}
+
+fn dispatch_window_tooltip(event: WindowTooltipEvent, window: &mut Window, cx: &mut App) {
+    if let Some(dispatch) = cx
+        .try_global::<WindowTooltipHost>()
+        .map(|host| host.dispatch.clone())
+    {
+        dispatch(event, window, cx);
+    }
 }
 
 // ── Tooltip view (unchanged API) ────────────────────────────────────────────
@@ -39,6 +73,15 @@ pub struct Tooltip {
 }
 
 impl Tooltip {
+    /// 判断普通文字提示是否保持相同的内容、样式和快捷键；自定义内容始终重新渲染。
+    pub fn has_same_content(&self, other: &Self) -> bool {
+        matches!((&self.content, &other.content),
+            (TooltipContext::Text(Text::String(left)), TooltipContext::Text(Text::String(right)))
+            if left == right)
+            && self.style == other.style
+            && self.key_binding == other.key_binding
+    }
+
     /// Create a Tooltip with a text content.
     pub fn new(text: impl Into<Text>) -> Self {
         Self {
@@ -78,7 +121,14 @@ impl Tooltip {
     }
 
     /// Build the tooltip and return it as an `AnyView`.
-    pub fn build(self, _: &mut Window, cx: &mut App) -> AnyView {
+    pub fn build(mut self, window: &mut Window, cx: &mut App) -> AnyView {
+        // 独立窗口没有来源窗口的按键上下文，须在构建内容时解析快捷键。
+        if self.key_binding.is_none() {
+            if let Some((action, context)) = &self.action {
+                self.key_binding =
+                    Kbd::binding_for_action(action.as_ref(), context.as_deref(), window);
+            }
+        }
         cx.new(|_| self).into()
     }
 }
@@ -109,30 +159,23 @@ impl Render for Tooltip {
             }
         };
 
-        div().child(
-            // Wrap in a child, to ensure the left margin is applied to the tooltip
-            BaseTooltip::new("tooltip-popup")
-                .h_flex()
+        if cx
+            .try_global::<WindowTooltipHost>()
+            .is_some_and(|host| host.window_id == Some(window.window_handle().window_id()))
+        {
+            return div()
+                .flex()
+                .items_center()
                 .font_family(cx.theme().font_family.clone())
-                .m_3()
-                .bg(background)
                 .text_color(cx.theme().popover_foreground)
-                .border_1()
-                .border_color(cx.theme().border)
-                .shadow_md()
-                .rounded(cx.theme().radius)
-                .justify_between()
-                .py_0p5()
-                .px_2()
-                .text_sm()
+                .text_size(gpui::rems(0.75))
+                .line_height(gpui::rems(1.125))
                 .gap_3()
                 .refine_style(&self.style)
-                .map(|this| {
-                    this.child(div().map(|this| match self.content {
-                        TooltipContext::Text(ref text) => this.child(text.clone()),
-                        TooltipContext::Element(ref builder) => this.child(builder(window, cx)),
-                    }))
-                })
+                .child(div().min_w_0().map(|this| match self.content {
+                    TooltipContext::Text(ref text) => this.child(text.clone()),
+                    TooltipContext::Element(ref builder) => this.child(builder(window, cx)),
+                }))
                 .when_some(key_binding, |this, kbd| {
                     this.child(
                         div()
@@ -141,8 +184,46 @@ impl Render for Tooltip {
                             .text_color(cx.theme().muted_foreground)
                             .child(kbd.appearance(false)),
                     )
-                }),
-        )
+                })
+                .into_any_element();
+        }
+
+        div()
+            .child(
+                // Wrap in a child, to ensure the left margin is applied to the tooltip
+                BaseTooltip::new("tooltip-popup")
+                    .h_flex()
+                    .font_family(cx.theme().font_family.clone())
+                    .m_3()
+                    .bg(background)
+                    .text_color(cx.theme().popover_foreground)
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .shadow_md()
+                    .rounded(cx.theme().radius)
+                    .justify_between()
+                    .py_0p5()
+                    .px_2()
+                    .text_sm()
+                    .gap_3()
+                    .refine_style(&self.style)
+                    .map(|this| {
+                        this.child(div().map(|this| match self.content {
+                            TooltipContext::Text(ref text) => this.child(text.clone()),
+                            TooltipContext::Element(ref builder) => this.child(builder(window, cx)),
+                        }))
+                    })
+                    .when_some(key_binding, |this, kbd| {
+                        this.child(
+                            div()
+                                .text_xs()
+                                .flex_shrink_0()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(kbd.appearance(false)),
+                        )
+                    }),
+            )
+            .into_any_element()
     }
 }
 
@@ -229,9 +310,7 @@ impl ComponentTooltip {
 
 // ── Internal managed tooltip trait ──────────────────────────────────────────
 
-pub(crate) trait ManagedTooltipExt:
-    StatefulInteractiveElement + crate::ElementExt + Sized
-{
+pub trait ManagedTooltipExt: StatefulInteractiveElement + crate::ElementExt + Sized {
     fn managed_tooltip(
         self,
         build_tooltip: impl Fn(&mut Window, &mut App) -> AnyView + 'static,
@@ -252,17 +331,77 @@ pub(crate) trait ManagedTooltipExt:
         preferred_placement: Option<Placement>,
         build_tooltip: impl Fn(&mut Window, &mut App) -> AnyView + 'static,
     ) -> Self {
-        let build_tooltip = Rc::new(build_tooltip);
+        let build_tooltip: Rc<dyn Fn(&mut Window, &mut App) -> AnyView> = Rc::new(build_tooltip);
+        let trigger: Rc<RefCell<Option<Entity<WindowTooltipTrigger>>>> = Rc::default();
+        let trigger_for_bounds = trigger.clone();
+        let trigger_for_paint = trigger.clone();
+        let trigger_for_move = trigger.clone();
+        let build_for_bounds = build_tooltip.clone();
         let trigger_bounds_cell: Rc<Cell<Bounds<Pixels>>> = Rc::new(Cell::new(Bounds::default()));
         let bounds_writer = trigger_bounds_cell.clone();
 
-        gpui_base::ElementExt::on_prepaint(self, move |bounds, _, _| {
+        gpui::StatefulInteractiveElement::on_prepaint(self, move |info, window, cx| {
+            let bounds = info.bounds;
             bounds_writer.set(bounds);
+            if cx.has_global::<WindowTooltipHost>() {
+                let bounds = bounds.intersect(&window.content_mask().bounds);
+                let state = window.use_keyed_state("window-tooltip-trigger", cx, |_, _| {
+                    WindowTooltipTrigger {
+                        bounds,
+                        placement: preferred_placement,
+                        build: build_for_bounds.clone(),
+                    }
+                });
+                state.update(cx, |state, _| {
+                    state.bounds = bounds;
+                    state.build = build_for_bounds.clone();
+                    state.placement = preferred_placement;
+                });
+                *trigger_for_bounds.borrow_mut() = Some(state);
+            }
+        })
+        .child(
+            gpui::canvas(
+                |_, _, _| {},
+                move |_, _, window, cx| {
+                    if let Some(trigger) = trigger_for_paint.borrow().as_ref() {
+                        dispatch_window_tooltip(
+                            WindowTooltipEvent::Refresh(trigger.entity_id()),
+                            window,
+                            cx,
+                        );
+                    }
+                },
+            )
+            .absolute()
+            .size_full(),
+        )
+        .on_mouse_move_all(move |event, phase, hitbox, window, cx| {
+            // 动态裁剪中的小按钮可能没有新的 hover 边沿事件，按实际命中恢复跟随。
+            if phase == gpui::DispatchPhase::Bubble
+                && event.pressed_button.is_none()
+                && hitbox.is_hovered(window)
+                && !cx.has_active_drag()
+                && let Some(trigger) = trigger_for_move.borrow().as_ref()
+            {
+                dispatch_window_tooltip(WindowTooltipEvent::Show(trigger.downgrade()), window, cx);
+            }
         })
         .on_hover({
             let trigger_bounds_cell = trigger_bounds_cell.clone();
             let build_tooltip = build_tooltip.clone();
             move |hovered, window, cx| {
+                if cx.has_global::<WindowTooltipHost>() {
+                    if let Some(trigger) = trigger.borrow().as_ref() {
+                        let event = if *hovered {
+                            WindowTooltipEvent::Show(trigger.downgrade())
+                        } else {
+                            WindowTooltipEvent::Hide(trigger.entity_id())
+                        };
+                        dispatch_window_tooltip(event, window, cx);
+                    }
+                    return;
+                }
                 if let Some(overlay) = Root::tooltip_overlay(window, cx) {
                     if *hovered {
                         let bounds = trigger_bounds_cell.get();

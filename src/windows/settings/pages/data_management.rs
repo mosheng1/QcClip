@@ -1,4 +1,5 @@
 use crate::ui::scale::ui_rem;
+use gpui_component::tooltip::ManagedTooltipExt as _;
 
 use super::super::{
     SettingsPage, notify_settings_error, notify_settings_status, open_settings_directory,
@@ -374,7 +375,7 @@ impl SettingsWindowView {
                     .px_3()
                     .text_sm()
                     .text_color(theme.foreground)
-                    .tooltip(move |window, cx| {
+                    .managed_tooltip(move |window, cx| {
                         Tooltip::new(data_location_tooltip.clone()).build(window, cx)
                     })
                     .child(div().min_w_0().w_full().truncate().child(data_root_text)),
@@ -1465,7 +1466,7 @@ fn source_distribution_row(
                 .flex()
                 .items_center()
                 .justify_center()
-                .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+                .managed_tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
                 .child(app_icon),
         )
         .child(

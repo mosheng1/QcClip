@@ -1,4 +1,5 @@
 use crate::ui::scale::ui_rem;
+use gpui_component::tooltip::ManagedTooltipExt as _;
 
 use std::rc::Rc;
 use std::time::Duration;
@@ -151,7 +152,7 @@ pub(crate) fn render(
                 .items_center()
                 .rounded_lg()
                 .cursor_pointer()
-                .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
+                .managed_tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     on_select(this, item_id, window, cx);
                 }));

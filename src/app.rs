@@ -209,6 +209,7 @@ pub fn run() {
             crate::platform::external_drag::ExternalDragService::install(cx);
             DialogWindowService::install(cx);
             MenuService::install(cx);
+            crate::windows::tooltip::TooltipService::install(cx);
             crate::windows::preview::PreviewWindowService::install(
                 crate::services::image_preview::ImagePreviewService::new(_raw_blob_store.clone()),
                 cx,

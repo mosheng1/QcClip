@@ -1,4 +1,5 @@
 use crate::ui::scale::ui_rem;
+use gpui_component::tooltip::ManagedTooltipExt as _;
 
 use std::{cell::Cell, rc::Rc, sync::Arc, time::Duration};
 
@@ -214,7 +215,7 @@ fn action_button(
         .justify_center()
         .rounded_md()
         .cursor_pointer()
-        .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
+        .managed_tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
         .child(hover_icon(icon_group, name, 13.0, color));
 
     if name == "plus" {
@@ -389,7 +390,7 @@ fn tag_chip(
                 this.bg(theme.secondary_hover)
             }
         })
-        .tooltip(move |window, cx| Tooltip::new(tag_name.clone()).build(window, cx))
+        .managed_tooltip(move |window, cx| Tooltip::new(tag_name.clone()).build(window, cx))
         .child(tag_label)
         .on_click(cx.listener(move |this, _, _, cx| {
             this.select_tag(tag_id, cx);

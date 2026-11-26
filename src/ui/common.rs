@@ -1,4 +1,5 @@
 use crate::ui::scale::ui_rem;
+use gpui_component::tooltip::ManagedTooltipExt as _;
 
 use gpui::prelude::*;
 use gpui::{
@@ -194,7 +195,7 @@ pub fn titlebar_button(
             }
         })
         .aria_label(tooltip.clone())
-        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+        .managed_tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
         .child(hover_icon(group, name, 16.0, color));
     if active {
         button = button.bg(theme.primary).shadow_sm();

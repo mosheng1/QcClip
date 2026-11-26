@@ -1,4 +1,5 @@
 use crate::ui::scale::ui_rem;
+use gpui_component::tooltip::ManagedTooltipExt as _;
 
 use std::{collections::HashMap, ops::Range, path::PathBuf, rc::Rc, sync::Arc, time::Duration};
 
@@ -1218,7 +1219,7 @@ impl StickyNote {
                     this.toggle_collapsed(window, cx);
                 }
             }))
-            .tooltip({
+            .managed_tooltip({
                 let hint = translator.translate("sticky.expand_hint");
                 move |window, cx| Tooltip::new(hint.clone()).build(window, cx)
             })
@@ -1888,7 +1889,7 @@ impl StickyNote {
                 .bg(gpui::transparent_black())
                 .px(px(5.0))
                 .text_color(paper.muted)
-                .tooltip({
+                .managed_tooltip({
                     let tooltip = translator.translate_with_args(
                         "sticky.split.separator_tooltip",
                         &[("mode", separator_label)],
@@ -2189,7 +2190,7 @@ fn header_button(
             cx.stop_propagation();
             on_click(event, window, cx);
         })
-        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+        .managed_tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
         .child(icon(
             icon_name,
             14.0,
@@ -2249,7 +2250,7 @@ fn color_button(
             cx.stop_propagation();
             on_click(event, window, cx);
         })
-        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+        .managed_tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
         .child(icon(icon_name, 14.0, paper.muted))
         .child(swatch)
         .into_any_element()

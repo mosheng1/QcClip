@@ -6,14 +6,15 @@ use std::{
 use gpui::{
     AbsoluteLength, AnyElement, App, AvailableSpace, Bounds, DefiniteLength, Element, ElementId,
     GlobalElementId, HighlightStyle, InspectorElementId, InteractiveElement as _, IntoElement,
-    LayoutId, LineFragment as WrapLineFragment, ObjectFit, Pixels, ShapedLine, SharedString,
-    SharedUri, Size, StatefulInteractiveElement as _, Styled, StyledImage as _, TextRun, TextStyle,
-    WhiteSpace, Window, img, point, prelude::FluentBuilder as _, px, relative, size,
+    LayoutId, LineFragment as WrapLineFragment, ObjectFit, ParentElement as _, Pixels, ShapedLine,
+    SharedString, SharedUri, Size, StatefulInteractiveElement as _, Styled, StyledImage as _,
+    TextRun, TextStyle, WhiteSpace, Window, div, img, point, prelude::FluentBuilder as _, px,
+    relative, size,
 };
 
 use crate::{
     text::text_view::{LinkClickHandlerFn, handle_link_click},
-    tooltip::Tooltip,
+    tooltip::{ManagedTooltipExt as _, Tooltip},
 };
 
 use super::{
@@ -125,18 +126,24 @@ impl InlineFlow {
         size: Size<Pixels>,
         link_click_handler: Option<Arc<LinkClickHandlerFn>>,
     ) -> AnyElement {
-        img(image_source(url))
+        div()
             .id(ix)
-            .object_fit(ObjectFit::Contain)
             .max_w(relative(1.))
             .w(size.width)
             .h(size.height)
+            .child(
+                img(image_source(url))
+                    .object_fit(ObjectFit::Contain)
+                    .size_full(),
+            )
             .when_some(link.clone(), |this, link| {
                 let title = title.to_string();
                 let aux_link = link.clone();
                 let aux_link_click_handler = link_click_handler.clone();
                 this.cursor_pointer()
-                    .tooltip(move |window, cx| Tooltip::new(title.clone()).build(window, cx))
+                    .managed_tooltip(move |window, cx| {
+                        Tooltip::new(title.clone()).build(window, cx)
+                    })
                     .on_click(move |event, window, cx| {
                         gpui_base::TextSelection::end(window, cx);
                         cx.stop_propagation();

@@ -1,4 +1,5 @@
 use crate::ui::scale::ui_rem;
+use gpui_component::tooltip::ManagedTooltipExt as _;
 
 use gpui::prelude::*;
 use std::time::Duration;
@@ -285,7 +286,7 @@ fn tab_button(
 
     button
         .id(("main-tab", definition.id as u32))
-        .tooltip(move |window, cx| Tooltip::new(tooltip_label.clone()).build(window, cx))
+        .managed_tooltip(move |window, cx| Tooltip::new(tooltip_label.clone()).build(window, cx))
         .on_click(cx.listener(move |this, _, _, cx| {
             this.suppress_tab_bar_hover(tab_id.layout_button());
             this.select_tab(tab_id, cx);
@@ -404,7 +405,7 @@ fn filter_button(
 
     button
         .id(("filter-button", definition.id as u32))
-        .tooltip(move |window, cx| Tooltip::new(tooltip_label.clone()).build(window, cx))
+        .managed_tooltip(move |window, cx| Tooltip::new(tooltip_label.clone()).build(window, cx))
         .on_click(cx.listener(move |this, _, _, cx| {
             this.suppress_tab_bar_hover(filter_id.layout_button());
             this.filters.toggle(filter_id);
@@ -459,7 +460,7 @@ fn symbol_category_button(
         .cursor_pointer()
         .child(category_icon)
         .id(("symbol-category", category as u32))
-        .tooltip(move |window, cx| Tooltip::new(tooltip_label.clone()).build(window, cx))
+        .managed_tooltip(move |window, cx| Tooltip::new(tooltip_label.clone()).build(window, cx))
         .on_click(cx.listener(move |this, _, _, cx| {
             this.suppress_tab_bar_hover(category.layout_button());
             this.select_symbol_category(category, cx);
@@ -681,7 +682,9 @@ pub fn render(
             .cursor_pointer()
             .rounded_lg()
             .hover(|this| this.bg(theme.secondary_hover))
-            .tooltip(move |window, cx| Tooltip::new(collapse_tooltip.clone()).build(window, cx))
+            .managed_tooltip(move |window, cx| {
+                Tooltip::new(collapse_tooltip.clone()).build(window, cx)
+            })
             .child(hover_icon(
                 "main-sidebar-collapse",
                 collapse_icon,

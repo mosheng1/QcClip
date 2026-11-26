@@ -1,4 +1,5 @@
 use crate::ui::scale::ui_rem;
+use gpui_component::tooltip::ManagedTooltipExt as _;
 
 use std::{cell::Cell, ops::Range, path::PathBuf, rc::Rc, sync::Arc};
 
@@ -329,7 +330,7 @@ fn render_add_images_button(
         .justify_center()
         .rounded_lg()
         .cursor_pointer()
-        .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
+        .managed_tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
         .hover(|this| this.bg(theme.secondary_hover))
         .on_click(cx.listener(move |_, _, window, cx| {
             choose_gallery_images(main_window.clone(), window, cx, &translator_for_click);
@@ -547,7 +548,7 @@ fn render_group_button(
             .justify_center();
     }
     group_button = group_button
-        .tooltip(move |window, cx| Tooltip::new(tooltip_label.clone()).build(window, cx));
+        .managed_tooltip(move |window, cx| Tooltip::new(tooltip_label.clone()).build(window, cx));
     if horizontal && active {
         group_button = group_button.bg(theme.primary).shadow_sm();
     } else if !active {
@@ -666,7 +667,7 @@ fn render_edit_group_button(
         .justify_center()
         .rounded_lg()
         .cursor_pointer()
-        .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
+        .managed_tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
         .hover(|this| this.bg(theme.secondary_hover))
         .on_click(cx.listener(move |_, _, window, cx| {
             open_edit_group_form(
@@ -723,7 +724,7 @@ fn render_add_group_button(
             .justify_center();
     }
     button
-        .tooltip(move |window, cx| Tooltip::new(tooltip_label.clone()).build(window, cx))
+        .managed_tooltip(move |window, cx| Tooltip::new(tooltip_label.clone()).build(window, cx))
         .hover(|this| this.bg(theme.secondary_hover))
         .child(hover_icon(
             "gallery-add-group",
@@ -1141,7 +1142,7 @@ fn render_gallery_image(
         .rounded_lg()
         .overflow_hidden()
         .cursor_pointer()
-        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+        .managed_tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
         .ring_2()
         .ring_color(transparent_black())
         .hover(|this| this.bg(theme.secondary_hover).ring_color(theme.primary))
@@ -1367,7 +1368,7 @@ fn render_gallery_sort_button(
         .cursor_pointer()
         .aria_label(label)
         .hover(|this| this.bg(theme.secondary_hover))
-        .tooltip(move |window, cx| Tooltip::new(sort_label.clone()).build(window, cx))
+        .managed_tooltip(move |window, cx| Tooltip::new(sort_label.clone()).build(window, cx))
         .on_prepaint(move |prepaint, _, _| {
             trigger_bounds_for_paint.set(Some(prepaint.bounds));
         })

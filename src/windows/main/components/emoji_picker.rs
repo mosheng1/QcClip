@@ -1,4 +1,5 @@
 use crate::ui::scale::ui_rem;
+use gpui_component::tooltip::ManagedTooltipExt as _;
 
 use std::{collections::HashSet, rc::Rc, sync::Arc};
 
@@ -354,7 +355,7 @@ fn render_emoji_item(
         .justify_center()
         .rounded_lg()
         .cursor_pointer()
-        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+        .managed_tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
         .hover(|this| this.bg(cx.theme().colors.secondary_hover))
         .on_click(cx.listener(move |this, _, _, cx| {
             this.paste_emoji(glyph.clone(), cx);

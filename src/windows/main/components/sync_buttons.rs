@@ -1,4 +1,5 @@
 use gpui::{App, Context, Div, MouseButton, Rems, div, prelude::*, px};
+use gpui_component::tooltip::ManagedTooltipExt as _;
 use gpui_component::{ActiveTheme as _, tooltip::Tooltip};
 
 use crate::{
@@ -83,7 +84,7 @@ pub(super) fn render(
             .items_center()
             .justify_center()
             .aria_label(label)
-            .tooltip(move |window, cx| {
+            .managed_tooltip(move |window, cx| {
                 let text = if matches!(action, Action::Upload) && enabled {
                     SyncService::get(cx)
                         .and_then(|runtime| runtime.latest_upload())

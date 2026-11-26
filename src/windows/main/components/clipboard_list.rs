@@ -1,4 +1,5 @@
 use crate::ui::scale::ui_rem;
+use gpui_component::tooltip::ManagedTooltipExt as _;
 
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -1176,7 +1177,7 @@ fn source_application_icon(
     }
     icon_container
         .child(icon)
-        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+        .managed_tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
         .into_any_element()
 }
 
@@ -1677,7 +1678,7 @@ fn hover_action_button(
         .border_color(gpui::transparent_black())
         .hover(|style| style.bg(theme.secondary_active).border_color(theme.border))
         .child(hover_icon(icon_group, icon_name, 13.0, icon_color))
-        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+        .managed_tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
         .on_click(on_click)
         .into_any_element()
 }
@@ -1833,7 +1834,8 @@ fn render_selection_indicator(
                 });
             });
         if selection_number.is_none() {
-            indicator = indicator.tooltip(|window, cx| Tooltip::new("点击选中").build(window, cx));
+            indicator =
+                indicator.managed_tooltip(|window, cx| Tooltip::new("点击选中").build(window, cx));
         }
         return indicator.into_any_element();
     }

@@ -2,6 +2,7 @@ use super::super::{
     SettingsPage, notify_settings_error, notify_settings_status, open_settings_directory,
 };
 use crate::windows::notification::{NotificationLevel, NotificationService};
+use gpui_component::tooltip::ManagedTooltipExt as _;
 use std::{
     path::PathBuf,
     sync::{
@@ -243,7 +244,7 @@ impl SettingsWindowView {
                                 .truncate()
                                 .text_xs()
                                 .child(backup)
-                                .tooltip(move |window, cx| {
+                                .managed_tooltip(move |window, cx| {
                                     Tooltip::new(tooltip.clone()).build(window, cx)
                                 }),
                         )

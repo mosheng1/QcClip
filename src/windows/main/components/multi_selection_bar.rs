@@ -1,4 +1,5 @@
 use crate::ui::scale::ui_rem;
+use gpui_component::tooltip::ManagedTooltipExt as _;
 
 use gpui::{
     AnyElement, Context, InteractiveElement, IntoElement, ParentElement,
@@ -49,7 +50,7 @@ pub fn render(
             .rounded_lg()
             .cursor_pointer()
             .hover(|this| this.bg(theme.secondary_hover))
-            .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
+            .managed_tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
             .child(hover_icon(id, icon_name, 16.0, theme.foreground));
         match id {
             "multi-selection-paste" => button.on_click(cx.listener(|this, _, _, cx| {

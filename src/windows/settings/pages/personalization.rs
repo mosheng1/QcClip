@@ -1,4 +1,5 @@
 use crate::ui::scale::ui_rem;
+use gpui_component::tooltip::ManagedTooltipExt as _;
 
 use super::super::{SettingsPage, notify_settings_error};
 use gpui::prelude::*;
@@ -1087,7 +1088,9 @@ fn theme_swatches(
                             this.transitions(|transitions| transitions.p(hover_motion.clone()))
                         })
                         .when(!selected, |this| this.hover(|style| style.p(px(1.0))))
-                        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+                        .managed_tooltip(move |window, cx| {
+                            Tooltip::new(tooltip.clone()).build(window, cx)
+                        })
                         .on_click(move |_, _, cx| on_select(mode, value.clone(), cx))
                         .child(div().size_full().rounded(ui_rem(6.0)).bg(colors.primary))
                 })),

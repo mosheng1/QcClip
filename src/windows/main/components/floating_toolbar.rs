@@ -1,4 +1,5 @@
 use crate::ui::scale::ui_rem;
+use gpui_component::tooltip::ManagedTooltipExt as _;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -88,7 +89,7 @@ pub fn render(
         .bg(theme.secondary)
         .cursor_pointer()
         .hover(|this| this.bg(theme.secondary_hover))
-        .tooltip({
+        .managed_tooltip({
             let label = translator.translate("main.floating_toolbar.scroll_to_top");
             move |window, cx| Tooltip::new(label.clone()).build(window, cx)
         })
@@ -121,7 +122,7 @@ pub fn render(
         .bg(theme.secondary)
         .cursor_pointer()
         .hover(|this| this.bg(theme.secondary_hover))
-        .tooltip({
+        .managed_tooltip({
             let label = translator.translate("main.floating_toolbar.new_favorite");
             move |window, cx| Tooltip::new(label.clone()).build(window, cx)
         })
@@ -145,7 +146,7 @@ pub fn render(
         .items_center()
         .justify_center()
         .cursor_ns_resize()
-        .tooltip({
+        .managed_tooltip({
             let label = translator.translate("main.floating_toolbar.drag_to_move");
             move |window, cx| Tooltip::new(label.clone()).build(window, cx)
         })

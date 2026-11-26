@@ -1,4 +1,5 @@
 use crate::ui::scale::ui_rem;
+use gpui_component::tooltip::ManagedTooltipExt as _;
 
 use gpui::prelude::*;
 use gpui::{
@@ -323,7 +324,7 @@ pub fn render(
                     |view| {
                         let tooltip = i18n::translator(cx).translate("updates.view_progress");
                         view.cursor_pointer()
-                            .tooltip(move |_, cx| {
+                            .managed_tooltip(move |_, cx| {
                                 cx.new(|_| gpui_component::tooltip::Tooltip::new(tooltip.clone()))
                                     .into()
                             })

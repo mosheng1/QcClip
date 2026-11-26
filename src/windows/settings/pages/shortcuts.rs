@@ -1,4 +1,5 @@
 use crate::ui::scale::ui_rem;
+use gpui_component::tooltip::ManagedTooltipExt as _;
 
 use super::super::{SettingsPage, notify_settings_error};
 use gpui::prelude::*;
@@ -803,7 +804,7 @@ impl SettingsWindowView {
                                 .text_color(theme.muted_foreground)
                                 .child(threshold_title)
                                 .child(div().opacity(0.7).child("10–1000 ms"))
-                                .tooltip(move |window, cx| {
+                                .managed_tooltip(move |window, cx| {
                                     Tooltip::new(description.clone()).build(window, cx)
                                 }),
                         )
@@ -1294,7 +1295,9 @@ fn shortcut_recorder(
                 .items_center()
                 .justify_center()
                 .size_4()
-                .tooltip(move |window, cx| Tooltip::new(status_tooltip.clone()).build(window, cx))
+                .managed_tooltip(move |window, cx| {
+                    Tooltip::new(status_tooltip.clone()).build(window, cx)
+                })
                 .child(Icon::new(status_icon).xsmall().text_color(status_color)),
         )
         .child(
@@ -1633,7 +1636,7 @@ fn session_shortcut_row(
         .items_center()
         .justify_center()
         .aria_label(checkbox_label)
-        .tooltip(move |window, cx| Tooltip::new(checkbox_tooltip.clone()).build(window, cx))
+        .managed_tooltip(move |window, cx| Tooltip::new(checkbox_tooltip.clone()).build(window, cx))
         .child(checkbox);
     let control = h_flex()
         .gap_2()

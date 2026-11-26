@@ -6,7 +6,7 @@ use gpui::{
 use crate::{ActiveTheme, StyledExt};
 
 /// A tag for displaying keyboard keybindings.
-#[derive(IntoElement, Clone, Debug)]
+#[derive(IntoElement, Clone, Debug, PartialEq)]
 pub struct Kbd {
     style: StyleRefinement,
     stroke: Keystroke,

@@ -1,4 +1,5 @@
 use crate::ui::scale::ui_rem;
+use gpui_component::tooltip::ManagedTooltipExt as _;
 
 use super::super::{SettingsPage, notify_settings_error};
 use gpui::prelude::*;
@@ -996,7 +997,7 @@ impl SettingsWindowView {
                         .text_color(theme.muted_foreground)
                         .child(title)
                         .child(div().opacity(0.7).child("0–1000 ms"))
-                        .tooltip(move |window, cx| {
+                        .managed_tooltip(move |window, cx| {
                             Tooltip::new(description.clone()).build(window, cx)
                         }),
                 )

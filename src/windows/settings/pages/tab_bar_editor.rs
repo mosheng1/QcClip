@@ -1,3 +1,4 @@
+use gpui_component::tooltip::ManagedTooltipExt as _;
 use std::{cell::Cell, rc::Rc};
 
 use gpui::prelude::*;
@@ -261,7 +262,7 @@ impl SettingsWindowView {
             })
             .on_prepaint(move |prepaint, _, _| measured_size.set(prepaint.bounds.size))
             .when(dragging, |style| style.invisible())
-            .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+            .managed_tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
             .on_click(cx.listener(move |view, _, _, cx| {
                 cx.stop_propagation();
                 save_layout(view, |layout| layout.toggle(button), cx);
