@@ -137,6 +137,12 @@ pwsh -File scripts/package.ps1 -Formats deb
 
 Linux 建议分别使用 x64 和 ARM64 构建机。仅执行 `rustup target add` 不会提供跨架构链接器、目标系统开发库或 AppImage 工具运行环境。
 
+## 内嵌资源与图片格式
+
+构建时使用项目已有的 Zstandard 压缩 Unicode 符号、Emoji 清单和中文关键词数据，运行时首次使用再解压；原始数据保留在 `assets/data`，无需手工生成资源包。资源加载器只嵌入界面图标、PNG 图片、Twemoji 压缩包和图片许可，避免重复打包原始数据及辅助文件。
+
+`vendor/image` 保留锁定版本 `image 0.25.10` 的上游源码，仅将默认图片格式限定为 PNG、JPEG、GIF、WebP、BMP、TIFF、ICO。主项目通过 `[patch.crates-io]` 统一应用到 GPUI 等依赖；其他格式的编解码器不再默认编入程序。此调整不修改发布编译参数。
+
 ## 产物与已有构建
 
 产物目录：

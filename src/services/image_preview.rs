@@ -798,6 +798,34 @@ mod tests {
     }
 
     #[test]
+    fn retained_image_formats_decode_after_feature_trimming() {
+        for format in [
+            image::ImageFormat::Png,
+            image::ImageFormat::Jpeg,
+            image::ImageFormat::Gif,
+            image::ImageFormat::WebP,
+            image::ImageFormat::Bmp,
+            image::ImageFormat::Tiff,
+            image::ImageFormat::Ico,
+        ] {
+            let source = if format == image::ImageFormat::Jpeg {
+                image::DynamicImage::new_rgb8(2, 1)
+            } else {
+                image::DynamicImage::new_rgba8(2, 1)
+            };
+            let mut bytes = Cursor::new(Vec::new());
+            source
+                .write_to(&mut bytes, format)
+                .expect("无法生成测试图片");
+            let name = format!("registered:{}", format.extensions_str()[0]);
+            let decoded = decode_image_without_wic(bytes.get_ref(), &name, (2, 1))
+                .expect("裁剪后无法解码保留的图片格式");
+            assert_eq!(decoded.size(0).width.0, 2);
+            assert_eq!(decoded.size(0).height.0, 1);
+        }
+    }
+
+    #[test]
     fn probe_image_dimensions_reads_png_header_without_decoding_pixels() {
         let mut bytes = Vec::new();
         PngEncoder::new(&mut bytes)

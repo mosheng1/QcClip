@@ -4,9 +4,18 @@ use std::{borrow::Cow, collections::HashMap};
 
 #[derive(RustEmbed)]
 #[folder = "assets"]
+#[include = "icons/*.svg"]
+#[include = "*.png"]
+#[include = "data/emoji/twemoji.json.zst"]
+#[include = "data/emoji/TWEMOJI-LICENSE.txt"]
 struct EmbeddedAssets;
 
 pub struct Assets;
+
+pub(crate) fn unpack_text(packed: &[u8]) -> String {
+    let bytes = zstd::stream::decode_all(packed).expect("无法解压内嵌 Unicode 数据");
+    String::from_utf8(bytes).expect("内嵌 Unicode 数据不是有效的 UTF-8")
+}
 
 impl Assets {
     pub fn new() -> Self {
@@ -44,6 +53,36 @@ mod tests {
     use super::*;
     use crate::emoji;
     use std::sync::Arc;
+
+    #[test]
+    fn packed_unicode_data_preserves_sources_without_duplicate_assets() {
+        for (path, packed, source) in [
+            (
+                "data/symbols/UnicodeData.txt",
+                include_bytes!(concat!(env!("OUT_DIR"), "/UnicodeData.txt.zst")).as_slice(),
+                include_str!("../assets/data/symbols/UnicodeData.txt"),
+            ),
+            (
+                "data/emoji/emoji-test.txt",
+                include_bytes!(concat!(env!("OUT_DIR"), "/emoji-test.txt.zst")).as_slice(),
+                include_str!("../assets/data/emoji/emoji-test.txt"),
+            ),
+            (
+                "data/emoji/annotations-zh.xml",
+                include_bytes!(concat!(env!("OUT_DIR"), "/annotations-zh.xml.zst")).as_slice(),
+                include_str!("../assets/data/emoji/annotations-zh.xml"),
+            ),
+        ] {
+            assert_eq!(unpack_text(packed), source);
+            assert!(EmbeddedAssets::get(path).is_none());
+        }
+        assert!(EmbeddedAssets::iter().all(|path| {
+            path.ends_with(".svg")
+                || path.ends_with(".png")
+                || path == "data/emoji/twemoji.json.zst"
+                || path == "data/emoji/TWEMOJI-LICENSE.txt"
+        }));
+    }
 
     #[test]
     fn twemoji_covers_picker_and_skin_variants() {

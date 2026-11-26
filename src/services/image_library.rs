@@ -590,7 +590,7 @@ impl ImageLibraryService {
             )
             .set(
                 "Accept",
-                "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+                "image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
             )
             .set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8");
         if let Some(referrer) = referrer

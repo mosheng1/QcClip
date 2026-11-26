@@ -84,11 +84,21 @@ pub(crate) struct EmojiData {
 
 pub(crate) fn data() -> &'static EmojiData {
     static DATA: OnceLock<EmojiData> = OnceLock::new();
-    DATA.get_or_init(|| parse_emoji_data(include_str!("../assets/data/emoji/emoji-test.txt")))
+    DATA.get_or_init(|| {
+        let source = crate::assets::unpack_text(include_bytes!(concat!(
+            env!("OUT_DIR"),
+            "/emoji-test.txt.zst"
+        )));
+        parse_emoji_data(&source)
+    })
 }
 
 fn parse_emoji_data(source: &str) -> EmojiData {
-    let annotations = parse_annotations(include_str!("../assets/data/emoji/annotations-zh.xml"));
+    let source_annotations = crate::assets::unpack_text(include_bytes!(concat!(
+        env!("OUT_DIR"),
+        "/annotations-zh.xml.zst"
+    )));
+    let annotations = parse_annotations(&source_annotations);
     let mut group = None;
     let mut items = Vec::new();
     let mut item_indices = HashMap::new();

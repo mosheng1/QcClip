@@ -98,7 +98,13 @@ pub(crate) struct SymbolData {
 
 pub(crate) fn data() -> &'static SymbolData {
     static DATA: OnceLock<SymbolData> = OnceLock::new();
-    DATA.get_or_init(|| parse_unicode_data(include_str!("../assets/data/symbols/UnicodeData.txt")))
+    DATA.get_or_init(|| {
+        let source = crate::assets::unpack_text(include_bytes!(concat!(
+            env!("OUT_DIR"),
+            "/UnicodeData.txt.zst"
+        )));
+        parse_unicode_data(&source)
+    })
 }
 
 fn parse_unicode_data(source: &str) -> SymbolData {

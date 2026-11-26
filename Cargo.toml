@@ -52,7 +52,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-rust-embed = { version = "8", features = ["debug-embed"] }
+rust-embed = { version = "8", features = ["debug-embed", "include-exclude"] }
 tempfile = "3.27.0"
 rfd = "0.17"
 ureq = "2.12"
@@ -67,6 +67,7 @@ if-addrs = "0.15"
 
 [build-dependencies]
 embed-resource = "3.0.11"
+zstd = "0.13"
 
 [dev-dependencies]
 gpui = { git = "https://github.com/gpui-ce/gpui-ce", rev = "8e36ac0921443f036bcc41f3f988a8285a734dc0", package = "gpui-ce", features = ["test-support"] }
@@ -109,6 +110,8 @@ windows-core = "0.62.2"
 tray-icon = "=0.24.1"
 
 [patch.crates-io]
+# 统一裁剪 GPUI 等依赖启用的默认图片格式。
+image = { path = "vendor/image" }
 gpui-ce = { git = "https://github.com/gpui-ce/gpui-ce", rev = "8e36ac0921443f036bcc41f3f988a8285a734dc0", package = "gpui-ce" }
 gpui_ce_macros = { git = "https://github.com/gpui-ce/gpui-ce", rev = "8e36ac0921443f036bcc41f3f988a8285a734dc0", package = "gpui_ce_macros" }
 gpui_ce_platform = { git = "https://github.com/gpui-ce/gpui-ce", rev = "8e36ac0921443f036bcc41f3f988a8285a734dc0", package = "gpui_ce_platform" }
