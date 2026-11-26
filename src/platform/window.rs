@@ -1387,12 +1387,16 @@ pub(crate) fn is_window_resize_hit_test(
 /// 窗口输入法是否有未上屏的组字串；候选框是输入法自己的顶层窗口，组字期间点击它不算点击外部。
 #[cfg(target_os = "windows")]
 pub(crate) fn has_ime_composition(window: &Window) -> Result<bool, String> {
+    has_ime_composition_for_hwnd(window_hwnd(window)?)
+}
+
+#[cfg(target_os = "windows")]
+fn has_ime_composition_for_hwnd(hwnd: windows::Win32::Foundation::HWND) -> Result<bool, String> {
     use windows::Win32::UI::Input::Ime::{
         GCS_COMPSTR, ImmGetCompositionStringW, ImmGetContext, ImmReleaseContext,
     };
 
-    let hwnd = window_hwnd(window)?;
-    // SAFETY: hwnd 已通过 IsWindow 校验且属于当前线程；输入法上下文在返回前释放。
+    // SAFETY: hwnd 属于当前线程的有效窗口；输入法上下文在返回前释放。
     unsafe {
         let himc = ImmGetContext(hwnd);
         if himc.is_invalid() {
@@ -1402,6 +1406,45 @@ pub(crate) fn has_ime_composition(window: &Window) -> Result<bool, String> {
         let _ = ImmReleaseContext(hwnd, himc);
         Ok(length > 0)
     }
+}
+
+#[cfg(target_os = "windows")]
+thread_local! {
+    static IME_COMPOSITION_SENDER: std::cell::RefCell<Option<async_channel::Sender<(isize, bool)>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn subscribe_ime_composition() -> async_channel::Receiver<(isize, bool)> {
+    let (sender, receiver) = async_channel::unbounded();
+    IME_COMPOSITION_SENDER.with(|slot| *slot.borrow_mut() = Some(sender));
+    receiver
+}
+
+#[cfg(target_os = "windows")]
+fn notify_ime_composition(hwnd: windows::Win32::Foundation::HWND, message: u32) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION, WM_KILLFOCUS,
+        WM_NCDESTROY,
+    };
+
+    let composing = match message {
+        // 开始消息可能早于首个组字串，提前让出按键。
+        WM_IME_STARTCOMPOSITION => true,
+        WM_IME_COMPOSITION => match has_ime_composition_for_hwnd(hwnd) {
+            Ok(composing) => composing,
+            Err(error) => {
+                tracing::error!("读取窗口输入法状态失败：{error}");
+                return;
+            }
+        },
+        WM_IME_ENDCOMPOSITION | WM_KILLFOCUS | WM_NCDESTROY => false,
+        _ => return,
+    };
+    IME_COMPOSITION_SENDER.with(|slot| {
+        if let Some(sender) = slot.borrow().as_ref() {
+            let _ = sender.try_send((hwnd.0 as isize, composing));
+        }
+    });
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -2726,6 +2769,10 @@ unsafe extern "system" fn frameless_window_proc(
         WM_SIZING,
     };
 
+    // 直接监听原生组字消息，与点击外部不隐藏共用输入法上下文查询。
+    // 此处只发送通知，避免在窗口过程内重入 GPUI。
+    notify_ime_composition(hwnd, message);
+
     // SAFETY: 属性由本模块安装，指针在窗口销毁前有效。
     let hook = unsafe { GetPropW(hwnd, FRAMELESS_PROC_PROP) }.0 as *mut FramelessWindowHook;
     if !hook.is_null() {
@@ -2837,6 +2884,56 @@ mod native_resize_tests {
             // SAFETY: 测试窗口由当前线程创建，并在同一线程销毁。
             let _ = unsafe { DestroyWindow(self.0) };
         }
+    }
+
+    #[test]
+    fn native_ime_messages_notify_composition_without_input_entity_observers() {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION, WM_KILLFOCUS,
+        };
+
+        let receiver = subscribe_ime_composition();
+        // SAFETY: 使用系统窗口类创建隐藏窗口，验证真实窗口消息转发路径。
+        let window = TestWindow(unsafe {
+            CreateWindowExW(
+                Default::default(),
+                windows::core::w!("STATIC"),
+                windows::core::w!("输入法通知测试"),
+                WS_POPUP,
+                0,
+                0,
+                320,
+                200,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("无法创建输入法通知测试窗口")
+        });
+        install_frameless_client_area_hook(window.0, false);
+        let hwnd = window.0.0 as isize;
+        for (message, expected) in [
+            (WM_IME_STARTCOMPOSITION, true),
+            (
+                WM_IME_COMPOSITION,
+                has_ime_composition_for_hwnd(window.0).unwrap(),
+            ),
+            (WM_IME_ENDCOMPOSITION, false),
+            (WM_KILLFOCUS, false),
+        ] {
+            // SAFETY: 向当前线程的有效测试窗口发送输入法及失焦消息。
+            unsafe {
+                SendMessageW(window.0, message, None, None);
+            }
+            assert_eq!(receiver.try_recv().unwrap(), (hwnd, expected));
+        }
+        drop(window);
+        assert_eq!(
+            receiver.try_recv().unwrap(),
+            (hwnd, false),
+            "销毁窗口应清除组字状态"
+        );
     }
 
     #[test]

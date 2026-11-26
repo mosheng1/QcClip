@@ -48,6 +48,7 @@ pub(crate) struct HotkeyRuntime {
     quick_paste_index_hotkeys: HashMap<u32, HotKey>,
     failed_quick_paste_index_hotkeys: HashMap<String, String>,
     quick_paste_navigation_hotkeys: HashMap<u32, QuickPasteNavigationRegistration>,
+    ime_composing_window: Option<isize>,
     session_hotkeys: HashMap<SessionShortcutId, HotKey>,
     failed_session_hotkeys: HashMap<SessionShortcutId, HotKey>,
     last_session_dispatch: HashMap<SessionShortcutId, Instant>,
@@ -215,6 +216,7 @@ impl HotkeyRuntime {
             quick_paste_index_hotkeys: HashMap::new(),
             failed_quick_paste_index_hotkeys: HashMap::new(),
             quick_paste_navigation_hotkeys: HashMap::new(),
+            ime_composing_window: None,
             session_hotkeys: HashMap::new(),
             failed_session_hotkeys: HashMap::new(),
             last_session_dispatch: HashMap::new(),
@@ -283,6 +285,16 @@ impl HotkeyRuntime {
         }
         runtime.apply_quick_paste_index(&shortcuts.quick_paste_1_to_9);
         cx.set_global(runtime);
+        #[cfg(target_os = "windows")]
+        {
+            let receiver = crate::platform::window::subscribe_ime_composition();
+            cx.spawn(async move |cx| {
+                while let Ok((window, composing)) = receiver.recv().await {
+                    cx.update(|cx| set_ime_composing_window(window, composing, cx));
+                }
+            })
+            .detach();
+        }
 
         cx.spawn(async move |cx| {
             while let Ok(event) = receiver.recv().await {
@@ -1095,7 +1107,10 @@ impl HotkeyRuntime {
         window_visible: bool,
         pointer_inside: bool,
     ) -> Result<(), String> {
-        let should_register = window_visible && !self.suspended && self.global_enabled;
+        let should_register = window_visible
+            && !self.suspended
+            && self.global_enabled
+            && self.ime_composing_window.is_none();
         let mut desired = HashMap::new();
         if should_register {
             for id in SessionShortcutId::ALL {
@@ -2204,6 +2219,25 @@ pub(crate) fn deactivate_quick_paste_navigation(cx: &mut App) {
     sync_session_shortcuts(window_visible, pointer_inside, cx);
 }
 
+#[cfg(target_os = "windows")]
+fn set_ime_composing_window(window: isize, composing: bool, cx: &mut App) {
+    let changed = cx.update_global::<HotkeyRuntime, _>(|runtime, _| {
+        let previous = runtime.ime_composing_window;
+        if composing {
+            runtime.ime_composing_window = Some(window);
+        } else if previous == Some(window) {
+            runtime.ime_composing_window = None;
+        }
+        previous != runtime.ime_composing_window
+    });
+    if changed {
+        // 系统热键会先于输入法截获按键，组字期间必须注销，不能只跳过快捷键回调。
+        let (visible, pointer_inside) =
+            crate::windows::main::MainWindowService::session_shortcut_scope(cx);
+        sync_session_shortcuts(visible, pointer_inside, cx);
+    }
+}
+
 pub(crate) fn sync_session_shortcuts(window_visible: bool, pointer_inside: bool, cx: &mut App) {
     let shortcuts = crate::config_runtime::shortcuts_config(cx);
     let previous = cx.read_global::<HotkeyRuntime, _>(|runtime, _| {
@@ -2902,6 +2936,7 @@ mod tests {
             quick_paste_index_hotkeys: HashMap::new(),
             failed_quick_paste_index_hotkeys: HashMap::new(),
             quick_paste_navigation_hotkeys: HashMap::new(),
+            ime_composing_window: None,
             session_hotkeys: HashMap::new(),
             failed_session_hotkeys: HashMap::new(),
             last_session_dispatch: HashMap::new(),
@@ -3202,6 +3237,53 @@ mod tests {
             ShortcutsConfig::default().toggle_main_window,
             Some(ShortcutBinding::toggle_main_window_default())
         );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn ime_composition_releases_and_restores_session_hotkeys() {
+        let binding = ShortcutBinding {
+            alt: true,
+            shift: true,
+            ..ctrl_binding("F21")
+        };
+        let hotkey = binding_to_hotkey(&binding).unwrap();
+        let mut shortcuts = ShortcutsConfig::default();
+        for id in SessionShortcutId::ALL {
+            shortcuts.session_mut(id).binding = None;
+        }
+        shortcuts.select_next_item.binding = Some(binding);
+        let verifier = GlobalHotKeyManager::new().unwrap();
+        let mut runtime = runtime_for_test(Some(GlobalHotKeyManager::new().unwrap()));
+        runtime.sync_session(&shortcuts, true, true).unwrap();
+        let active = runtime.active_command(hotkey.id()).unwrap();
+        let event = HotkeyEvent {
+            id: hotkey.id(),
+            active,
+            state: HotKeyState::Pressed,
+        };
+        let press = runtime.mark_session_hotkey_pressed(event).unwrap();
+
+        runtime.ime_composing_window = Some(1);
+        runtime.sync_session(&shortcuts, true, true).unwrap();
+        assert!(runtime.session_hotkeys.is_empty());
+        assert!(runtime.active_command(hotkey.id()).is_none());
+        assert!(!runtime.is_session_hotkey_pressed(event, press));
+        verifier.register(hotkey).expect("组字期间应释放系统热键");
+        verifier.unregister(hotkey).unwrap();
+        runtime.sync_session(&shortcuts, true, true).unwrap();
+        assert!(runtime.session_hotkeys.is_empty());
+
+        runtime.ime_composing_window = None;
+        runtime.sync_session(&shortcuts, true, true).unwrap();
+        let restored = runtime.active_command(hotkey.id()).unwrap();
+        assert_eq!(restored.command, active.command);
+        assert_ne!(restored.generation, active.generation);
+        assert!(
+            verifier.register(hotkey).is_err(),
+            "组字结束后应恢复系统热键"
+        );
+        runtime.sync_session(&shortcuts, false, false).unwrap();
     }
 
     #[test]
