@@ -770,7 +770,10 @@ fn render_panel(
         .overflow_hidden()
         .occlude()
         .bg(panel_background)
-        .map(|this| crate::window_material::with_backdrop_blur(this, cx))
+        .when(
+            !(external.is_some() && appearance.window_material == WindowMaterial::CustomImage),
+            |this| crate::window_material::with_backdrop_blur(this, cx),
+        )
         .border(px(0.5))
         .border_color(theme.border)
         .when(!material_enabled, |this| this.shadow_lg())
