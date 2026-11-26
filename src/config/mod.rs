@@ -906,6 +906,7 @@ pub struct ClipboardConfig {
     pub auto_clear_search: bool,
     pub clear_tags_on_tab_switch: bool,
     pub tags_multi_select: bool,
+    pub tags_panel_external: bool,
     pub confirm_favorite_removal: bool,
     pub window_position: ClipboardWindowPosition,
     pub list_layout: ClipboardListLayout,
@@ -1185,6 +1186,7 @@ impl Default for ClipboardConfig {
             auto_clear_search: false,
             clear_tags_on_tab_switch: false,
             tags_multi_select: true,
+            tags_panel_external: true,
             confirm_favorite_removal: true,
             window_position: ClipboardWindowPosition::default(),
             list_layout: ClipboardListLayout::default(),
@@ -1234,9 +1236,11 @@ impl ClipboardConfig {
         matches!(button.group(), TabBarButtonGroup::Pages)
     }
 
-    /// 按钮所属的栏是否启用了悬停切换。页面按钮归页面栏，筛选、符号分类和标签面板归筛选栏。
+    /// 页面按钮归页面栏，筛选和符号分类归筛选栏；标签面板仅通过点击切换。
     pub const fn hover_switch_enabled(&self, button: TabBarButton) -> bool {
-        if Self::is_page_button(button) {
+        if matches!(button, TabBarButton::Tags) {
+            false
+        } else if Self::is_page_button(button) {
             self.page_hover_switch
         } else {
             self.filter_hover_switch

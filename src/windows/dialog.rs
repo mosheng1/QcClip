@@ -59,6 +59,15 @@ impl DialogWindowService {
         .detach();
     }
 
+    pub(crate) fn has_modal_for(owner: gpui::WindowId, cx: &App) -> bool {
+        cx.try_global::<Self>().is_some_and(|service| {
+            service
+                .modal_windows
+                .iter()
+                .any(|entry| entry.owner.window_id() == owner)
+        })
+    }
+
     fn register_modal_window(&mut self, modal_window_id: WindowId, owner: AnyWindowHandle) {
         self.modal_windows.push(ModalWindowEntry {
             modal_window_id,

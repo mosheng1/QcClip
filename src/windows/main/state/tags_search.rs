@@ -449,6 +449,17 @@ impl MainWindow {
         }
     }
 
+    pub(crate) fn sync_tags_panel_host(&mut self, external: bool) {
+        if self.tags_panel_external_host == external {
+            return;
+        }
+        self.tags_panel_external_host = external;
+        self.tags_search_input = None;
+        self._tags_search_input_subscription = None;
+        self.tags_search_input_locale = None;
+        self.tag_chip_positions.borrow_mut().clear();
+    }
+
     pub(crate) fn ensure_tags_search_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.tags_search_input.is_some() {
             return;
@@ -457,6 +468,7 @@ impl MainWindow {
         let translator = i18n::translator(cx);
         let input = cx.new(|cx| {
             InputState::new(window, cx)
+                .default_value(self.tags_search_query.clone())
                 .placeholder(translator.translate("main.tags.search_placeholder"))
         });
         let subscription =
@@ -469,7 +481,6 @@ impl MainWindow {
                         cx.notify();
                     }
                     InputEvent::Focus => {
-                        this.cancel_tags_panel_close();
                         if let Err(error) = crate::services::focus::focus_input_window(window) {
                             tracing::error!("标签搜索框获得焦点时激活窗口失败：{error}");
                             window.blur(cx);
@@ -489,7 +500,6 @@ impl MainWindow {
                         {
                             tracing::error!("标签搜索框失去焦点时恢复窗口焦点失败：{error}");
                         }
-                        this.update_tags_panel_auto_close(window, cx);
                         cx.notify();
                     }
                     InputEvent::PressEnter { .. } => {}
@@ -827,43 +837,6 @@ impl MainWindow {
         }
     }
 
-    pub(crate) fn cancel_tags_panel_close(&mut self) {
-        self.tags_panel_close_task = None;
-    }
-
-    fn can_auto_close_tags_panel(&self, window: &Window, cx: &Context<Self>) -> bool {
-        let search_focused = self
-            .tags_search_input
-            .as_ref()
-            .is_some_and(|input| input.focus_handle(cx).is_focused(window));
-        if search_focused
-            || self.tags_panel_pinned
-            || !self.tags_panel_open
-            || self.tags_panel_resize_start.is_some()
-        {
-            return false;
-        }
-        let pointer_inside = window.is_window_hovered()
-            && [self.tags_panel_bounds, self.tags_button_bounds]
-                .into_iter()
-                .flatten()
-                .any(|bounds| bounds.contains(&window.mouse_position()));
-        !pointer_inside && !cx.has_active_drag()
-    }
-
-    pub(crate) fn update_tags_panel_auto_close(&mut self, window: &Window, cx: &mut Context<Self>) {
-        if self.can_auto_close_tags_panel(window, cx) {
-            self.schedule_tags_panel_close(window, cx);
-        } else {
-            self.cancel_tags_panel_close();
-        }
-    }
-
-    pub(crate) fn toggle_tags_panel_pin(&mut self) {
-        self.tags_panel_pinned = !self.tags_panel_pinned;
-        self.cancel_tags_panel_close();
-    }
-
     pub(crate) fn toggle_sidebar_collapsed(&mut self) {
         self.sidebar_collapsed = !self.sidebar_collapsed;
     }
@@ -912,25 +885,6 @@ impl MainWindow {
         if let Err(error) = crate::config_runtime::set_clipboard_config(clipboard, cx) {
             tracing::error!("保存切换页面时清空标签选择设置失败：{error}");
         }
-    }
-
-    pub(crate) fn schedule_tags_panel_close(&mut self, window: &Window, cx: &mut Context<Self>) {
-        if !self.can_auto_close_tags_panel(window, cx) || self.tags_panel_close_task.is_some() {
-            return;
-        }
-        self.tags_panel_close_task = Some(cx.spawn_in(window, async move |this, cx| {
-            cx.background_executor().timer(TAGS_PANEL_CLOSE_DELAY).await;
-            this.update_in(cx, |this, window, cx| {
-                this.tags_panel_close_task = None;
-                if this.can_auto_close_tags_panel(window, cx) {
-                    // 面板收起后不会再收到拖拽释放事件，需要主动清理标签拖拽状态。
-                    this.cancel_tag_reorder_preview();
-                    this.tags_panel_open = false;
-                    cx.notify();
-                }
-            })
-            .ok();
-        }));
     }
 }
 

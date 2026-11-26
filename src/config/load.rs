@@ -730,6 +730,13 @@ fn read_clipboard(object: &Map<String, Value>, warnings: &mut Vec<String>) -> Cl
             default.clear_tags_on_tab_switch,
             warnings,
         ),
+        tags_panel_external: read_field(
+            object,
+            "tagsPanelExternal",
+            "clipboard.tagsPanelExternal",
+            default.tags_panel_external,
+            warnings,
+        ),
         tags_multi_select: read_field(
             object,
             "tagsMultiSelect",
@@ -1122,6 +1129,26 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tags_panel_external_defaults_and_round_trips() {
+        assert!(
+            super::from_str("{}")
+                .unwrap()
+                .config
+                .clipboard
+                .tags_panel_external
+        );
+        for external in [true, false] {
+            let loaded = super::from_str(&format!(
+                r#"{{"clipboard":{{"tagsPanelExternal":{external}}}}}"#
+            ))
+            .unwrap();
+            assert_eq!(loaded.config.clipboard.tags_panel_external, external);
+            let saved = serde_json::to_string(&loaded.config).unwrap();
+            assert_eq!(super::from_str(&saved).unwrap().config, loaded.config);
+        }
+    }
+
     #[test]
     fn tags_selection_mode_defaults_to_multi_select_and_round_trips() {
         for content in ["{}", r#"{"clipboard":{"clearTagsOnTabSwitch":true}}"#] {

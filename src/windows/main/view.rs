@@ -1,3 +1,4 @@
+use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, App, Context, Entity, InteractiveElement, IntoElement, MouseButton, ParentElement,
     Render, StatefulInteractiveElement, Styled, Window, div, px,
@@ -92,7 +93,6 @@ impl Render for MainWindow {
         if !layout.is_visible(crate::config::TabBarButton::Tags) {
             self.tags_panel_open = false;
             self.tags_button_bounds = None;
-            self.cancel_tags_panel_close();
             filters_changed |= !self.selected_tag_ids.is_empty();
             self.selected_tag_ids.clear();
         }
@@ -125,8 +125,12 @@ impl Render for MainWindow {
         );
         self.cleanup_image_cache(window);
         self.cleanup_file_list_cache(window, cx);
-        self.ensure_tags_search_input(window, cx);
-        self.sync_tags_search_placeholder(window, cx);
+        self.sync_tags_panel_host(clipboard.tags_panel_external);
+        if !clipboard.tags_panel_external {
+            self.ensure_tags_search_input(window, cx);
+            self.sync_tags_search_placeholder(window, cx);
+        }
+        super::tags_window::request_sync(cx);
         self.ensure_search_input(window, cx);
         self.sync_search_placeholder(window, cx);
         let theme = cx.theme().colors;
@@ -150,7 +154,7 @@ impl Render for MainWindow {
         let titlebar_position =
             effective_titlebar_position(appearance.titlebar_position, horizontal);
         let sidebar_layout = !horizontal && self.split_panes.is_none() && is_sidebar_layout(window);
-        if !sidebar_layout || !self.tags_panel_open {
+        if !sidebar_layout || !self.tags_panel_open || clipboard.tags_panel_external {
             self.finish_tags_panel_resize(cx);
         }
         if !sidebar_layout {
@@ -199,7 +203,9 @@ impl Render for MainWindow {
                 .flex()
                 .flex_row()
                 .children(tab_bar.take())
-                .child(tags_panel::render(self, window, cx, true))
+                .when(!clipboard.tags_panel_external, |this| {
+                    this.child(tags_panel::render(self, window, cx, true))
+                })
                 .child(content)
         } else {
             div()
@@ -250,7 +256,7 @@ impl Render for MainWindow {
             root = root.child(body).children(tab_bar);
         }
 
-        if !sidebar_layout {
+        if !sidebar_layout && !clipboard.tags_panel_external {
             root = root.child(tags_panel::render(self, window, cx, false));
         }
 

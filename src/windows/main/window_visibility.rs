@@ -827,6 +827,7 @@ pub(crate) fn set_visibility(
         MainWindowService::prepare_window_shown(cx);
     }
     if !visible {
+        super::tags_window::hide(cx);
         // 隐藏动画期间仍可能收到列表 hover 事件；先使正在进行的预览查询失效，
         // 避免查询完成后重新创建预览窗口。
         MainWindowService::cancel_hover_preview(cx);
@@ -1915,6 +1916,9 @@ pub(crate) fn handle_global_mouse_down(
     cx: &mut App,
 ) {
     window_drag::sync_edge_bounds_after_native_move(cx);
+    if super::tags_window::contains_point(position, cx) || super::tags_window::has_modal(cx) {
+        return;
+    }
     let window = cx.read_global::<MainWindowService, _>(|service, _| service.window);
     let Some(window) = window else {
         return;
@@ -2004,7 +2008,8 @@ pub(crate) fn handle_mouse_move(position: Point<f32>, cx: &mut App) {
         MainWindowService::set_edge_hide_enabled(false, cx);
         return;
     }
-    let menu_is_open = crate::windows::menu::MenuService::has_open_menu(cx);
+    let menu_is_open =
+        crate::windows::menu::MenuService::has_open_menu(cx) || super::tags_window::has_modal(cx);
 
     let Some(attachment) = attachment else {
         return;
@@ -2051,7 +2056,9 @@ pub(crate) fn handle_mouse_move(position: Point<f32>, cx: &mut App) {
             .as_ref()
             .is_some_and(|view| view.read(cx).list_pointer_interaction_active(cx))
     });
-    if point_in_client_bounds(position, attachment.client_bounds) {
+    if super::tags_window::contains_point(position, cx)
+        || point_in_client_bounds(position, attachment.client_bounds)
+    {
         if mouse_leave_state != window_state::MouseLeaveState::Armed {
             cx.update_global::<MainWindowService, _>(|service, _| {
                 service

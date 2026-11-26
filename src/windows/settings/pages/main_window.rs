@@ -210,6 +210,37 @@ impl SettingsWindowView {
             },
             cx,
         );
+        let tags_panel_selector = single_select(
+            "settings-tags-panel-mode",
+            [
+                SingleSelectOption::new(
+                    true,
+                    translator.translate("settings.clipboard.tags_panel.external"),
+                ),
+                SingleSelectOption::new(
+                    false,
+                    translator.translate("settings.clipboard.tags_panel.internal"),
+                ),
+            ],
+            clipboard.tags_panel_external,
+            {
+                let view = view.clone();
+                let save_error = save_error.clone();
+                move |external, cx| {
+                    persist_clipboard_change(
+                        view.clone(),
+                        move |clipboard| clipboard.tags_panel_external = external,
+                        save_error.clone(),
+                        cx,
+                    );
+                }
+            },
+            theme,
+            config_runtime::animation_enabled(
+                cx,
+                crate::config::AnimationKind::SingleSelectIndicator,
+            ),
+        );
         let edge_hide_switch = Switch::new("settings-clipboard-edge-hide")
             .large()
             .disabled(clipboard.window_position.is_screen_edge())
@@ -454,6 +485,18 @@ impl SettingsWindowView {
                             .into(),
                     ),
                     list_layout_selector,
+                ),
+            )
+            .child(
+                self.setting_row(
+                    theme,
+                    translator.translate("settings.clipboard.tags_panel"),
+                    Some(
+                        translator
+                            .translate("settings.clipboard.tags_panel.description")
+                            .into(),
+                    ),
+                    tags_panel_selector,
                 ),
             )
             .child(
@@ -1004,6 +1047,7 @@ pub(super) fn persist_clipboard_change<F>(
 fn reset_main_window_fields(clipboard: &mut ClipboardConfig) {
     let default = ClipboardConfig::default();
     clipboard.window_position = default.window_position;
+    clipboard.tags_panel_external = default.tags_panel_external;
     clipboard.list_layout = default.list_layout;
     clipboard.edge_list_layouts = default.edge_list_layouts;
     clipboard.edge_hide = default.edge_hide;

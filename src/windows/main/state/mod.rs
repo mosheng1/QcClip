@@ -69,7 +69,6 @@ const MAX_GALLERY_IMAGE_LOADS: usize = 2;
 pub(super) const LIST_PREVIEW_CHAR_LIMIT: usize = 300;
 const MAX_HTML_IMAGE_PATHS_PER_RANGE: usize = 64;
 const SEARCH_DEBOUNCE_DELAY: Duration = Duration::from_millis(200);
-const TAGS_PANEL_CLOSE_DELAY: Duration = Duration::from_millis(150);
 const WINDOW_SIZE_PERSIST_DELAY: Duration = Duration::from_millis(100);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -215,17 +214,15 @@ pub struct MainWindow {
     pub(crate) selected_tag_ids: HashSet<i64>,
     pub(crate) tags_match_all: bool,
     pub(crate) tags_panel_open: bool,
-    pub(crate) tags_panel_pinned: bool,
+    pub(super) tags_panel_external_host: bool,
     pub(crate) tags_panel_width: f32,
     pub(crate) tags_panel_resize_start: Option<(Pixels, f32)>,
-    pub(crate) tags_panel_bounds: Option<gpui::Bounds<Pixels>>,
     pub(crate) tags_button_bounds: Option<gpui::Bounds<Pixels>>,
     pub(crate) tags: Vec<Tag>,
     pub(crate) tags_loading: bool,
     pub(crate) tags_error: bool,
     pub(crate) tags_search_query: String,
     pub(crate) tags_search_input: Option<Entity<InputState>>,
-    pub(super) tags_panel_close_task: Option<Task<()>>,
     pub(super) tags_search_input_locale: Option<Locale>,
     pub(crate) tag_drop_target: Option<TagDropTarget>,
     pub(super) tag_hovered_id: Option<i64>,
@@ -477,17 +474,15 @@ impl MainWindow {
             selected_tag_ids: HashSet::new(),
             tags_match_all: false,
             tags_panel_open: false,
-            tags_panel_pinned: false,
+            tags_panel_external_host: false,
             tags_panel_width,
             tags_panel_resize_start: None,
-            tags_panel_bounds: None,
             tags_button_bounds: None,
             tags: Vec::new(),
             tags_loading: false,
             tags_error: false,
             tags_search_query: String::new(),
             tags_search_input: None,
-            tags_panel_close_task: None,
             tags_search_input_locale: None,
             tag_drop_target: None,
             tag_hovered_id: None,

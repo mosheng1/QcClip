@@ -192,7 +192,7 @@ fn action_button(
 ) -> impl IntoElement {
     let action_id = match name {
         "plus" => 0_u32,
-        "settings" => 1_u32,
+        "bookmark-cog" => 1_u32,
         "filter" => 2_u32,
         "refresh" => 4_u32,
         "versions-off" => 5_u32,
@@ -224,7 +224,7 @@ fn action_button(
                 open_tag_form(this.tag_repository.clone(), cx.entity(), window, cx);
             }),
         );
-    } else if name == "settings" {
+    } else if name == "bookmark-cog" {
         button = button.on_click(cx.listener(|this, _, window, cx| {
             super::tag_manager::open(this.tag_repository.clone(), cx.entity(), window, cx);
         }));
@@ -243,11 +243,6 @@ fn action_button(
     } else if name == "versions-off" {
         button = button.on_click(cx.listener(|this, _, _, cx| {
             this.toggle_clear_tags_on_tab_switch(cx);
-        }));
-    } else {
-        button = button.on_click(cx.listener(|this, _, _, cx| {
-            this.toggle_tags_panel_pin();
-            cx.notify();
         }));
     }
 
@@ -331,7 +326,7 @@ fn tag_chip(
     max_text_width: Pixels,
     window: &Window,
     cx: &Context<MainWindow>,
-) -> impl IntoElement {
+) -> gpui::Stateful<gpui::Div> {
     let theme = cx.theme().colors;
     let tag_id = tag.id;
     let tag_name = tag.name.clone();
@@ -612,12 +607,32 @@ pub fn render(
     cx: &Context<MainWindow>,
     sidebar_layout: bool,
 ) -> impl IntoElement {
+    render_panel(main, window, cx, sidebar_layout, None)
+}
+
+pub(crate) fn render_external(
+    main: &MainWindow,
+    window: &Window,
+    cx: &Context<MainWindow>,
+    horizontal: bool,
+) -> impl IntoElement {
+    render_panel(main, window, cx, false, Some(horizontal))
+}
+
+fn render_panel(
+    main: &MainWindow,
+    window: &Window,
+    cx: &Context<MainWindow>,
+    sidebar_layout: bool,
+    external: Option<bool>,
+) -> gpui::Stateful<gpui::Div> {
     if !main.tags_panel_open {
         return div().id("tags-panel");
     }
+    let horizontal = external == Some(true);
+    let vertical_external = external == Some(false);
 
     let theme = cx.theme().colors;
-    let tags_panel_pinned = main.tags_panel_pinned;
     let clipboard = config_runtime::clipboard_config(cx);
     let clear_tags_on_tab_switch = clipboard.clear_tags_on_tab_switch;
     let tags_multi_select = clipboard.tags_multi_select;
@@ -626,7 +641,9 @@ pub fn render(
     let material_enabled = appearance.window_material != WindowMaterial::Disabled;
     let translator = i18n::translator(cx);
     let scale = crate::ui::scale::window_scale(window);
-    let panel_width = if sidebar_layout {
+    let panel_width = if external.is_some() {
+        window.viewport_size().width
+    } else if sidebar_layout {
         px(sidebar_panel_width(
             main.tags_panel_width,
             f32::from(window.viewport_size().width) / scale,
@@ -634,7 +651,7 @@ pub fn render(
     } else {
         window.viewport_size().width * 0.65 + px(1.0)
     };
-    let content_width = panel_width - px(24.0 * crate::ui::scale::window_scale(window));
+    let content_width = panel_width - px(16.0 * scale);
     let max_text_width = content_width - px(38.0 * crate::ui::scale::window_scale(window));
     let tags_search_query = main.tags_search_query.trim().to_lowercase();
     let visible_tags = main
@@ -711,33 +728,35 @@ pub fn render(
     if let Some(clear_button) = clear_button {
         tags_search_input_element = tags_search_input_element.suffix(clear_button);
     }
-    let tags_search_box = div()
-        .h(ui_rem(26.0))
-        .flex_1()
-        .min_w_0()
-        .flex()
-        .items_center()
-        .rounded_lg()
-        .border_1()
-        .border_color(input_border)
-        .bg(theme.background)
-        .capture_any_mouse_down(
-            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                this.window_drag_start = None;
-                if event.button != MouseButton::Left || window.is_window_active() {
-                    return;
-                }
+    let mut tags_search_box = Some(
+        div()
+            .h(ui_rem(26.0))
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .items_center()
+            .rounded_lg()
+            .border_1()
+            .border_color(input_border)
+            .bg(theme.background)
+            .capture_any_mouse_down(
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    this.window_drag_start = None;
+                    if event.button != MouseButton::Left || window.is_window_active() {
+                        return;
+                    }
 
-                if let Err(error) = crate::services::focus::focus_input_window(window) {
-                    tracing::error!("点击标签搜索框时激活窗口失败：{error}");
-                    return;
-                }
+                    if let Err(error) = crate::services::focus::focus_input_window(window) {
+                        tracing::error!("点击标签搜索框时激活窗口失败：{error}");
+                        return;
+                    }
 
-                tags_search_input_for_mouse.update(cx, |input, cx| input.focus(window, cx));
-            }),
-        )
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .child(tags_search_input_element);
+                    tags_search_input_for_mouse.update(cx, |input, cx| input.focus(window, cx));
+                }),
+            )
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(tags_search_input_element),
+    );
 
     let panel_background = crate::window_material::overlay_surface_color(cx, theme.secondary);
 
@@ -754,14 +773,6 @@ pub fn render(
         .border(px(0.5))
         .border_color(theme.border)
         .when(!material_enabled, |this| this.shadow_lg())
-        .on_prepaint(
-            cx.listener(|this, prepaint: &gpui::InteractivityPrepaint, _, _| {
-                this.tags_panel_bounds = Some(prepaint.bounds);
-            }),
-        )
-        .on_hover(cx.listener(|this, _, window, cx| {
-            this.update_tags_panel_auto_close(window, cx);
-        }))
         .on_mouse_move_all({
             let main_window = cx.entity().downgrade();
             move |event: &gpui::MouseMoveEvent, phase, _, window, cx| {
@@ -786,7 +797,6 @@ pub fn render(
                                     this.finish_tags_panel_resize(cx);
                                 }
                             }
-                            this.update_tags_panel_auto_close(window, cx);
                         })
                         .ok();
                 }
@@ -794,26 +804,16 @@ pub fn render(
         })
         .on_mouse_up_all({
             let main_window = cx.entity().downgrade();
-            move |event, phase, _, window, cx| {
+            move |event, phase, _, _, cx| {
                 if phase == gpui::DispatchPhase::Capture && event.button == MouseButton::Left {
                     main_window
                         .update(cx, |this, cx| {
                             this.finish_tags_panel_resize(cx);
-                            this.update_tags_panel_auto_close(window, cx);
                         })
                         .ok();
                 }
             }
         })
-        .on_drag_move(
-            cx.listener(|this, event: &DragMoveEvent<TagDrag>, window, cx| {
-                if event.bounds.contains(&window.mouse_position()) {
-                    this.cancel_tags_panel_close();
-                } else if !this.tags_panel_pinned {
-                    this.schedule_tags_panel_close(window, cx);
-                }
-            }),
-        )
         .on_drop(cx.listener(|this, drag: &TagDrag, _, cx| {
             #[cfg(target_os = "windows")]
             DragPreviewService::hide(cx);
@@ -844,29 +844,27 @@ pub fn render(
                 .flex_none()
                 .flex()
                 .flex_wrap()
+                .when(horizontal, |this| this.min_h(ui_rem(38.0)).flex_nowrap())
                 .items_center()
                 .justify_between()
                 .gap(ui_rem(4.0))
-                .px_2()
-                .py(ui_rem(4.0))
+                .p(ui_rem(8.0))
                 .border_b(px(0.5))
                 .border_color(theme.border)
-                .child(
-                    div()
-                        .flex_none()
-                        .text_size(ui_rem(12.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme.foreground)
-                        .child(translator.translate("main.tags.title")),
-                )
+                .children(if horizontal {
+                    tags_search_box.take()
+                } else {
+                    None
+                })
                 .child(
                     div()
                         .flex()
                         .flex_none()
                         .items_center()
-                        .gap(ui_rem(2.0))
+                        .gap(ui_rem(4.0))
                         .flex_wrap()
                         .max_w_full()
+                        .when(vertical_external, |this| this.w_full().grid().grid_cols(3))
                         .child(action_button(
                             "plus",
                             translator.translate("main.tags.new"),
@@ -875,7 +873,7 @@ pub fn render(
                             cx,
                         ))
                         .child(action_button(
-                            "settings",
+                            "bookmark-cog",
                             translator.translate("main.tags.manage"),
                             false,
                             theme,
@@ -920,26 +918,19 @@ pub fn render(
                             clear_tags_on_tab_switch,
                             theme,
                             cx,
-                        ))
-                        .child(action_button(
-                            "pin",
-                            translator.translate("main.tags.pin"),
-                            tags_panel_pinned,
-                            theme,
-                            cx,
                         )),
                 ),
         )
-        .child(
+        .children(tags_search_box.take().map(|search_box| {
             div()
-                .h(ui_rem(32.0))
+                .h(ui_rem(42.0))
                 .w_full()
                 .flex_none()
                 .flex()
                 .items_center()
                 .px_2()
-                .child(tags_search_box),
-        )
+                .child(search_box)
+        }))
         .child(
             div().flex_1().overflow_hidden().child(
                 v_flex().size_full().overflow_y_scrollbar().child(
@@ -957,12 +948,15 @@ pub fn render(
                         .w_full()
                         .min_w_0()
                         .flex_wrap()
+                        .when(external == Some(false), |this| {
+                            this.flex_col().flex_nowrap()
+                        })
                         .items_start()
                         .content_start()
-                        .gap(ui_rem(6.0))
-                        .px(ui_rem(12.0))
-                        .pt(ui_rem(4.0))
-                        .pb(ui_rem(10.0))
+                        .gap(ui_rem(8.0))
+                        .px(ui_rem(8.0))
+                        .when(horizontal, |this| this.pt(ui_rem(8.0)))
+                        .pb(ui_rem(8.0))
                         .children(visible_tags.iter().copied().map(|tag| {
                             with_tag_reorder_animation(
                                 tag_chip(
@@ -973,6 +967,8 @@ pub fn render(
                                     window,
                                     cx,
                                 )
+                                .when(external.is_some(), |this| this.flex_none())
+                                .when(external == Some(false), |this| this.w_full())
                                 .into_any_element(),
                                 tag.id,
                                 tag_reorder_animation,
@@ -988,6 +984,10 @@ pub fn render(
                 ),
             ),
         );
+
+    if external.is_some() {
+        return panel.size_full().rounded(px(10.0)).shadow_none();
+    }
 
     if sidebar_layout {
         panel = panel
@@ -1013,7 +1013,6 @@ pub fn render(
                         cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                             cx.stop_propagation();
                             this.window_drag_start = None;
-                            this.cancel_tags_panel_close();
                             this.tags_panel_resize_start =
                                 Some((event.position.x, f32::from(panel_width) / scale));
                             cx.notify();

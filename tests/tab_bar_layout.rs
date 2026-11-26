@@ -236,7 +236,7 @@ fn hover_switches_control_their_own_button_groups() {
     clipboard.filter_hover_switch = true;
     assert!(!clipboard.hover_switch_enabled(TabBarButton::Favorites));
     assert!(clipboard.hover_switch_enabled(TabBarButton::Symbols));
-    assert!(clipboard.hover_switch_enabled(TabBarButton::Tags));
+    assert!(!clipboard.hover_switch_enabled(TabBarButton::Tags));
     assert!(clipboard.hover_switch_enabled(TabBarButton::Image));
     assert!(clipboard.hover_switch_enabled(TabBarButton::Unpasted));
 

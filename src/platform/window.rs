@@ -925,6 +925,101 @@ pub(crate) fn raise_window_to_topmost(_window: &Window) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "windows")]
+pub(crate) fn show_popup(window: &Window) -> Result<(), String> {
+    show_popup_native(window_hwnd(window)?)
+}
+
+#[cfg(target_os = "windows")]
+fn show_popup_native(hwnd: windows::Win32::Foundation::HWND) -> Result<(), String> {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
+        SetWindowPos,
+    };
+    // 同步显示但不固定窗口间的层级，后续由鼠标悬停决定哪个窗口在前。
+    // SAFETY: hwnd 属于当前线程的有效弹窗，不改变位置、尺寸和焦点。
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            None,
+            0,
+            0,
+            0,
+            0,
+            SWP_SHOWWINDOW
+                | SWP_NOACTIVATE
+                | SWP_NOMOVE
+                | SWP_NOSIZE
+                | SWP_NOZORDER
+                | SWP_NOOWNERZORDER,
+        )
+    }
+    .map_err(|error| format!("显示标签面板失败：{error}"))
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn show_popup(window: &Window) -> Result<(), String> {
+    BorderlessPopup.set_visible(window, true);
+    Ok(())
+}
+
+pub(crate) fn is_window_at_physical_point(window: &Window, position: Point<f32>) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::{
+            Foundation::POINT,
+            UI::WindowsAndMessaging::{GA_ROOT, GetAncestor, WindowFromPoint},
+        };
+        let Ok(hwnd) = window_hwnd(window) else {
+            return false;
+        };
+        // SAFETY: 只查询指针位置最上层窗口，避免透过其他应用、菜单或模态窗口抢占层级。
+        unsafe {
+            GetAncestor(
+                WindowFromPoint(POINT {
+                    x: position.x.round() as i32,
+                    y: position.y.round() as i32,
+                }),
+                GA_ROOT,
+            ) == hwnd
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = position;
+        window.is_window_hovered()
+    }
+}
+
+pub(crate) fn window_work_area(
+    window: &Window,
+    cx: &App,
+) -> Result<(PhysicalDisplayBounds, DisplayId), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = cx;
+        nearest_window_work_area(window_hwnd(window)?)
+            .ok_or_else(|| "无法获取窗口最近显示器的工作区".to_owned())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let display = window
+            .display(cx)
+            .ok_or_else(|| "无法获取窗口所在显示器".to_owned())?;
+        let bounds = display.bounds();
+        let scale = window.scale_factor();
+        Ok((
+            PhysicalDisplayBounds {
+                x: f32::from(bounds.origin.x) * scale,
+                y: f32::from(bounds.origin.y) * scale,
+                width: f32::from(bounds.size.width) * scale,
+                height: f32::from(bounds.size.height) * scale,
+            },
+            display.id(),
+        ))
+    }
+}
+
 /// 便签窗口：隐藏任务栏图标，并默认不抢占焦点，点击便签内容后仍可直接粘贴到原窗口。
 #[cfg(target_os = "windows")]
 pub(crate) fn configure_sticky_window(window: &Window, topmost: bool) -> Result<(), String> {
@@ -2319,6 +2414,13 @@ unsafe extern "system" fn window_constraints_proc(
 
 #[cfg(target_os = "windows")]
 fn work_area_for_window(hwnd: windows::Win32::Foundation::HWND) -> Option<PhysicalDisplayBounds> {
+    nearest_window_work_area(hwnd).map(|(bounds, _)| bounds)
+}
+
+#[cfg(target_os = "windows")]
+fn nearest_window_work_area(
+    hwnd: windows::Win32::Foundation::HWND,
+) -> Option<(PhysicalDisplayBounds, DisplayId)> {
     use windows::Win32::Graphics::Gdi::{
         GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
     };
@@ -2336,12 +2438,15 @@ fn work_area_for_window(hwnd: windows::Win32::Foundation::HWND) -> Option<Physic
     if !unsafe { GetMonitorInfoW(monitor, &mut info) }.as_bool() {
         return None;
     }
-    Some(PhysicalDisplayBounds {
-        x: info.rcWork.left as f32,
-        y: info.rcWork.top as f32,
-        width: (info.rcWork.right - info.rcWork.left) as f32,
-        height: (info.rcWork.bottom - info.rcWork.top) as f32,
-    })
+    Some((
+        PhysicalDisplayBounds {
+            x: info.rcWork.left as f32,
+            y: info.rcWork.top as f32,
+            width: (info.rcWork.right - info.rcWork.left) as f32,
+            height: (info.rcWork.bottom - info.rcWork.top) as f32,
+        },
+        DisplayId::new(monitor.0 as u64),
+    ))
 }
 
 fn borderless_popup_options(
@@ -2883,6 +2988,78 @@ mod native_resize_tests {
         fn drop(&mut self) {
             // SAFETY: 测试窗口由当前线程创建，并在同一线程销毁。
             let _ = unsafe { DestroyWindow(self.0) };
+        }
+    }
+
+    #[test]
+    fn popup_reshow_allows_either_window_on_top_and_offscreen_work_area() {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GW_HWNDPREV, GW_OWNER, GetWindow, HWND_TOPMOST, IsWindowVisible, SW_HIDE, SWP_NOMOVE,
+            SWP_NOSIZE, SWP_SHOWWINDOW, ShowWindow, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+        };
+        let create = || {
+            // SAFETY: 当前线程在屏幕外创建测试窗口，不激活窗口或显示任务栏按钮。
+            TestWindow(unsafe {
+                CreateWindowExW(
+                    WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                    windows::core::w!("STATIC"),
+                    windows::core::w!("标签面板层级测试"),
+                    WS_POPUP,
+                    -32000,
+                    -32000,
+                    120,
+                    200,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap()
+            })
+        };
+        let main = create();
+        let panel = create();
+        assert!(
+            nearest_window_work_area(main.0).is_some(),
+            "屏幕外窗口也应取得最近工作区"
+        );
+        let above = |front, back| {
+            let mut current = back;
+            // SAFETY: 只遍历当前桌面的有效顶层窗口，不修改窗口。
+            while let Ok(previous) = unsafe { GetWindow(current, GW_HWNDPREV) } {
+                if previous == front {
+                    return true;
+                }
+                current = previous;
+            }
+            false
+        };
+        for _ in 0..2 {
+            // SAFETY: 测试窗口仍有效，模拟隐藏后显示，再按悬停目标双向调整层级。
+            unsafe {
+                let _ = ShowWindow(panel.0, SW_HIDE);
+            }
+            show_popup_native(panel.0).unwrap();
+            unsafe {
+                assert!(IsWindowVisible(panel.0).as_bool());
+                assert!(
+                    GetWindow(panel.0, GW_OWNER).is_err(),
+                    "面板不得固定在主窗口上方"
+                );
+                for (front, back) in [(main.0, panel.0), (panel.0, main.0)] {
+                    SetWindowPos(
+                        front,
+                        Some(HWND_TOPMOST),
+                        0,
+                        0,
+                        0,
+                        0,
+                        SWP_SHOWWINDOW | SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
+                    )
+                    .unwrap();
+                    assert!(above(front, back), "悬停目标应可提升至另一个窗口上方");
+                }
+            }
         }
     }
 

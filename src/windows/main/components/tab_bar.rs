@@ -597,11 +597,12 @@ pub fn render(
         ))
         .on_click(cx.listener(|this, _, window, cx| {
             this.suppress_tab_bar_hover(TabBarButton::Tags);
-            this.cancel_tags_panel_close();
-            let opening =
-                config_runtime::clipboard_config(cx).filter_hover_switch || !this.tags_panel_open;
+            let opening = !this.tags_panel_open;
             this.tags_panel_open = opening;
-            if opening {
+            if !opening {
+                this.cancel_tag_reorder_preview();
+            }
+            if opening && !config_runtime::clipboard_config(cx).tags_panel_external {
                 if let Some(tags_search_input) = this.tags_search_input.clone() {
                     if let Err(error) = crate::services::focus::focus_input_window(window) {
                         tracing::error!("展开标签面板时激活搜索框失败：{error}");
@@ -623,8 +624,7 @@ pub fn render(
                     }
                 }
             }),
-        )
-        .child(hover_sensor(TabBarButton::Tags, cx));
+        );
 
     if sidebar_layout {
         tags_button = tags_button

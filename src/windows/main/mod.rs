@@ -3,6 +3,7 @@ mod file_list;
 pub(crate) mod screen_boundary;
 mod state;
 pub(crate) mod tabs;
+mod tags_window;
 mod view;
 mod window_drag;
 mod window_state;
@@ -50,6 +51,7 @@ impl Global for MainWindowService {}
 impl MainWindowService {
     pub(crate) fn install(cx: &mut App) {
         cx.set_global(Self::default());
+        tags_window::install(cx);
         cx.on_window_closed(|cx, window_id| {
             let closes_main_window = cx.read_global::<Self, _>(|service, _| {
                 service
@@ -57,6 +59,7 @@ impl MainWindowService {
                     .is_some_and(|window| window.window_id() == window_id)
             });
             if closes_main_window {
+                tags_window::close(cx);
                 cx.update_global::<Self, _>(|service, _| {
                     service.window = None;
                     service.main_view = None;
@@ -134,10 +137,13 @@ impl MainWindowService {
     }
 
     pub(crate) fn set_main_view(main_view: Entity<MainWindow>, cx: &mut App) {
+        cx.observe(&main_view, |_, cx| tags_window::request_sync(cx))
+            .detach();
         cx.update_global::<Self, _>(|service, _| service.main_view = Some(main_view));
     }
 
     pub(crate) fn handle_window_shown(window: &mut Window, cx: &mut App) {
+        tags_window::request_sync(cx);
         let main_view = cx
             .try_global::<Self>()
             .and_then(|service| service.main_view.clone());
@@ -156,6 +162,7 @@ impl MainWindowService {
     }
 
     pub(crate) fn handle_window_hidden(window: &mut Window, cx: &mut App) {
+        tags_window::hide(cx);
         let main_view = cx.global::<Self>().main_view.clone();
         if let Some(main_view) = main_view {
             main_view.update(cx, |main, cx| main.clear_emoji_resources(window, cx));
@@ -623,6 +630,7 @@ impl MainWindowService {
                         let position = input::pointer_snapshot()
                             .map(|snapshot| snapshot.position)
                             .unwrap_or(position);
+                        tags_window::sync_pointer(cx);
                         window_visibility::handle_mouse_move(position, cx);
                         drag_request
                     });

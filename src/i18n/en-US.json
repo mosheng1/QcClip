@@ -1,4 +1,8 @@
 {
+  "settings.clipboard.tags_panel": "Tag panel position",
+  "settings.clipboard.tags_panel.external": "Separate window",
+  "settings.clipboard.tags_panel.internal": "Inside main window",
+  "settings.clipboard.tags_panel.description": "Click the tags button to open or close the panel. The separate panel finds space beside the main window, follows its visibility, and hides while it moves.",
   "settings.clipboard.list_layout": "List layout",
   "settings.clipboard.list_layout.single": "Single pane",
   "settings.clipboard.list_layout.side_by_side": "Side by side",
@@ -147,7 +151,6 @@
   "main.tags.manager.close": "Close",
   "main.tags.manager.search_placeholder": "Search tags...",
   "main.tags.manager.search_empty": "No matching tags",
-  "main.tags.pin": "Pin tags panel",
   "main.tags.reset_selection": "Reset all selections",
   "main.tags.multi_select_enabled": "Multiple selection enabled, click to switch to single selection",
   "main.tags.multi_select_disabled": "Single selection enabled, click to switch to multiple selection",

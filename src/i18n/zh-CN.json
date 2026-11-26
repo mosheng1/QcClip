@@ -1,4 +1,8 @@
 {
+  "settings.clipboard.tags_panel": "标签面板位置",
+  "settings.clipboard.tags_panel.external": "外置窗口",
+  "settings.clipboard.tags_panel.internal": "主窗口内",
+  "settings.clipboard.tags_panel.description": "点击标签按钮展开或收起面板。外置面板自动选择主窗口附近的位置，随主窗口显隐，拖动主窗口时暂时隐藏。",
   "settings.clipboard.list_layout": "列表布局",
   "settings.clipboard.list_layout.single": "单栏",
   "settings.clipboard.list_layout.side_by_side": "左右双栏",
@@ -147,7 +151,6 @@
   "main.tags.manager.close": "关闭",
   "main.tags.manager.search_placeholder": "搜索标签...",
   "main.tags.manager.search_empty": "没有匹配的标签",
-  "main.tags.pin": "固定标签面板",
   "main.tags.reset_selection": "重置所有选择",
   "main.tags.multi_select_enabled": "当前为多选，点击切换为单选",
   "main.tags.multi_select_disabled": "当前为单选，点击切换为多选",

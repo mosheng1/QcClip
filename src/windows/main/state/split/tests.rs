@@ -1174,3 +1174,189 @@ fn rendered_panes_follow_orientation_and_mouse_and_keyboard_target_the_active_li
     assert!(bounds[1].origin.y >= bounds[0].origin.y + bounds[0].size.height);
     assert!(bounds[0].size.width > px(800.0));
 }
+
+#[gpui::test]
+fn external_tags_panel_renders_and_drops_tags_into_both_panes(cx: &mut gpui::TestAppContext) {
+    use crate::windows::main::{components::tags_panel, tags_window};
+    use gpui::{IntoElement, Render};
+
+    struct Panel(Entity<MainWindow>);
+    impl Render for Panel {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            self.0.update(cx, |main, cx| {
+                main.sync_tags_panel_host(true);
+                main.ensure_tags_search_input(window, cx);
+                tags_panel::render_external(
+                    main,
+                    window,
+                    cx,
+                    window.viewport_size().width > px(200.0),
+                )
+                .into_any_element()
+            })
+        }
+    }
+
+    let fixture = Fixture::new(cx);
+    let tags = [
+        "外置测试标签一：验证横向面板变窄后标签可以自动换行显示",
+        "外置测试标签二：验证横向面板变窄后标签可以自动换行显示",
+    ]
+    .map(|name| fixture.tags.create(name, "#1677FF").unwrap());
+    let target = fixture.open_window(cx);
+    cx.update(tags_window::install);
+    fixture.main.update(cx, |main, cx| {
+        main.tags_panel_open = true;
+        main.refresh_tags(cx);
+    });
+    cx.run_until_parked();
+    let main = fixture.main.clone();
+    let panel = cx.open_window(gpui::size(px(100.0), px(400.0)), |window, cx| {
+        let panel = cx.new(|_| Panel(main));
+        gpui_component::Root::new(panel, window, cx)
+    });
+    draw_window(panel.into(), cx);
+    let panes = fixture.panes(cx);
+    for (index, pane) in panes.into_iter().enumerate() {
+        let tag = &tags[index];
+        if index == 1 {
+            cx.update_window(panel.into(), |_, window, cx| {
+                window.resize(gpui::size(px(900.0), px(120.0)));
+                window.bounds_changed(cx);
+            })
+            .unwrap();
+        }
+        let (item_id, position) = pane.read_with(cx, |pane, _| {
+            (
+                pane.items[0].item_id,
+                pane.list_scroll_handle.bounds().origin + gpui::point(px(50.0), px(25.0)),
+            )
+        });
+        draw_window(panel.into(), cx);
+        let chip = fixture.main.read_with(cx, |main, _| {
+            let positions = main.tag_chip_positions.borrow();
+            let same_row = positions[&tags[0].id].y == positions[&tags[1].id].y;
+            assert_eq!(
+                same_row,
+                index == 1,
+                "横向面板应在一行显示标签，竖向面板应逐行显示"
+            );
+            if index == 0 {
+                assert_eq!(
+                    positions[&tag.id].x,
+                    px(8.5),
+                    "标签应与搜索框使用相同的 8px 左边距"
+                );
+            }
+            positions[&tag.id]
+        });
+        let mut source = gpui::VisualTestContext::from_window(panel.into(), cx);
+        let start = chip + gpui::point(px(12.0), px(12.0));
+        source.simulate_mouse_down(start, gpui::MouseButton::Left, Modifiers::default());
+        source.simulate_mouse_move(
+            start + gpui::point(px(8.0), px(0.0)),
+            Some(gpui::MouseButton::Left),
+            Modifiers::default(),
+        );
+        assert!(cx.update(|cx| cx.has_active_drag()));
+        cx.update_window(target, |_, window, cx| {
+            tags_window::dispatch_tag_drag(position, Modifiers::default(), true, window, cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert!(
+            fixture
+                .tags
+                .item_tag_ids(item_id)
+                .unwrap()
+                .contains(&tag.id)
+        );
+        assert!(
+            !fixture
+                .main
+                .read_with(cx, |main, _| main.is_tag_drag_source(tag.id))
+        );
+    }
+
+    cx.update_window(panel.into(), |_, window, cx| {
+        window.resize(gpui::size(px(220.0), px(120.0)));
+        window.bounds_changed(cx);
+    })
+    .unwrap();
+    draw_window(panel.into(), cx);
+    fixture.main.read_with(cx, |main, _| {
+        let positions = main.tag_chip_positions.borrow();
+        assert_ne!(
+            positions[&tags[0].id].y, positions[&tags[1].id].y,
+            "横向面板宽度不足时标签应换行"
+        );
+        assert_eq!(
+            positions[&tags[0].id].x, positions[&tags[1].id].x,
+            "换行后应从行首显示"
+        );
+    });
+
+    cx.update(tags_window::hide);
+    assert!(fixture.main.read_with(cx, |main, _| main.tags_panel_open));
+
+    fixture.main.update(cx, |main, _| {
+        main.tags_search_query = "保留搜索".to_owned();
+        main.sync_tags_panel_host(false);
+        assert!(main.tags_search_input.is_none());
+        main.sync_tags_panel_host(true);
+        assert_eq!(main.tags_search_query, "保留搜索");
+    });
+}
+
+#[gpui::test]
+fn tags_panel_visibility_changes_only_on_click_in_both_modes(cx: &mut gpui::TestAppContext) {
+    let fixture = Fixture::new(cx);
+    let window = fixture.open_window(cx);
+    for external in [false, true] {
+        cx.update(|cx| {
+            let mut clipboard = crate::config_runtime::clipboard_config(cx);
+            clipboard.tags_panel_external = external;
+            clipboard.filter_hover_switch = true;
+            crate::config_runtime::set_clipboard_config(clipboard, cx).unwrap();
+        });
+        draw_window(window, cx);
+        let button = fixture
+            .main
+            .read_with(cx, |main, _| main.tags_button_bounds.unwrap().center());
+        let mut visual = gpui::VisualTestContext::from_window(window, cx);
+        visual.simulate_mouse_move(button, None, Modifiers::default());
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        assert!(
+            !fixture.main.read_with(cx, |main, _| main.tags_panel_open),
+            "悬停标签按钮不应展开面板"
+        );
+
+        visual.simulate_click(button, Modifiers::default());
+        draw_window(window, cx);
+        assert!(fixture.main.read_with(cx, |main, _| main.tags_panel_open));
+        visual.simulate_mouse_move(
+            gpui::point(px(-20.0), px(-20.0)),
+            None,
+            Modifiers::default(),
+        );
+        cx.update_window(window, |_, window, cx| window.blur(cx))
+            .unwrap();
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        assert!(
+            fixture.main.read_with(cx, |main, _| main.tags_panel_open),
+            "鼠标离开及搜索框失焦不应收起面板"
+        );
+
+        let button = fixture
+            .main
+            .read_with(cx, |main, _| main.tags_button_bounds.unwrap().center());
+        visual.simulate_click(button, Modifiers::default());
+        draw_window(window, cx);
+        assert!(
+            !fixture.main.read_with(cx, |main, _| main.tags_panel_open),
+            "再次点击应收起面板，即使筛选悬停切换已开启"
+        );
+    }
+}

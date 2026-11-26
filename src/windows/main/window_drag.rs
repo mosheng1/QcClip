@@ -101,6 +101,7 @@ pub(crate) fn event_listener(
 }
 
 fn begin_or_start_window_move(window: &mut Window, edge_hide_enabled: bool, cx: &mut App) {
+    super::tags_window::hide(cx);
     if edge_hide_enabled {
         begin(window, cx);
     } else {
@@ -114,6 +115,7 @@ fn begin_or_start_window_move(window: &mut Window, edge_hide_enabled: bool, cx: 
 }
 
 pub(crate) fn begin(window: &mut Window, cx: &mut App) {
+    super::tags_window::hide(cx);
     let (attachment, normal_bounds, transition_active) =
         cx.read_global::<MainWindowService, _>(|service, _| {
             (
@@ -206,6 +208,7 @@ pub(crate) fn handle_mouse_up(position: Point<f32>, cx: &mut App) {
             if edge_hide_enabled {
                 apply_release_snap(window, position, generation, cx);
             }
+            super::tags_window::request_sync(cx);
         });
     })
     .detach();

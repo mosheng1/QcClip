@@ -24,9 +24,6 @@ impl MainWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if button == TabBarButton::Tags {
-            self.update_tags_panel_auto_close(window, cx);
-        }
         let clipboard = config_runtime::clipboard_config(cx);
         let hover_delay = Duration::from_millis(u64::from(clipboard.hover_delay_ms(button)));
         let hovered = window.is_window_hovered()
@@ -98,10 +95,6 @@ impl MainWindow {
                             .find(|category| category.id.layout_button() == button)
                         {
                             this.select_symbol_category(category.id, cx);
-                        } else if button == TabBarButton::Tags {
-                            this.cancel_tags_panel_close();
-                            this.tags_panel_open = true;
-                            cx.notify();
                         }
                         None
                     })
