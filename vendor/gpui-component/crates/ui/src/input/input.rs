@@ -133,6 +133,7 @@ pub struct Input {
     context_menu_builder: Option<Rc<dyn Fn(NativeMenu, &mut Window, &mut App) -> NativeMenu>>,
     editor_background: Option<Hsla>,
     editor_gutter_background: Option<Hsla>,
+    editor_active_line: Option<Hsla>,
 }
 
 impl Sizable for Input {
@@ -202,6 +203,7 @@ impl Input {
             context_menu_builder: None,
             editor_background: None,
             editor_gutter_background: None,
+            editor_active_line: None,
         }
     }
 
@@ -328,6 +330,11 @@ impl Input {
         self
     }
 
+    pub(crate) fn editor_active_line(mut self, background: Hsla) -> Self {
+        self.editor_active_line = Some(background);
+        self
+    }
+
     fn render_toggle_mask_button(state: &TextInputState, cx: &App) -> impl IntoElement {
         let masked = state.presentation(cx).is_masked();
         Button::new("toggle-mask")
@@ -409,7 +416,9 @@ impl RenderOnce for Input {
                 },
                 highlight_styles: cx.theme().highlight_theme.clone(),
                 editor_invisible: cx.theme().highlight_theme.style.editor_invisible,
-                editor_active_line: cx.theme().highlight_theme.style.editor_active_line,
+                editor_active_line: self
+                    .editor_active_line
+                    .or(cx.theme().highlight_theme.style.editor_active_line),
                 editor_gutter_background,
                 fold_icon_renderer: Some(Rc::new(|ix, is_folded| {
                     Button::new(("fold-icon", ix))

@@ -628,6 +628,9 @@ impl Render for CustomTextEditor {
                                             .text_size(editor_font_size)
                                             .editor_background(editor_surface)
                                             .editor_gutter_background(gpui::transparent_black())
+                                            .when(material_enabled, |this| {
+                                                this.editor_active_line(theme.list_hover)
+                                            })
                                             .h(relative(1.)),
                                     ),
                             )

@@ -33,6 +33,7 @@ pub struct Editor {
     context_menu_builder: Option<Rc<dyn Fn(NativeMenu, &mut Window, &mut App) -> NativeMenu>>,
     editor_background: Option<Hsla>,
     editor_gutter_background: Option<Hsla>,
+    editor_active_line: Option<Hsla>,
 }
 
 impl Editor {
@@ -51,6 +52,7 @@ impl Editor {
             context_menu_builder: None,
             editor_background: None,
             editor_gutter_background: None,
+            editor_active_line: None,
         }
     }
 
@@ -122,6 +124,12 @@ impl Editor {
         self.editor_gutter_background = Some(background);
         self
     }
+
+    /// 设置当前行背景，不修改全局主题。
+    pub fn editor_active_line(mut self, background: Hsla) -> Self {
+        self.editor_active_line = Some(background);
+        self
+    }
 }
 
 impl Styled for Editor {
@@ -157,6 +165,9 @@ impl RenderOnce for Editor {
             })
             .when_some(self.editor_gutter_background, |this, background| {
                 this.editor_gutter_background(background)
+            })
+            .when_some(self.editor_active_line, |this, background| {
+                this.editor_active_line(background)
             })
             .refine_style(&self.style)
     }
