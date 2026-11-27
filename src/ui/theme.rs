@@ -386,6 +386,9 @@ fn theme_colors_equal(left: ThemeColor, right: ThemeColor) -> bool {
     true
 }
 
+mod background_image;
+pub(crate) use background_image::BackgroundPalette;
+
 const THEME_TRANSITION_DURATION: Duration = Duration::from_millis(240);
 const THEME_TRANSITION_FRAME: Duration = Duration::from_millis(16);
 const QC_CLIP_TITLE_BAR_HEIGHT: gpui::Pixels = px(36.0);
@@ -493,6 +496,9 @@ pub fn attach_system_appearance_watch(window: &mut Window, cx: &mut App) {
 
 fn sync_system_theme(window: &mut Window, cx: &mut App) {
     let configured_mode = config_runtime::appearance_config(cx).mode;
+    if configured_mode == AppearanceMode::BackgroundImage {
+        return;
+    }
     let mode = effective_theme_mode(configured_mode, ThemeMode::from(window.appearance()));
     // 新窗口复用已初始化的主题，避免重复下发所有窗口的亚克力材质。
     if mode != Theme::global(cx).mode {
@@ -501,6 +507,10 @@ fn sync_system_theme(window: &mut Window, cx: &mut App) {
 }
 
 fn apply_system_theme(window: Option<&mut Window>, cx: &mut App) {
+    // 新主题即使无需动画，也必须阻止旧动画继续覆盖其颜色。
+    cx.update_global::<SystemAppearanceWatchService, _>(|service, _| {
+        service.theme_transition_generation = service.theme_transition_generation.wrapping_add(1);
+    });
     let previous_colors = cx.has_global::<Theme>().then(|| Theme::global(cx).colors);
     let system_mode = window
         .as_deref()
@@ -508,7 +518,12 @@ fn apply_system_theme(window: Option<&mut Window>, cx: &mut App) {
         .map(ThemeMode::from)
         .unwrap_or_else(|| ThemeMode::from(cx.window_appearance()));
     let appearance = config_runtime::appearance_config(cx);
-    let mode = effective_theme_mode(appearance.mode, system_mode);
+    let palette = (appearance.mode == AppearanceMode::BackgroundImage)
+        .then(|| crate::window_material::background_palette(cx))
+        .flatten();
+    let mode = palette
+        .map(|palette| palette.mode())
+        .unwrap_or_else(|| effective_theme_mode(appearance.mode, system_mode));
     let themes_dir = resolve_themes_dir();
     let packages = load_all_theme_packages(themes_dir.as_ref());
     let light = resolve_theme_for_mode(&packages, &appearance.light_theme, ThemeMode::Light, cx);
@@ -520,6 +535,11 @@ fn apply_system_theme(window: Option<&mut Window>, cx: &mut App) {
         theme.dark_theme = dark.config;
     }
     Theme::change(mode, window, cx);
+    if let Some(palette) = palette {
+        let theme = Theme::global_mut(cx);
+        theme.colors = palette.colors();
+        theme.tokens = theme.colors.into();
+    }
     apply_ui_scale(Theme::global_mut(cx), appearance.ui_scale());
     apply_app_font(Theme::global_mut(cx), appearance.app_font_family.as_deref());
     Theme::sync_base(cx);
@@ -534,6 +554,8 @@ fn apply_system_theme(window: Option<&mut Window>, cx: &mut App) {
 
     let target_colors = Theme::global(cx).colors;
     if let Some(previous_colors) = previous_colors
+        // 图片与遮罩会立即变化，派生色板同步切换以保持文字对比。
+        .filter(|_| palette.is_none())
         .filter(|previous| !theme_colors_equal(*previous, target_colors))
         .filter(|_| !cx.reduce_motion())
         .filter(|_| {
@@ -607,7 +629,7 @@ fn start_theme_transition(from: ThemeColor, to: ThemeColor, cx: &mut App) {
 
 fn effective_theme_mode(configured_mode: AppearanceMode, system_mode: ThemeMode) -> ThemeMode {
     match configured_mode {
-        AppearanceMode::System => system_mode,
+        AppearanceMode::System | AppearanceMode::BackgroundImage => system_mode,
         AppearanceMode::Light => ThemeMode::Light,
         AppearanceMode::Dark => ThemeMode::Dark,
     }

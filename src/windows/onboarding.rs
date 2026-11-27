@@ -1146,7 +1146,7 @@ impl OnboardingView {
                 AppearanceMode::Dark => {
                     crate::windows::settings::theme_thumbnail(dark).into_any_element()
                 }
-                AppearanceMode::System => div()
+                AppearanceMode::System | AppearanceMode::BackgroundImage => div()
                     .size_full()
                     .relative()
                     .child(crate::windows::settings::theme_thumbnail(light))

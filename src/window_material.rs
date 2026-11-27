@@ -17,6 +17,7 @@ use crate::{
         os_version::{self, WindowsVersion},
         window as platform_window,
     },
+    ui::theme::BackgroundPalette,
 };
 
 /// `appearance.background_image_blur` 非有限值时的兜底。
@@ -29,6 +30,8 @@ struct WindowMaterialRuntime {
     base_colors: [ThemeColor; 2],
     windows: HashMap<WindowId, AnyWindowHandle>,
     background_image: Option<Arc<RenderImage>>,
+    background_palette: Option<BackgroundPalette>,
+    background_generation: u64,
 }
 
 impl Global for WindowMaterialRuntime {}
@@ -45,10 +48,16 @@ pub(crate) fn install(cx: &mut App) {
         .flatten()
         .as_deref()
         .and_then(load_background_image);
+    let (background_image, background_palette) = match background_image {
+        Some((image, palette)) => (Some(image), palette),
+        None => (None, None),
+    };
     cx.set_global(WindowMaterialRuntime {
         base_colors: [ThemeColor::default(); 2],
         windows: HashMap::new(),
         background_image,
+        background_palette,
+        background_generation: 0,
     });
     cx.on_window_closed(|cx, window_id| {
         cx.update_global::<WindowMaterialRuntime, _>(|runtime, _| {
@@ -142,7 +151,7 @@ pub(crate) fn background_element(_window: &Window, cx: &App) -> gpui::AnyElement
 }
 
 /// 窗口材质背景层；`tint` 指定主遮罩的色相（如便签颜色），为空时使用主题背景色。
-/// 遮罩透明度始终跟随全局材质不透明度。
+/// 遮罩透明度跟随全局材质不透明度。
 pub(crate) fn tinted_background_element(tint: Option<Hsla>, cx: &App) -> gpui::AnyElement {
     let background = backdrop_element(cx);
     let appearance = crate::config_runtime::appearance_config(cx);
@@ -221,7 +230,9 @@ pub(crate) fn uses_custom_image_background(cx: &App) -> bool {
         })
 }
 
-fn load_background_image(path: &std::path::Path) -> Option<Arc<RenderImage>> {
+fn load_background_image(
+    path: &std::path::Path,
+) -> Option<(Arc<RenderImage>, Option<BackgroundPalette>)> {
     // 以文件内容为准识别格式，避免图片扩展名与真实格式不一致时加载失败。
     let reader =
         match image::ImageReader::open(path).and_then(|reader| reader.with_guessed_format()) {
@@ -252,10 +263,18 @@ fn load_background_image(path: &std::path::Path) -> Option<Arc<RenderImage>> {
     } else {
         image
     };
+    let palette = BackgroundPalette::from_image(&image);
     for pixel in image.pixels_mut() {
         pixel.0.swap(0, 2);
     }
-    Some(Arc::new(RenderImage::new(vec![image::Frame::new(image)])))
+    Some((
+        Arc::new(RenderImage::new(vec![image::Frame::new(image)])),
+        palette,
+    ))
+}
+
+pub(crate) fn background_palette(cx: &App) -> Option<BackgroundPalette> {
+    cx.read_global::<WindowMaterialRuntime, _>(|runtime, _| runtime.background_palette)
 }
 
 pub(crate) fn refresh_background_image(cx: &mut App) {
@@ -265,14 +284,37 @@ pub(crate) fn refresh_background_image(cx: &mut App) {
     if configured_path.as_ref().is_some_and(|path| !path.is_file()) {
         tracing::warn!("背景图片文件不存在，已使用纯色背景");
     }
-    let image = configured_path
-        .filter(|path| path.is_file())
-        .as_deref()
-        .and_then(load_background_image);
-    cx.update_global::<WindowMaterialRuntime, _>(|runtime, _| {
-        runtime.background_image = image;
+    let generation = cx.update_global::<WindowMaterialRuntime, _>(|runtime, _| {
+        runtime.background_generation = runtime.background_generation.wrapping_add(1);
+        runtime.background_image = None;
+        runtime.background_palette = None;
+        runtime.background_generation
     });
-    cx.refresh_windows();
+    let task = cx.background_executor().spawn(async move {
+        configured_path
+            .filter(|path| path.is_file())
+            .as_deref()
+            .and_then(load_background_image)
+    });
+    cx.spawn(async move |cx| {
+        let result = task.await;
+        cx.update(|cx| {
+            let applied = cx.update_global::<WindowMaterialRuntime, _>(|runtime, _| {
+                if runtime.background_generation != generation {
+                    return false;
+                }
+                if let Some((image, palette)) = result {
+                    runtime.background_image = Some(image);
+                    runtime.background_palette = palette;
+                }
+                true
+            });
+            if applied {
+                crate::ui::theme::apply_appearance_from_config(cx);
+            }
+        });
+    })
+    .detach();
 }
 
 pub(crate) fn register_window(window: &Window, cx: &mut App) {

@@ -820,6 +820,12 @@ pub(crate) fn set_appearance_config(
         )
     });
     let material_changed = current.window_material != appearance.window_material;
+    if appearance.window_material == WindowMaterial::CustomImage
+        && appearance.background_image_path.is_some()
+        && (material_changed || current.background_image_path != appearance.background_image_path)
+    {
+        appearance.mode = crate::config::AppearanceMode::BackgroundImage;
+    }
     let mut appearance = appearance.normalized();
     if material_changed
         && current.window_material_opacity
@@ -844,10 +850,10 @@ pub(crate) fn set_appearance_config(
 
 fn apply_appearance_change(previous: &AppearanceConfig, current: &AppearanceConfig, cx: &mut App) {
     if appearance_requires_global_refresh(previous, current) {
-        crate::ui::theme::apply_appearance_from_config(cx);
         if background_image_needs_refresh(previous, current) {
             crate::window_material::refresh_background_image(cx);
         }
+        crate::ui::theme::apply_appearance_from_config(cx);
     } else if previous.preview_information != current.preview_information
         || previous.preview_scale_percent != current.preview_scale_percent
         || previous.editor_zoom_percent != current.editor_zoom_percent
@@ -1299,5 +1305,49 @@ mod tests {
         next.window_material = WindowMaterial::CustomImage;
 
         assert!(background_image_needs_refresh(&current, &next));
+    }
+
+    #[gpui::test]
+    fn setting_background_enables_its_palette_but_allows_manual_mode_changes(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::config::AppearanceMode;
+        let directory = tempdir().expect("应创建临时配置目录");
+        let path = directory.path().join("config.json");
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            super::ConfigRuntime::install(&path, cx);
+            crate::window_material::install(cx);
+            crate::ui::theme::install(cx);
+            let mut appearance = super::appearance_config(cx);
+            appearance.window_material = WindowMaterial::CustomImage;
+            appearance.background_image_path = Some("背景一.png".to_owned());
+            super::set_appearance_config(appearance, cx).expect("应保存背景图设置");
+            assert_eq!(
+                super::appearance_config(cx).mode,
+                AppearanceMode::BackgroundImage
+            );
+            for mode in [
+                AppearanceMode::System,
+                AppearanceMode::Light,
+                AppearanceMode::Dark,
+            ] {
+                let mut appearance = super::appearance_config(cx);
+                appearance.mode = mode;
+                super::set_appearance_config(appearance, cx).expect("应允许切换外观模式");
+                assert_eq!(super::appearance_config(cx).mode, mode);
+            }
+            let mut appearance = super::appearance_config(cx);
+            appearance.background_image_path = Some("背景二.png".to_owned());
+            super::set_appearance_config(appearance, cx).expect("应保存新的背景图");
+            assert_eq!(
+                super::appearance_config(cx).mode,
+                AppearanceMode::BackgroundImage
+            );
+            assert_eq!(
+                load_config(&path).appearance.mode,
+                AppearanceMode::BackgroundImage
+            );
+        });
     }
 }

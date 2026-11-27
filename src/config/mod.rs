@@ -1456,9 +1456,11 @@ pub enum AppearanceMode {
     System,
     Light,
     Dark,
+    BackgroundImage,
 }
 
 impl AppearanceMode {
+    /// 常驻模式；背景图色彩只在已设置背景图时临时展示。
     pub const ALL: [Self; 3] = [Self::System, Self::Light, Self::Dark];
 
     pub const fn code(self) -> &'static str {
@@ -1466,6 +1468,7 @@ impl AppearanceMode {
             Self::System => "system",
             Self::Light => "light",
             Self::Dark => "dark",
+            Self::BackgroundImage => "backgroundimage",
         }
     }
 }
@@ -2023,6 +2026,12 @@ impl AppearanceConfig {
         self.background_image_path = self
             .background_image_path
             .and_then(|path| (!path.trim().is_empty()).then(|| path.trim().to_owned()));
+        if self.mode == AppearanceMode::BackgroundImage
+            && (self.window_material != WindowMaterial::CustomImage
+                || self.background_image_path.is_none())
+        {
+            self.mode = AppearanceMode::System;
+        }
         self.background_image_blur = if self.background_image_blur.is_finite() {
             self.background_image_blur
                 .clamp(BACKGROUND_IMAGE_BLUR_MIN, BACKGROUND_IMAGE_BLUR_MAX)
@@ -2232,6 +2241,24 @@ mod tests {
         let config = config.normalized();
 
         assert_eq!(config.appearance.adaptive_max_lines, ADAPTIVE_MAX_LINES_MAX);
+    }
+
+    #[test]
+    fn background_image_mode_roundtrips_and_requires_an_image_material() {
+        let mut appearance = AppearanceConfig {
+            mode: AppearanceMode::BackgroundImage,
+            window_material: WindowMaterial::CustomImage,
+            background_image_path: Some("背景.png".to_owned()),
+            ..AppearanceConfig::default()
+        };
+        let encoded = serde_json::to_string(&appearance).expect("应序列化外观配置");
+        let decoded: AppearanceConfig = serde_json::from_str(&encoded).expect("应恢复外观配置");
+        assert_eq!(decoded.normalized(), appearance);
+        appearance.window_material = WindowMaterial::Disabled;
+        assert_eq!(appearance.clone().normalized().mode, AppearanceMode::System);
+        appearance.window_material = WindowMaterial::CustomImage;
+        appearance.background_image_path = None;
+        assert_eq!(appearance.normalized().mode, AppearanceMode::System);
     }
 
     #[test]

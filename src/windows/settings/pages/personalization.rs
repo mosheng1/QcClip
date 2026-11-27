@@ -149,30 +149,53 @@ impl SettingsWindowView {
             selected_theme_preview(&theme_options, ThemeMode::Light, &appearance.light_theme);
         let dark_preview =
             selected_theme_preview(&theme_options, ThemeMode::Dark, &appearance.dark_theme);
-        let mode_cards = h_flex()
-            .w_full()
-            .gap_3()
-            .children(AppearanceMode::ALL.into_iter().map(|mode| {
-                let view = view.clone();
-                let save_error = save_error.clone();
-                appearance_mode_card(
-                    mode,
-                    translator.translate(appearance_mode_label_key(mode)),
-                    mode == appearance.mode,
-                    light_preview,
-                    dark_preview,
-                    theme,
-                    move |cx| {
-                        persist_appearance_change(
-                            view.clone(),
-                            "外观模式",
-                            move |appearance| appearance.mode = mode,
-                            save_error.clone(),
-                            cx,
-                        );
-                    },
-                )
-            }));
+        let background_theme = appearance.mode == AppearanceMode::BackgroundImage;
+        let background_available = appearance.window_material == WindowMaterial::CustomImage
+            && appearance.background_image_path.is_some();
+        let background_preview = crate::window_material::background_palette(cx)
+            .map(|palette| {
+                let colors = palette.colors();
+                ThemePreviewColors {
+                    background: colors.background,
+                    title_bar: colors.title_bar,
+                    foreground: colors.foreground,
+                    muted_foreground: colors.muted_foreground,
+                    primary: colors.primary,
+                    border: colors.border,
+                    list_active: colors.list_active,
+                }
+            })
+            .unwrap_or(light_preview);
+        let mode_cards = h_flex().w_full().gap_3().children(
+            AppearanceMode::ALL
+                .into_iter()
+                .chain(background_available.then_some(AppearanceMode::BackgroundImage))
+                .map(|mode| {
+                    let view = view.clone();
+                    let save_error = save_error.clone();
+                    appearance_mode_card(
+                        mode,
+                        translator.translate(appearance_mode_label_key(mode)),
+                        mode == appearance.mode,
+                        if mode == AppearanceMode::BackgroundImage {
+                            background_preview
+                        } else {
+                            light_preview
+                        },
+                        dark_preview,
+                        theme,
+                        move |cx| {
+                            persist_appearance_change(
+                                view.clone(),
+                                "外观模式",
+                                move |appearance| appearance.mode = mode,
+                                save_error.clone(),
+                                cx,
+                            );
+                        },
+                    )
+                }),
+        );
 
         let horizontal_list = config_runtime::clipboard_config(cx)
             .window_position
@@ -413,6 +436,9 @@ impl SettingsWindowView {
             let view = view.clone();
             let save_error = save_error.clone();
             Rc::new(move |mode, value, cx| {
+                if config_runtime::appearance_config(cx).mode == AppearanceMode::BackgroundImage {
+                    return;
+                }
                 let value = value.to_string();
                 if mode.is_dark() {
                     persist_appearance_change(
@@ -443,6 +469,7 @@ impl SettingsWindowView {
             &external_badge,
             theme,
             swatch_hover_animation,
+            background_theme,
             &on_theme_select,
         );
         let dark_swatches = theme_swatches(
@@ -452,6 +479,7 @@ impl SettingsWindowView {
             &external_badge,
             theme,
             swatch_hover_animation,
+            background_theme,
             &on_theme_select,
         );
 
@@ -480,7 +508,11 @@ impl SettingsWindowView {
                 settings_block(
                     theme,
                     translator.translate("settings.personalization.appearance_mode"),
-                    translator.translate("settings.personalization.appearance_mode_description"),
+                    translator.translate(if background_theme {
+                        "settings.personalization.background_image_theme_description"
+                    } else {
+                        "settings.personalization.appearance_mode_description"
+                    }),
                     mode_cards,
                 ),
             ))
@@ -725,9 +757,18 @@ fn choose_background_image(view: Entity<SettingsWindowView>, save_error: String,
         let path = file.path().to_string_lossy().into_owned();
         cx.update(|cx| {
             let mut appearance = config_runtime::appearance_config(cx);
+            let refresh_image = appearance.background_image_path.as_ref() == Some(&path)
+                && appearance.window_material == WindowMaterial::CustomImage;
+            appearance.window_material = WindowMaterial::CustomImage;
             appearance.background_image_path = Some(path);
+            appearance.mode = AppearanceMode::BackgroundImage;
             let error_message = match config_runtime::set_appearance_config(appearance, cx) {
-                Ok(_) => None,
+                Ok(_) => {
+                    if refresh_image {
+                        crate::window_material::refresh_background_image(cx);
+                    }
+                    None
+                }
                 Err(error) => {
                     tracing::error!("保存背景图设置失败：{error}");
                     Some(save_error)
@@ -940,6 +981,7 @@ fn appearance_mode_card(
     let preview = match mode {
         AppearanceMode::Light => theme_thumbnail(light).into_any_element(),
         AppearanceMode::Dark => theme_thumbnail(dark).into_any_element(),
+        AppearanceMode::BackgroundImage => theme_thumbnail(light).into_any_element(),
         // 跟随系统：浅色窗口的右半边替换为深色窗口的右半边，拼成一个完整窗口。
         AppearanceMode::System => div()
             .size_full()
@@ -1021,6 +1063,7 @@ fn theme_swatches(
     external_badge: &str,
     theme: ThemeColor,
     hover_animation: bool,
+    disabled: bool,
     on_select: &Rc<dyn Fn(ThemeMode, SharedString, &mut App)>,
 ) -> AnyElement {
     let options = themes
@@ -1036,6 +1079,7 @@ fn theme_swatches(
 
     h_flex()
         .max_w_full()
+        .when(disabled, |this| this.opacity(0.4))
         .gap_3()
         .items_center()
         .when_some(selected_label, |this, label| {
@@ -1083,15 +1127,19 @@ fn theme_swatches(
                         } else {
                             gpui::transparent_black()
                         })
-                        .cursor_pointer()
-                        .when(hover_animation, |this| {
+                        .when(!disabled, |this| this.cursor_pointer())
+                        .when(hover_animation && !disabled, |this| {
                             this.transitions(|transitions| transitions.p(hover_motion.clone()))
                         })
-                        .when(!selected, |this| this.hover(|style| style.p(px(1.0))))
+                        .when(!selected && !disabled, |this| {
+                            this.hover(|style| style.p(px(1.0)))
+                        })
                         .managed_tooltip(move |window, cx| {
                             Tooltip::new(tooltip.clone()).build(window, cx)
                         })
-                        .on_click(move |_, _, cx| on_select(mode, value.clone(), cx))
+                        .when(!disabled, |this| {
+                            this.on_click(move |_, _, cx| on_select(mode, value.clone(), cx))
+                        })
                         .child(div().size_full().rounded(ui_rem(6.0)).bg(colors.primary))
                 })),
         )
@@ -1103,6 +1151,7 @@ pub(crate) const fn appearance_mode_label_key(mode: AppearanceMode) -> &'static 
         AppearanceMode::System => "settings.personalization.mode.system",
         AppearanceMode::Light => "settings.personalization.mode.light",
         AppearanceMode::Dark => "settings.personalization.mode.dark",
+        AppearanceMode::BackgroundImage => "settings.personalization.mode.background_image",
     }
 }
 
