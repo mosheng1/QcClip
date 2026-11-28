@@ -702,6 +702,8 @@
   "settings.general.tray_action.toggle_global_hotkeys": "Toggle global shortcuts",
   "settings.general.tray_action.toggle_formatted_paste": "Toggle formatted paste",
   "notification.startup.success": "QcClip started successfully",
+  "notification.auto_start.failed.title": "Failed to sync launch-at-login settings",
+  "notification.auto_start.failed.detail": "Launch-at-login settings could not be fully applied. Check system permissions. Details: {error}",
   "notification.clipboard_monitor.enabled.title": "Clipboard monitoring enabled",
   "notification.clipboard_monitor.enabled.detail": "New clipboard content will be received.",
   "notification.clipboard_monitor.disabled.title": "Clipboard monitoring disabled",

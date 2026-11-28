@@ -157,6 +157,12 @@ impl ConfigRuntime {
                 config.general.run_as_administrator,
             ) {
                 tracing::error!("同步开机自启设置失败：{error}");
+                // 导入配置后会清理旧通知，待清理完成再显示同步失败。
+                cx.defer(move |cx| {
+                    crate::windows::notification::NotificationService::show_auto_start_error(
+                        error, cx,
+                    );
+                });
             }
         }
         if previous.general.hide_tray_icon != config.general.hide_tray_icon {

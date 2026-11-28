@@ -85,7 +85,7 @@ impl SettingsWindowView {
                     .err()
                     .map(|error| {
                         tracing::error!("保存开机自启设置失败：{error}");
-                        launch_save_error.clone()
+                        format!("{launch_save_error}\n{error}")
                     });
                 launch_view.update(cx, |view, cx| {
                     view.language_error = notify_settings_error(SettingsPage::General, error, cx);

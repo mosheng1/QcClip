@@ -162,10 +162,12 @@ pub fn run() {
                     Err(error) => tracing::error!("读取管理员权限状态失败：{error}"),
                 }
             }
-            if let Err(error) = crate::platform::auto_start::set_enabled(
+            let auto_start_error = crate::platform::auto_start::set_enabled(
                 crate::config_runtime::launch_at_login(cx),
                 crate::config_runtime::run_as_administrator(cx),
-            ) {
+            )
+            .err();
+            if let Some(error) = &auto_start_error {
                 tracing::error!("同步开机自启设置失败：{error}");
             }
             DataManagementService::install(
@@ -395,6 +397,9 @@ pub fn run() {
             #[cfg(target_os = "windows")]
             crate::services::system::check_win_v_on_startup(cx);
             crate::windows::notification::NotificationService::show_startup(cx);
+            if let Some(error) = auto_start_error {
+                crate::windows::notification::NotificationService::show_auto_start_error(error, cx);
+            }
             if let Some(error) = &import_error {
                 let translator = crate::i18n::translator(cx);
                 crate::windows::notification::NotificationService::show_message(

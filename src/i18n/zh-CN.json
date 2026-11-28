@@ -702,6 +702,8 @@
   "settings.general.tray_action.toggle_global_hotkeys": "切换全局快捷键监听",
   "settings.general.tray_action.toggle_formatted_paste": "切换格式粘贴",
   "notification.startup.success": "QcClip 启动成功",
+  "notification.auto_start.failed.title": "开机自启设置同步失败",
+  "notification.auto_start.failed.detail": "自启设置未能完整应用，请检查系统权限。详情：{error}",
   "notification.clipboard_monitor.enabled.title": "剪贴板监听已开启",
   "notification.clipboard_monitor.enabled.detail": "将继续接收新的剪贴板内容。",
   "notification.clipboard_monitor.disabled.title": "剪贴板监听已关闭",

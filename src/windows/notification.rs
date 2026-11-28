@@ -726,6 +726,19 @@ impl Render for NotificationWindow {
 }
 
 impl NotificationService {
+    pub(crate) fn show_auto_start_error(error: impl std::fmt::Display, cx: &mut App) {
+        let translator = crate::i18n::translator(cx);
+        Self::show_message(
+            translator.translate("notification.auto_start.failed.title"),
+            translator.translate_with_args(
+                "notification.auto_start.failed.detail",
+                &[("error", error.to_string())],
+            ),
+            NotificationLevel::Error,
+            cx,
+        );
+    }
+
     pub(crate) fn show_message(
         title: impl Into<String>,
         message: impl Into<String>,
